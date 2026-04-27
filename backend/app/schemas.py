@@ -185,7 +185,7 @@ class NetworkData(BaseModel):
 
 class NetworkCreate(BaseModel):
     pid: str
-    name: str = "Сеть"
+    name: str = "Network"
     background: str = "#07080b"
 
 

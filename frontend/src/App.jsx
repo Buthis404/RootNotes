@@ -150,8 +150,18 @@ export default function App() {
     return () => window.removeEventListener('rt:logout', onLogout);
   }, []);
 
-  const handleAuth = (user) => { setCurrentUser(user); setIsFirstRun(false); };
-  const handleLogout = () => { localStorage.removeItem('rt_token'); setCurrentUser(null); };
+  const handleAuth = (user) => {
+    setError(null);
+    setLoading(true);
+    setCurrentUser(user);
+    setIsFirstRun(false);
+  };
+  const handleLogout = () => {
+    localStorage.removeItem('rt_token');
+    setCurrentUser(null);
+    setError(null);
+    setLoading(true);
+  };
 
   const [tweaks, setTweaks] = useState(() => {
     try { return { ...TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem(TWEAKS_KEY) || '{}') }; } catch { return TWEAK_DEFAULTS; }
@@ -183,8 +193,15 @@ export default function App() {
 
   // ── Initial load ────────────────────────────────────────────────────
   useEffect(() => {
+    if (!currentUser) return;
+
+    let cancelled = false;
+    setError(null);
+    setLoading(true);
+
     Promise.all([api.getProjects(), api.getNotes(), api.getHosts(), api.getCreds(), api.getNetworks(), api.getFindings(), api.getObjectives(), api.getAttackPaths(), api.getAttackSteps(), api.getLoots(), api.getScopes()])
       .then(([p, n, h, c, nets, f, obj, aps, ass, lts, scs]) => {
+        if (cancelled) return;
         setProjects(p);
         setNotes(n);
         setHosts(h);
@@ -196,11 +213,19 @@ export default function App() {
         setAttackSteps(ass);
         setLoots(lts);
         setScopes(scs);
-        if (!selectedProject && p.length > 0) setSelectedProject(p[0].id);
+        setSelectedProject(prev => prev || p[0]?.id || '');
         setLoading(false);
       })
-      .catch(e => { setError(e.message); setLoading(false); });
-  }, []);
+      .catch(e => {
+        if (cancelled) return;
+        setError(e.message);
+        setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
 
   useEffect(() => {
     localStorage.setItem(TWEAKS_KEY, JSON.stringify(tweaks));

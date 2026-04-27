@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS creds (
 CREATE TABLE IF NOT EXISTS networks (
     id         TEXT PRIMARY KEY,
     pid        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL DEFAULT 'Сеть',
+    name       TEXT NOT NULL DEFAULT 'Network',
     background TEXT NOT NULL DEFAULT '#07080b',
     regions_json JSONB NOT NULL DEFAULT '[]',
     nodes_json JSONB NOT NULL DEFAULT '[]',

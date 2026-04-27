@@ -92,7 +92,7 @@ class Network(Base):
 
     id = Column(String, primary_key=True)  # UUID string
     pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    name = Column(String, nullable=False, default="Сеть")
+    name = Column(String, nullable=False, default="Network")
     background = Column(String, nullable=False, default="#07080b")
     regions_json = Column(JSONB, nullable=False, default=[])
     nodes_json = Column(JSONB, nullable=False, default=[])
