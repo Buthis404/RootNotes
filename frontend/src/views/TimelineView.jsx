@@ -1,0 +1,141 @@
+import { useState, useEffect, useCallback } from 'react';
+import Icon from '../components/Icon.jsx';
+import { api } from '../api.js';
+
+const ENTITY_META = {
+  note:    { icon: 'notes',   color: '#5b8af5', label: 'Note' },
+  host:    { icon: 'hosts',   color: '#c07af0', label: 'Host' },
+  cred:    { icon: 'creds',   color: '#39d353', label: 'Cred' },
+  finding: { icon: 'bug',     color: '#e8574a', label: 'Finding' },
+};
+
+const ACTION_META = {
+  create: { icon: 'plus',    color: '#39d353', label: 'Created' },
+  update: { icon: 'edit',    color: '#5b8af5', label: 'Updated' },
+  delete: { icon: 'trash',   color: '#cc2233', label: 'Deleted' },
+  status: { icon: 'target',  color: '#f09a3a', label: 'Status' },
+};
+
+function userColor(name) {
+  if (!name) return '#404550';
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) & 0xffffff;
+  return `hsl(${h % 360}, 55%, 52%)`;
+}
+
+function groupByDate(events) {
+  const groups = {};
+  for (const e of events) {
+    const date = (e.ts || '').slice(0, 10) || 'Unknown';
+    (groups[date] = groups[date] || []).push(e);
+  }
+  return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
+}
+
+export default function TimelineView({ selectedProject, accent }) {
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [filterEntity, setFilterEntity] = useState(null);
+
+  const load = useCallback(async () => {
+    if (!selectedProject) return;
+    setLoading(true);
+    try {
+      const data = await api.getTimeline(selectedProject, filterEntity);
+      setEvents(data);
+    } catch {}
+    setLoading(false);
+  }, [selectedProject, filterEntity]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = filterEntity ? events.filter(e => e.entity === filterEntity) : events;
+  const groups = groupByDate(filtered);
+
+  const entityCounts = {};
+  for (const e of events) entityCounts[e.entity] = (entityCounts[e.entity] || 0) + 1;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Toolbar */}
+      <div style={{ padding: '12px 24px', borderBottom: '1px solid #1a1c22', background: '#0a0c10', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', marginRight: 4 }}>Event feed</span>
+        <div style={{ display: 'flex', gap: 5, flex: 1 }}>
+          {Object.entries(ENTITY_META).map(([key, meta]) => {
+            const cnt = entityCounts[key] || 0;
+            const act = filterEntity === key;
+            return (
+              <button key={key} onClick={() => setFilterEntity(act ? null : key)}
+                style={{ background: act ? meta.color + '22' : 'transparent', border: `1px solid ${act ? meta.color : '#2a2d35'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', color: act ? meta.color : '#606570', display: 'flex', alignItems: 'center', gap: 5 }}>
+                <Icon name={meta.icon} size={10} color={act ? meta.color : '#606570'} />
+                {meta.label} {cnt > 0 && <span style={{ fontSize: 9, color: act ? meta.color : '#404550' }}>{cnt}</span>}
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={load}
+          style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', color: '#606570', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <Icon name="reset" size={11} color="#606570" /> Refresh
+        </button>
+        <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>{filtered.length} events</span>
+      </div>
+
+      {/* Events */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 24px' }}>
+        {loading && <div style={{ padding: 30, textAlign: 'center', color: '#404550', fontSize: 11 }}>Loading...</div>}
+        {!loading && filtered.length === 0 && (
+          <div style={{ padding: '60px 0', textAlign: 'center', color: '#303540', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <Icon name="clock" size={40} color="#2a2d35" />
+            <div style={{ fontSize: 13 }}>No events</div>
+            <div style={{ fontSize: 11, color: '#252830' }}>Events will appear as you work on the project</div>
+          </div>
+        )}
+        {groups.map(([date, evts]) => (
+          <div key={date}>
+            <div style={{ padding: '16px 0 8px', position: 'sticky', top: 0, background: '#08090b', zIndex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ height: 1, background: '#1a1c22', flex: 1 }} />
+                <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', padding: '2px 10px', background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 10 }}>
+                  {date === new Date().toISOString().slice(0, 10) ? 'Today' : date}
+                </span>
+                <div style={{ height: 1, background: '#1a1c22', flex: 1 }} />
+              </div>
+            </div>
+            {evts.map(evt => {
+              const em = ENTITY_META[evt.entity] || { icon: 'notes', color: '#808590', label: evt.entity };
+              const am = ACTION_META[evt.action] || { icon: 'bolt', color: '#808590' };
+              const uc = userColor(evt.username);
+              const time = (evt.ts || '').slice(11, 16);
+              return (
+                <div key={evt.id} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid #0e1016' }}>
+                  {/* Entity icon */}
+                  <div style={{ width: 32, height: 32, borderRadius: 8, background: em.color + '18', border: `1px solid ${em.color}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <Icon name={em.icon} size={14} color={em.color} />
+                  </div>
+                  {/* Content */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                      <span style={{ fontSize: 9, color: am.color, fontWeight: 700, fontFamily: 'JetBrains Mono', textTransform: 'uppercase', background: am.color + '18', padding: '1px 5px', borderRadius: 3 }}>{am.label || evt.action}</span>
+                      <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>{em.label}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: '#b0b5c2', lineHeight: 1.4 }}>{evt.label}</div>
+                  </div>
+                  {/* Right side */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                    <span style={{ fontSize: 10, color: '#303540', fontFamily: 'JetBrains Mono' }}>{time}</span>
+                    {evt.username && (
+                      <span title={evt.username}
+                        style={{ width: 20, height: 20, borderRadius: '50%', background: uc + '22', border: `1px solid ${uc}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: uc, fontFamily: 'JetBrains Mono' }}>
+                        {evt.username.slice(0, 2).toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
