@@ -21,19 +21,20 @@ import TimelineView from './views/TimelineView.jsx';
 import CheatsheetView from './views/CheatsheetView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
+import { hasAutoRoleSignals, inferNodeType, isAttackerHost } from './utils/hostMeta.js';
 
 const TWEAK_DEFAULTS = { accent: '#15bbb1', accentGreen: '#39d353', fontSize: 14 };
 const TWEAKS_KEY = 'rt_tweaks_v2'; // v2 to avoid stale key reset
 const statusColor = { active: '#39d353', paused: '#f09a3a', done: '#555' };
 
 // ── Small UI components ───────────────────────────────────────────────
-const NavTab = ({ tab, active, onClick, accent, badge }) => {
+const NavTab = ({ tab, active, onClick, accent, badge, expanded }) => {
   const [hov, setHov] = useState(false);
   return (
     <button onClick={onClick} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} title={tab.label}
-      style={{ width: '100%', padding: '14px 0', border: 'none', cursor: 'pointer', background: active ? `${accent}18` : hov ? '#ffffff08' : 'transparent', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, transition: 'all .15s', position: 'relative' }}>
+      style={{ width: '100%', padding: expanded ? '12px 14px' : '14px 0', border: 'none', cursor: 'pointer', background: active ? `${accent}18` : hov ? '#ffffff08' : 'transparent', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', display: 'flex', flexDirection: expanded ? 'row' : 'column', alignItems: 'center', justifyContent: expanded ? 'flex-start' : 'center', gap: expanded ? 10 : 6, transition: 'all .15s', position: 'relative' }}>
       <Icon name={tab.icon} size={20} color={active ? accent : hov ? '#9098a8' : '#404550'} />
-      <span style={{ fontSize: 9, color: active ? accent : hov ? '#9098a8' : '#404550', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', maxWidth: 56, textOverflow: 'ellipsis' }}>{tab.label}</span>
+      {expanded && <span style={{ fontSize: 10, color: active ? accent : hov ? '#9098a8' : '#606570', letterSpacing: '0.04em', textTransform: 'uppercase', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{tab.label}</span>}
       {badge > 0 && <span style={{ position: 'absolute', top: 10, right: 10, background: accent, color: '#fff', fontSize: 9, fontWeight: 700, borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{badge > 9 ? '9+' : badge}</span>}
     </button>
   );
@@ -45,7 +46,7 @@ const ProjectPicker = ({ projects, notes, hosts, creds, selected, onSelect, acce
     {projects.map(p => {
       const act = p.id === selected;
       const sc = statusColor[p.status] || '#555';
-      const pwned = hosts.filter(h => h.pid === p.id && (h.status === 'pwned' || h.status === 'owned')).length;
+      const pwned = hosts.filter(h => h.pid === p.id && !isAttackerHost(h) && (h.status === 'pwned' || h.status === 'owned')).length;
       return (
         <div key={p.id} onClick={() => onSelect(p.id)}
           style={{ padding: '10px 14px', cursor: 'pointer', background: act ? `${accent}18` : 'transparent', borderLeft: act ? `2px solid ${accent}` : '2px solid transparent', transition: 'all .12s' }}
@@ -167,6 +168,9 @@ export default function App() {
     try { return { ...TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem(TWEAKS_KEY) || '{}') }; } catch { return TWEAK_DEFAULTS; }
   });
   const [showTweaks, setShowTweaks] = useState(false);
+  const [navExpanded, setNavExpanded] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('rt_nav_expanded') || 'false'); } catch { return false; }
+  });
   const [tab, setTab] = useState(() => localStorage.getItem('rt_tab') || 'projects');
   const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('rt_project') || '');
 
@@ -181,6 +185,7 @@ export default function App() {
   const [attackSteps, setAttackSteps] = useState([]);
   const [loots, setLoots] = useState([]);
   const [scopes, setScopes] = useState([]);
+  const [hostActivities, setHostActivities] = useState([]);
   const [showSearch, setShowSearch] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -199,8 +204,8 @@ export default function App() {
     setError(null);
     setLoading(true);
 
-    Promise.all([api.getProjects(), api.getNotes(), api.getHosts(), api.getCreds(), api.getNetworks(), api.getFindings(), api.getObjectives(), api.getAttackPaths(), api.getAttackSteps(), api.getLoots(), api.getScopes()])
-      .then(([p, n, h, c, nets, f, obj, aps, ass, lts, scs]) => {
+    Promise.all([api.getProjects(), api.getNotes(), api.getHosts(), api.getCreds(), api.getNetworks(), api.getFindings(), api.getObjectives(), api.getAttackPaths(), api.getAttackSteps(), api.getLoots(), api.getScopes(), api.getHostActivities()])
+      .then(([p, n, h, c, nets, f, obj, aps, ass, lts, scs, acts]) => {
         if (cancelled) return;
         setProjects(p);
         setNotes(n);
@@ -213,6 +218,7 @@ export default function App() {
         setAttackSteps(ass);
         setLoots(lts);
         setScopes(scs);
+        setHostActivities(acts);
         setSelectedProject(prev => prev || p[0]?.id || '');
         setLoading(false);
       })
@@ -236,6 +242,7 @@ export default function App() {
     if (link) link.href = `data:image/svg+xml,${svg}`;
   }, [tweaks]);
   useEffect(() => { localStorage.setItem('rt_tab', tab); }, [tab]);
+  useEffect(() => { localStorage.setItem('rt_nav_expanded', JSON.stringify(navExpanded)); }, [navExpanded]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -331,6 +338,11 @@ export default function App() {
       if (action === 'update') setScopes(prev => prev.map(x => x.id === data.id ? data : x));
       if (action === 'delete') setScopes(prev => prev.filter(x => x.id !== data.id));
     }
+    if (entity === 'host_activity') {
+      if (action === 'create') setHostActivities(prev => prev.some(x => x.id === data.id) ? prev : [data, ...prev]);
+      if (action === 'update') setHostActivities(prev => prev.map(x => x.id === data.id ? data : x));
+      if (action === 'delete') setHostActivities(prev => prev.filter(x => x.id !== data.id));
+    }
     if (entity === 'project') {
       if (action === 'update') setProjects(prev => prev.map(x => x.id === data.id ? data : x));
       if (action === 'delete') {
@@ -339,6 +351,7 @@ export default function App() {
         setHosts(prev => prev.filter(x => x.pid !== data.id));
         setCreds(prev => prev.filter(x => x.pid !== data.id));
         setNetworks(prev => prev.filter(x => x.pid !== data.id));
+        setHostActivities(prev => prev.filter(x => x.pid !== data.id));
       }
     }
   }, []);
@@ -367,6 +380,7 @@ export default function App() {
     setHosts(prev => prev.filter(x => x.pid !== id));
     setCreds(prev => prev.filter(x => x.pid !== id));
     setNetworks(prev => prev.filter(n => n.pid !== id));
+    setHostActivities(prev => prev.filter(x => x.pid !== id));
   };
 
   // ── Loot CRUD ───────────────────────────────────────────────────────
@@ -395,6 +409,21 @@ export default function App() {
   const deleteScope = async (id) => {
     await api.deleteScope(id);
     setScopes(prev => prev.filter(x => x.id !== id));
+  };
+
+  const addHostActivity = async (data) => {
+    const item = await api.createHostActivity(data);
+    setHostActivities(prev => prev.some(x => x.id === item.id) ? prev : [item, ...prev]);
+    return item;
+  };
+  const updateHostActivity = async (id, patch) => {
+    const item = await api.updateHostActivity(id, patch);
+    setHostActivities(prev => prev.map(x => x.id === id ? item : x));
+    return item;
+  };
+  const deleteHostActivity = async (id) => {
+    await api.deleteHostActivity(id);
+    setHostActivities(prev => prev.filter(x => x.id !== id));
   };
 
   // ── Attack Paths CRUD ───────────────────────────────────────────────
@@ -477,6 +506,7 @@ export default function App() {
   const addHost = async (data) => {
     const h = await api.createHost(data);
     setHosts(prev => prev.some(x => x.id === h.id) ? prev : [...prev, h]);
+    return h;
   };
   const updateHost = async (id, patch) => {
     const current = hosts.find(x => x.id === id);
@@ -485,15 +515,19 @@ export default function App() {
     setNetworks(prev => prev.map(net => {
       let changed = false;
       const nodes = (net.nodes || []).map(node => {
-        const match = node.ip === (current?.ip || h.ip) || node.ip === h.ip;
+        const nodeIps = new Set((node.ips && node.ips.length > 0 ? node.ips : [node.ip]).filter(Boolean));
+        const hostIps = new Set(([current?.ip, h.ip, ...(current?.ips || []), ...(h.ips || [])]).filter(Boolean));
+        const match = node.host_id ? node.host_id === h.id : [...hostIps].some(ip => nodeIps.has(ip));
         if (!match) return node;
-        const next = { ...node, ip: h.ip, status: h.status };
+        const next = { ...node, host_id: h.id, ip: h.ip, ips: h.ips || [], status: h.status, ports: h.ports || [], notes: h.notes || '', role: h.role, is_attacker: h.is_attacker };
         if ((node.label === current?.hostname || node.label === current?.ip || node.label === h.ip) && h.hostname) next.label = h.hostname;
-        changed = changed || next.ip !== node.ip || next.status !== node.status || next.label !== node.label;
+        if (hasAutoRoleSignals(h)) next.type = inferNodeType(h);
+        changed = changed || next.ip !== node.ip || next.status !== node.status || next.label !== node.label || next.type !== node.type || next.notes !== node.notes;
         return next;
       });
       return changed ? { ...net, nodes } : net;
     }));
+    return h;
   };
   const deleteHost = async (id) => {
     await api.deleteHost(id);
@@ -558,21 +592,31 @@ export default function App() {
 
   // ── After import: WS will push upserts, but also refresh immediately ─
   const handleImported = async () => {
-    const [h, c] = await Promise.all([api.getHosts(), api.getCreds()]);
+    const [h, c, acts] = await Promise.all([api.getHosts(), api.getCreds(), api.getHostActivities()]);
     setHosts(h);
     setCreds(c);
+    setHostActivities(acts);
   };
 
   useEffect(() => {
     setNetworks(prev => prev.map(net => {
       let changed = false;
       const nodes = (net.nodes || []).map(node => {
-        const host = hosts.find(h => h.pid === net.pid && h.ip === node.ip);
+        const host = hosts.find(h => h.pid === net.pid && (node.host_id ? h.id === node.host_id : h.ip === node.ip));
         if (!host) return node;
         const next = { ...node };
         if (next.status !== host.status) { next.status = host.status; changed = true; }
+        if (next.notes !== (host.notes || '')) { next.notes = host.notes || ''; changed = true; }
+        const hostIps = host.ips && host.ips.length > 0 ? host.ips : (host.ip ? [host.ip] : []);
+        if (JSON.stringify(next.ips || []) !== JSON.stringify(hostIps)) { next.ips = hostIps; changed = true; }
+        if (JSON.stringify(next.ports || []) !== JSON.stringify(host.ports || [])) { next.ports = host.ports || []; changed = true; }
+        if (next.host_id !== host.id) { next.host_id = host.id; changed = true; }
         if ((next.label === node.ip || next.label === host.ip || next.label === host.hostname || !next.label) && host.hostname) {
           if (next.label !== host.hostname) { next.label = host.hostname; changed = true; }
+        }
+        if (hasAutoRoleSignals(host)) {
+          const derivedType = inferNodeType(host);
+          if (next.type !== derivedType) { next.type = derivedType; changed = true; }
         }
         return next;
       });
@@ -582,7 +626,7 @@ export default function App() {
 
   const badges = {
     notes:      notes.filter(n => n.pid === selectedProject && n.starred).length,
-    hosts:      hosts.filter(h => h.pid === selectedProject && (h.status === 'pwned' || h.status === 'owned')).length,
+    hosts:      hosts.filter(h => h.pid === selectedProject && !isAttackerHost(h) && (h.status === 'pwned' || h.status === 'owned')).length,
     creds:      creds.filter(c => c.pid === selectedProject && c.cracked).length,
     findings:   findings.filter(f => f.pid === selectedProject && (f.severity === 'critical' || f.severity === 'high') && f.status === 'open').length,
     objectives: objectives.filter(o => o.pid === selectedProject && (o.status === 'captured' || o.status === 'in_progress')).length,
@@ -618,45 +662,55 @@ export default function App() {
   return (
     <div style={{ display: 'flex', width: '100%', height: '100%', fontSize: fs, background: '#08090b' }}>
       {/* Nav bar */}
-      <div style={{ width: 64, background: '#0a0b0f', borderRight: '1px solid #1a1c22', display: 'flex', flexDirection: 'column', flexShrink: 0, zIndex: 10 }}>
-        <div style={{ padding: '14px 0 10px', display: 'flex', justifyContent: 'center', borderBottom: '1px solid #151720' }}>
-          <div style={{ width: 32, height: 32, background: `${acc}20`, border: `1px solid ${acc}55`, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ width: navExpanded ? 178 : 64, background: '#0a0b0f', borderRight: '1px solid #1a1c22', display: 'flex', flexDirection: 'column', flexShrink: 0, zIndex: 10, transition: 'width .18s' }}>
+        <div style={{ padding: navExpanded ? '14px 12px 10px' : '14px 0 10px', display: 'flex', justifyContent: navExpanded ? 'flex-start' : 'center', alignItems: 'center', borderBottom: '1px solid #151720', gap: 8, position: 'relative' }}>
+          <div style={{ width: 32, height: 32, background: `${acc}20`, border: `1px solid ${acc}55`, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <Icon name="shield" size={16} color={acc} />
           </div>
+          {navExpanded && <span style={{ flex: 1, fontSize: 13, color: '#e0e4ec', fontFamily: 'Space Grotesk', fontWeight: 700 }}>RootNotes</span>}
         </div>
         <div style={{ flex: 1, overflowY: 'auto', paddingTop: 4 }}>
-          {TABS.map(t => <NavTab key={t.id} tab={t} active={tab === t.id} onClick={() => setTab(t.id)} accent={acc} badge={badges[t.id]} />)}
+          {TABS.map(t => <NavTab key={t.id} tab={t} active={tab === t.id} onClick={() => setTab(t.id)} accent={acc} badge={badges[t.id]} expanded={navExpanded} />)}
           {currentUser?.role === 'admin' && (
-            <NavTab tab={ADMIN_TAB} active={tab === 'admin'} onClick={() => setTab('admin')} accent="#cc2233" />
+            <NavTab tab={ADMIN_TAB} active={tab === 'admin'} onClick={() => setTab('admin')} accent="#cc2233" expanded={navExpanded} />
           )}
         </div>
         <div style={{ borderTop: '1px solid #151720', paddingBottom: 8 }}>
           {/* Search button */}
           <button onClick={() => setShowSearch(v => !v)} title="Search (Ctrl+K)"
-            style={{ width: '100%', padding: '10px 0', border: 'none', cursor: 'pointer', background: showSearch ? `${acc}18` : 'transparent', borderLeft: showSearch ? `2px solid ${acc}` : '2px solid transparent', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, transition: 'all .15s' }}
+            style={{ width: '100%', padding: navExpanded ? '10px 14px' : '10px 0', border: 'none', cursor: 'pointer', background: showSearch ? `${acc}18` : 'transparent', borderLeft: showSearch ? `2px solid ${acc}` : '2px solid transparent', display: 'flex', flexDirection: navExpanded ? 'row' : 'column', alignItems: 'center', justifyContent: navExpanded ? 'flex-start' : 'center', gap: 8, transition: 'all .15s' }}
             onMouseEnter={e => { if (!showSearch) e.currentTarget.style.background = '#ffffff08'; }}
             onMouseLeave={e => { if (!showSearch) e.currentTarget.style.background = 'transparent'; }}>
             <Icon name="search" size={18} color={showSearch ? acc : '#404550'} />
-            <span style={{ fontSize: 8, color: showSearch ? acc : '#404550', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, fontFamily: 'JetBrains Mono' }}>Ctrl+K</span>
+            {navExpanded && <span style={{ fontSize: 9, color: showSearch ? acc : '#606570', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, fontFamily: 'JetBrains Mono' }}>Search</span>}
+            {!navExpanded && <span style={{ fontSize: 8, color: showSearch ? acc : '#404550', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, fontFamily: 'JetBrains Mono' }}>Ctrl+K</span>}
           </button>
           {/* Current user + logout */}
-          <div style={{ padding: '10px 0 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+          <div style={{ padding: navExpanded ? '10px 12px 6px' : '10px 0 6px', display: 'flex', flexDirection: navExpanded ? 'row' : 'column', alignItems: 'center', gap: 8 }}>
             <div style={{ width: 28, height: 28, borderRadius: '50%', background: `${acc}22`, border: `1px solid ${acc}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: acc, fontFamily: 'JetBrains Mono' }}>
               {currentUser?.username?.slice(0, 2).toUpperCase()}
             </div>
+            {navExpanded && <span style={{ flex: 1, minWidth: 0, fontSize: 10, color: '#808590', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentUser?.username}</span>}
             <button onClick={handleLogout} title="Sign out"
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#303540', fontSize: 9, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 3 }}
               onMouseEnter={e => e.currentTarget.style.color = '#cc2233'}
               onMouseLeave={e => e.currentTarget.style.color = '#303540'}>
-              <Icon name="close" size={9} color="currentColor" /> logout
+              <Icon name="close" size={9} color="currentColor" /> {navExpanded ? 'logout' : ''}
             </button>
           </div>
           <button onClick={() => setShowTweaks(v => !v)} title="Tweaks"
-            style={{ width: '100%', padding: '14px 0', border: 'none', cursor: 'pointer', background: showTweaks ? `${acc}18` : 'transparent', borderLeft: showTweaks ? `2px solid ${acc}` : '2px solid transparent', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, transition: 'all .15s' }}
+            style={{ width: '100%', padding: navExpanded ? '14px 14px' : '14px 0', border: 'none', cursor: 'pointer', background: showTweaks ? `${acc}18` : 'transparent', borderLeft: showTweaks ? `2px solid ${acc}` : '2px solid transparent', display: 'flex', flexDirection: navExpanded ? 'row' : 'column', alignItems: 'center', justifyContent: navExpanded ? 'flex-start' : 'center', gap: 8, transition: 'all .15s' }}
             onMouseEnter={e => { if (!showTweaks) e.currentTarget.style.background = '#ffffff08'; }}
             onMouseLeave={e => { if (!showTweaks) e.currentTarget.style.background = 'transparent'; }}>
             <Icon name="settings" size={20} color={showTweaks ? acc : '#404550'} />
-            <span style={{ fontSize: 9, color: showTweaks ? acc : '#404550', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600 }}>Tweaks</span>
+            {navExpanded && <span style={{ fontSize: 9, color: showTweaks ? acc : '#606570', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600 }}>Tweaks</span>}
+          </button>
+          <button onClick={() => setNavExpanded(v => !v)} title={navExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
+            style={{ width: '100%', padding: navExpanded ? '14px 14px' : '14px 0', border: 'none', cursor: 'pointer', background: 'transparent', borderLeft: '2px solid transparent', display: 'flex', flexDirection: navExpanded ? 'row' : 'column', alignItems: 'center', justifyContent: navExpanded ? 'flex-start' : 'center', gap: 8, transition: 'all .15s', color: '#505560' }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#ffffff08'; e.currentTarget.style.color = '#9098a8'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#505560'; }}>
+            <Icon name="chevron" size={20} color="currentColor" style={{ transform: navExpanded ? 'rotate(90deg)' : 'rotate(-90deg)' }} />
+            {navExpanded && <span style={{ fontSize: 9, color: 'currentColor', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600 }}>Collapse</span>}
           </button>
         </div>
       </div>
@@ -669,11 +723,11 @@ export default function App() {
             <div style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk' }}>{TABS.find(t => t.id === tab)?.label}</div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto' }}>
-            <ProjectPicker projects={projects} notes={notes} hosts={hosts} creds={creds} selected={selectedProject} onSelect={setSelectedProject} accent={acc} />
+            <ProjectPicker projects={projects} notes={notes} hosts={hosts.filter(h => !isAttackerHost(h))} creds={creds} selected={selectedProject} onSelect={setSelectedProject} accent={acc} />
           </div>
           <div style={{ borderTop: '1px solid #151720', padding: '12px 14px' }}>
             {[['notes', notes.filter(n => n.pid === selectedProject).length, 'notes'],
-              ['hosts', hosts.filter(h => h.pid === selectedProject).length, 'hosts'],
+              ['hosts', hosts.filter(h => h.pid === selectedProject && !isAttackerHost(h)).length, 'hosts'],
               ['creds', creds.filter(c => c.pid === selectedProject).length, 'creds']
             ].map(([icon, val, label]) => (
               <div key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -717,8 +771,8 @@ export default function App() {
             onDelete={deleteProject}
             onImport={pid => setImportProjectId(pid)}
             onProjectImported={async (result) => {
-              const [p, n, h, c, nets] = await Promise.all([api.getProjects(), api.getNotes(), api.getHosts(), api.getCreds(), api.getNetworks()]);
-              setProjects(p); setNotes(n); setHosts(h); setCreds(c); setNetworks(nets);
+              const [p, n, h, c, nets, acts] = await Promise.all([api.getProjects(), api.getNotes(), api.getHosts(), api.getCreds(), api.getNetworks(), api.getHostActivities()]);
+              setProjects(p); setNotes(n); setHosts(h); setCreds(c); setNetworks(nets); setHostActivities(acts);
               setSelectedProject(result.project_id);
             }} />
         )}
@@ -728,7 +782,8 @@ export default function App() {
             presence={presence} onFocus={sendFocus} username={currentUser?.username} />
         )}
         {tab === 'hosts' && (
-          <HostsView hosts={hosts} creds={creds} onAdd={addHost} onUpdate={updateHost} onDelete={deleteHost}
+          <HostsView hosts={hosts} creds={creds} hostActivities={hostActivities} onAdd={addHost} onUpdate={updateHost} onDelete={deleteHost}
+            onAddActivity={addHostActivity} onUpdateActivity={updateHostActivity} onDeleteActivity={deleteHostActivity}
             projects={projects} selectedProject={selectedProject} accent={acc} fs={fs}
             onAddCred={addCred}
             onImport={() => setImportProjectId(selectedProject)} />
@@ -748,6 +803,7 @@ export default function App() {
             onUpdateNetwork={updateNetwork}
             onDeleteNetwork={deleteNetwork}
             onCreateHost={addHost}
+            onUpdateHost={updateHost}
             onSyncHostByIp={syncHostByIp}
             hosts={hosts}
             creds={creds}
@@ -794,7 +850,7 @@ export default function App() {
           <CheatsheetView accent={acc} hosts={hosts} creds={creds} selectedProject={selectedProject} />
         )}
         {tab === 'report' && (
-          <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings}
+          <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}
             selectedProject={selectedProject} accent={acc} />
         )}
         {tab === 'admin' && currentUser?.role === 'admin' && (

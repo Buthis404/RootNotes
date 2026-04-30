@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx';
 import { FieldInput } from '../components/UI.jsx';
 import { OS_ICONS } from '../constants.js';
 import { api } from '../api.js';
+import { isAttackerHost } from '../utils/hostMeta.js';
 
 const sEl = (val, opts, onChange, style = {}) => (
   <select value={val} onChange={e => onChange(e.target.value)}
@@ -12,6 +13,7 @@ const sEl = (val, opts, onChange, style = {}) => (
 );
 
 export default function ProjectsView({ projects, notes, hosts, creds, selectedProject, onSelect, accent, onAdd, onUpdate, onDelete, onImport, onProjectImported }) {
+  const nonAttackerHosts = (pid) => hosts.filter(h => h.pid === pid && !isAttackerHost(h));
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: '', ip: '', os: 'Linux', status: 'active', description: '' });
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -56,9 +58,9 @@ export default function ProjectsView({ projects, notes, hosts, creds, selectedPr
 
   const stats = pid => ({
     notes: notes.filter(n => n.pid === pid).length,
-    hosts: hosts.filter(h => h.pid === pid).length,
+    hosts: nonAttackerHosts(pid).length,
     creds: creds.filter(c => c.pid === pid).length,
-    pwned: hosts.filter(h => h.pid === pid && (h.status === 'pwned' || h.status === 'owned')).length,
+    pwned: nonAttackerHosts(pid).filter(h => h.status === 'pwned' || h.status === 'owned').length,
   });
   const statusColor = { active: '#39d353', paused: '#f09a3a', done: '#555' };
 

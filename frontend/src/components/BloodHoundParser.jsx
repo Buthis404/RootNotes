@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import JSZip from 'jszip';
 import Icon from './Icon.jsx';
 import { api } from '../api.js';
+import { inferHostRole } from '../utils/hostMeta.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -335,24 +336,47 @@ function parseBloodHoundFiles(files) {
 // ── Build host tags from BH data ──────────────────────────────────────────────
 function buildHostTags(c) {
   const tags = ['bloodhound'];
+  const role = inferHostRole({
+    os: c.os,
+    ports: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['80'] : [],
+    services: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['http'] : [],
+    domain: c.domain,
+    tags: c.dcsyncUserSids?.size > 0 ? ['dc'] : [],
+  });
   if (c.haslaps)             tags.push('laps');
   if (c.unconstrainedDeleg)  tags.push('unconstrained-delegation');
   if (c.constrainedDeleg)    tags.push('constrained-delegation');
   if (c.isHighValue)         tags.push('high-value');
   if (c.spns?.length)        tags.push('spn');
   if (c.dcsyncUserSids?.size > 0) tags.push('dc');
+  if (!c.enabled)            tags.push('disabled');
+  if (role.id === 'dc')      tags.push('domain-controller');
+  if (role.id === 'workstation') tags.push('workstation');
+  if (role.id === 'web')     tags.push('web');
+  if (role.id === 'server')  tags.push('server');
   return tags;
 }
 
 // Build notes string for host
 function buildHostNotes(c) {
   const lines = [];
+  const role = inferHostRole({
+    os: c.os,
+    ports: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['80'] : [],
+    services: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['http'] : [],
+    domain: c.domain,
+    tags: c.dcsyncUserSids?.size > 0 ? ['dc'] : [],
+  });
   if (c.description)       lines.push(`[BH] ${c.description}`);
+  lines.push(`[BH] Role: ${role.label}`);
+  lines.push(`[BH] Status: ${c.enabled ? 'enabled' : 'disabled'}`);
   if (c.haslaps)           lines.push('[BH] LAPS enabled');
   if (c.unconstrainedDeleg)lines.push('[BH] Unconstrained delegation!');
   if (c.constrainedDeleg)  lines.push('[BH] Constrained delegation (TrustedToAuth)');
+  if (c.isHighValue)       lines.push('[BH] High value asset');
   if (c.spns?.length)      lines.push(`[BH] SPNs: ${c.spns.slice(0, 3).join(', ')}${c.spns.length > 3 ? '...' : ''}`);
   if (c.lastLogon)         lines.push(`[BH] Last logon: ${c.lastLogon}`);
+  if (c.pwdLastSet)        lines.push(`[BH] Pwd last set: ${c.pwdLastSet}`);
   return lines.join('\n');
 }
 
@@ -360,6 +384,7 @@ function buildHostNotes(c) {
 function buildCredNotes(u) {
   const lines = [];
   if (u.domain) lines.push(`Domain: ${u.domain}`);
+  lines.push(`Status: ${u.enabled ? 'enabled' : 'disabled'}`);
   if (u.isDA)           lines.push('⚡ Domain Admin');
   if (u.isEA)           lines.push('⚡ Enterprise Admin');
   if (u.isSchemaAdmin)  lines.push('Schema Admin');
@@ -388,6 +413,22 @@ function buildCredNotes(u) {
   return lines.join('\n');
 }
 
+function buildCredTags(u) {
+  const tags = ['bloodhound'];
+  if (!u.enabled) tags.push('disabled');
+  if (u.isDA) tags.push('domain-admin');
+  if (u.isEA) tags.push('enterprise-admin');
+  if (u.isSchemaAdmin) tags.push('schema-admin');
+  if (u.adminCount) tags.push('admincount');
+  if (u.hasspn) tags.push('kerberoastable');
+  if (u.dontreqpreauth) tags.push('asrep-roastable');
+  if (u.pwdneverexpires) tags.push('password-never-expires');
+  if (u.passwordnotreqd) tags.push('password-not-required');
+  if (u.sensitive) tags.push('sensitive');
+  if (u.unconstrainedDeleg) tags.push('unconstrained-delegation');
+  return tags;
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 const PHASES = [
@@ -405,6 +446,12 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
   const [error, setError]       = useState('');
   const [importing, setImporting] = useState(false);
   const [progress, setProgress]   = useState(null);
+  const [importOptions, setImportOptions] = useState({
+    hosts: true,
+    creds: true,
+    relationships: true,
+    networkEdges: true,
+  });
   const fileInputRef = useRef();
 
   // ── File loading ────────────────────────────────────────────────────────────
@@ -460,23 +507,27 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
 
     try {
       // ── Phase 1: hosts ────────────────────────────────────────────────────
-      setProgress({ phase: 0, cur: 0, total: parsed.computers.length });
       const hostPayload = parsed.computers.map(c => ({
         pid,
-        ip:       c.ip || c.hostname || 'unknown',
+        ip: c.ip || c.hostname || 'unknown',
         hostname: c.hostname,
-        os:       c.os || 'Windows',
-        domain:   c.domain,
-        status:   c.enabled ? 'alive' : 'unknown',
-        ports: [], services: [], ips: [],
-        tags:  buildHostTags(c),
+        os: c.os || 'Windows',
+        domain: c.domain,
+        status: c.enabled ? 'alive' : 'unknown',
+        ports: [], services: [], ips: c.ip ? [c.ip] : [],
+        tags: buildHostTags(c),
         notes: buildHostNotes(c),
       }));
-      await api.batchImport(pid, { hosts: hostPayload, creds: [] });
-      setProgress({ phase: 0, cur: parsed.computers.length, total: parsed.computers.length });
+      setProgress({ phase: 0, cur: 0, total: importOptions.hosts ? hostPayload.length : 1 });
+      if (importOptions.hosts && hostPayload.length) {
+        await api.batchImport(pid, { hosts: hostPayload, creds: [] });
+        setProgress({ phase: 0, cur: hostPayload.length, total: hostPayload.length });
+      } else {
+        setProgress({ phase: 0, cur: 1, total: 1 });
+      }
 
       // ── Phase 2: credentials ──────────────────────────────────────────────
-      setProgress({ phase: 1, cur: 0, total: parsed.users.length });
+      setProgress({ phase: 1, cur: 0, total: importOptions.creds ? parsed.users.length : 1 });
       const existingCreds = await api.getCreds(pid);
 
       // Build credential key from username (handles both "user" and "user@domain" formats)
@@ -492,12 +543,14 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
 
       let credsDone = 0;
       for (const u of parsed.users) {
+        if (!importOptions.creds) break;
         const sam    = (u.sam || u.name.split('@')[0]).trim();
         // Use sam@domain when domain is known to avoid collisions in multi-domain pentests
         const fullName = u.domain ? `${sam}@${u.domain}` : sam;
         const key      = credKey(fullName);
         const altKey   = credKey(sam); // fallback match against bare sam (legacy creds)
         const notes = buildCredNotes(u);
+        const tags = buildCredTags(u);
 
         // Also keep a parallel index for Phase 4 matching by SID
         u._credUsername = fullName;
@@ -511,14 +564,21 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
             ? (existing.notes || '').trimEnd() + '\n' + newLines.join('\n')
             : existing.notes || '';
           if (mergedNotes !== (existing.notes || '')) {
-            const updated = await api.updateCred(existing.id, { notes: mergedNotes.trim() });
+            const mergedTags = [...new Set([...(existing.tags || []), ...tags])];
+            const updated = await api.updateCred(existing.id, { notes: mergedNotes.trim(), tags: mergedTags });
             credByKey[key] = updated;
+          } else {
+            const mergedTags = [...new Set([...(existing.tags || []), ...tags])];
+            if (JSON.stringify(mergedTags) !== JSON.stringify(existing.tags || [])) {
+              const updated = await api.updateCred(existing.id, { tags: mergedTags });
+              credByKey[key] = updated;
+            }
           }
         } else {
           try {
             const created = await api.createCred({
               pid, username: fullName, secret: '', type: 'password',
-              host: '', service: 'AD', cracked: false, is_domain: true, notes,
+              host: '', service: 'AD', cracked: false, is_domain: true, notes, tags,
             });
             credByKey[key] = created;
           } catch {}
@@ -527,6 +587,7 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
         credsDone++;
         setProgress({ phase: 1, cur: credsDone, total: parsed.users.length });
       }
+      if (!importOptions.creds) setProgress({ phase: 1, cur: 1, total: 1 });
 
       // ── Phase 3: fetch fresh IDs ──────────────────────────────────────────
       setProgress({ phase: 2, cur: 0, total: 1 });
@@ -594,9 +655,10 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
 
       const mergedRels = Object.values(relMap).map(r => ({ ...r, roles: [...r.roles] }));
       let relsDone = 0;
-      setProgress({ phase: 3, cur: 0, total: mergedRels.length });
+      setProgress({ phase: 3, cur: 0, total: importOptions.relationships ? mergedRels.length : 1 });
 
       for (const r of mergedRels) {
+        if (!importOptions.relationships) break;
         try {
           const existing = await api.getCredHostNotes({ cred_id: r.cred_id, host_id: r.host_id });
           if (existing?.length) {
@@ -615,10 +677,14 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
         relsDone++;
         setProgress({ phase: 3, cur: relsDone, total: mergedRels.length });
       }
+      if (!importOptions.relationships) setProgress({ phase: 3, cur: 1, total: 1 });
 
       // ── Phase 5: network map edges ────────────────────────────────────────
       setProgress({ phase: 4, cur: 0, total: 1 });
       try {
+        if (!importOptions.networkEdges) {
+          setProgress({ phase: 4, cur: 1, total: 1 });
+        } else {
         const networks = await api.getNetworks(pid);
 
         // Build SID → computer lookup
@@ -754,6 +820,7 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
         }
 
         setProgress({ phase: 4, cur: 1, total: 1 });
+        }
       } catch {} // network map update is best-effort
 
       if (onDone) onDone();
@@ -855,6 +922,27 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
 
           <div style={{ flex: 1, overflowY: 'auto' }}>
 
+            {tab === 'summary' && (
+              <div style={{ padding: '14px 16px 0' }}>
+                <div style={{ background: '#12141a', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 10, color: '#9098a8', fontFamily: 'Space Grotesk', fontWeight: 700, marginBottom: 8 }}>Import objects</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {[
+                      ['hosts', `Hosts (${parsed.computers.length})`],
+                      ['creds', `Creds (${parsed.users.length})`],
+                      ['relationships', `Access rels (${parsed.stats.relationships})`],
+                      ['networkEdges', `Network edges (~${parsed.stats.mapEdges})`],
+                    ].map(([key, label]) => (
+                      <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 6, background: importOptions[key] ? accent + '14' : '#0e1016', border: `1px solid ${importOptions[key] ? accent + '44' : '#2a2d35'}`, borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: importOptions[key] ? '#e0e4ec' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                        <input type="checkbox" checked={importOptions[key]} onChange={e => setImportOptions(prev => ({ ...prev, [key]: e.target.checked }))} style={{ accentColor: accent }} />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* ── SUMMARY ── */}
             {tab === 'summary' && (
               <div style={{ padding: 16, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
@@ -878,8 +966,8 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
                 ))}
                 <div style={{ gridColumn: '1 / -1', background: '#12141a', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 14px', fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono', lineHeight: 1.9 }}>
                   <div style={{ color: '#9098a8', marginBottom: 4, fontWeight: 600, fontSize: 10 }}>Import plan</div>
-                  <div>• Hosts: upsert по IP или hostname. Обновляет OS (более детальная версия), domain, notes, tags (laps / unconstrained / dc)</div>
-                  <div>• Creds: создаёт если нет, дополняет notes (DA/EA, Kerberoastable, ASREPRoast, description, email, groups)</div>
+                  <div>• Hosts: upsert by IP or hostname. Updates OS, domain, notes, tags, BH flags and inferred host role.</div>
+                  <div>• Creds: creates missing AD creds, enriches notes with roles, flags, status, groups and metadata.</div>
                   <div>• Access: LA → local_admin · RDP → rdp · PSRemote → winrm · DCSync → domain_admin</div>
                   <div>• Sessions: пишет заметку "Active session observed" в cred_host_notes</div>
                   <div>• Existing roles сохраняются, новые добавляются</div>
@@ -1045,7 +1133,7 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
             </span>
             <button onClick={onClose} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Cancel</button>
             <button onClick={doImport} style={{ background: accent, border: 'none', borderRadius: 5, padding: '6px 20px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
-              Import All
+              Import selected
             </button>
           </div>
         </>}

@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS hosts (
     services  TEXT[] NOT NULL DEFAULT '{}',
     tags      TEXT[] NOT NULL DEFAULT '{}',
     interfaces_json JSONB NOT NULL DEFAULT '[]',
-    notes     TEXT NOT NULL DEFAULT ''
+    notes     TEXT NOT NULL DEFAULT '',
+    domain    TEXT NOT NULL DEFAULT '',
+    role      TEXT NOT NULL DEFAULT 'unknown',
+    is_attacker BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS creds (
@@ -57,8 +60,10 @@ CREATE TABLE IF NOT EXISTS creds (
     type      TEXT NOT NULL DEFAULT 'plain',
     service   TEXT NOT NULL DEFAULT '',
     host      TEXT NOT NULL DEFAULT '',
+    domain    TEXT NOT NULL DEFAULT '',
     cracked   BOOLEAN NOT NULL DEFAULT FALSE,
-    notes     TEXT NOT NULL DEFAULT ''
+    notes     TEXT NOT NULL DEFAULT '',
+    tags      TEXT[] NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS networks (

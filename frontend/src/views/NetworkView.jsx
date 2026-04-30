@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Icon from '../components/Icon.jsx';
-import { FieldInput } from '../components/UI.jsx';
+import { FieldInput, Badge } from '../components/UI.jsx';
 import { NODE_STATUS, NODE_TYPES, OS_ICONS } from '../constants.js';
 import { api } from '../api.js';
 import AttackVectorAnalyzer from '../components/AttackVectorAnalyzer.jsx';
+import { getCredBadges, getHostBadges, inferNodeType, summarizeCreds, normalizeDomain, HOST_ROLES, isAttackerHost } from '../utils/hostMeta.js';
 
 const ACCESS_ROLES = [
   { id: 'local_admin', label: 'LA', title: 'Local Admin' },
@@ -151,15 +152,7 @@ const NodeShape = ({ type, status, size = 40, selected, accent }) => {
 };
 
 function guessNodeType(host) {
-  const tags = (host.tags || []).map(t => t.toLowerCase());
-  const svc = (host.services || []).map(s => s.toLowerCase());
-  const ports = host.ports || [];
-  if (tags.includes('attacker')) return 'attacker';
-  if (tags.includes('firewall') || tags.includes('fw')) return 'firewall';
-  if (tags.includes('dc') || tags.includes('ad') || svc.includes('kerberos') || ports.includes('88')) return 'dc';
-  if (tags.includes('web') || svc.some(s => s.includes('http')) || ports.some(p => ['80', '443', '8080', '8443'].includes(p))) return 'web';
-  if (tags.includes('workstation') || tags.includes('ws') || tags.includes('rdp') || ports.includes('3389')) return 'workstation';
-  return 'server';
+  return inferNodeType(host);
 }
 
 function AddFromProjectPanel({ hosts, accent, onAdd, onClose }) {
@@ -215,7 +208,7 @@ function AddFromProjectPanel({ hosts, accent, onAdd, onClose }) {
   );
 }
 
-function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp, accent, accentGreen, hosts, creds }) {
+function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, creds }) {
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [hoveredNodeId, setHoveredNodeId] = useState(null);
@@ -228,6 +221,8 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   const [draggingCanvas, setDraggingCanvas] = useState(null);
   const [showAddFromProject, setShowAddFromProject] = useState(false);
   const [showAttackAnalyzer, setShowAttackAnalyzer] = useState(false);
+  const [showCreateNode, setShowCreateNode] = useState(false);
+  const [nodeDraft, setNodeDraft] = useState({ ip: '', hostname: '', os: 'Unknown', role: 'unknown', status: 'unknown', domain: '' });
   const [edgeMenu, setEdgeMenu] = useState(null);
   const [regionEditMode, setRegionEditMode] = useState(false);
   const [selectBox, setSelectBox] = useState(null);
@@ -243,6 +238,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   const selectedRegion = regions.find(r => r.id === selectedRegionId) || null;
   const hostObj = useMemo(() => {
     if (!selectedNode) return null;
+    if (selectedNode.host_id) return (hosts || []).find(h => h.id === selectedNode.host_id) || null;
     const nodeIps = selectedNode.ips && selectedNode.ips.length > 0 ? selectedNode.ips : (selectedNode.ip ? [selectedNode.ip] : []);
     return (hosts || []).find(h => nodeIps.includes(h.ip)) || null;
   }, [selectedNode, hosts]);
@@ -250,18 +246,20 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   const nodeCreds = useMemo(() => {
     if (!selectedNode) return [];
     const nodeIps = new Set(selectedNode.ips && selectedNode.ips.length > 0 ? selectedNode.ips : (selectedNode.ip ? [selectedNode.ip] : []));
+    const hostDomain = normalizeDomain(hostObj?.domain || '');
     return (creds || []).filter(c => c.pid === projectId && (
+      (hostObj && (c.host_ids || []).includes(hostObj.id)) ||
       nodeIps.has(c.host) ||
       (hostObj?.hostname && c.host === hostObj.hostname) ||
-      (hostObj && (c.host_ids || []).includes(hostObj.id)) ||
-      c.is_domain
+      (c.is_domain && hostDomain && normalizeDomain(c.domain || '') === hostDomain)
     )).map(c => ({
       ...c,
-      _linkType: (nodeIps.has(c.host) || (hostObj?.hostname && c.host === hostObj.hostname)) ? 'ip'
-        : (hostObj && (c.host_ids || []).includes(hostObj.id)) ? 'linked'
+      _linkType: (hostObj && (c.host_ids || []).includes(hostObj.id)) ? 'linked'
+        : (nodeIps.has(c.host) || (hostObj?.hostname && c.host === hostObj.hostname)) ? 'ip'
         : isDomainHost ? 'domain' : 'domain?',
     }));
   }, [selectedNode, creds, projectId, hostObj, isDomainHost]);
+  const nodeCredSummary = useMemo(() => summarizeCreds(nodeCreds), [nodeCreds]);
 
   useEffect(() => { setSelectedNodeIds([]); setSelectedRegionId(null); setConnecting(null); setEdgeMenu(null); }, [net?.id]);
   useEffect(() => {
@@ -291,8 +289,23 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   const updateNode = async (id, patch) => {
     const node = nodes.find(n => n.id === id);
     emit({ nodes: nodes.map(n => n.id === id ? { ...n, ...patch } : n) });
-    if (node?.ip && (patch.status !== undefined || patch.ip !== undefined)) {
-      await onSyncHostByIp?.(node.ip, { ...(patch.status !== undefined ? { status: patch.status } : {}), ...(patch.ip !== undefined ? { ip: patch.ip } : {}) });
+    const linkedHost = node?.host_id ? hosts.find(h => h.id === node.host_id) : null;
+    const hostPatch = {};
+    if (patch.status !== undefined) hostPatch.status = patch.status;
+    if (patch.ip !== undefined) hostPatch.ip = patch.ip;
+    if (patch.ips !== undefined) hostPatch.ips = patch.ips;
+    if (patch.label !== undefined) hostPatch.hostname = patch.label;
+    if (patch.type !== undefined) {
+      const roleEntry = Object.entries(HOST_ROLES).find(([, meta]) => meta.nodeType === patch.type) || (patch.type === 'dc' ? ['domain_controller', HOST_ROLES.domain_controller] : null);
+      if (roleEntry) {
+        hostPatch.role = roleEntry[0];
+        hostPatch.is_attacker = roleEntry[0] === 'attacker';
+      }
+    }
+    if (linkedHost && Object.keys(hostPatch).length) {
+      await onUpdateHost?.(linkedHost.id, hostPatch);
+    } else if (node?.ip && (patch.status !== undefined || patch.ip !== undefined)) {
+      await onSyncHostByIp?.(node.ip, hostPatch);
     }
   };
   const updateEdge = (id, patch) => emit({ edges: edges.map(e => e.id === id ? { ...e, ...patch } : e) });
@@ -441,10 +454,26 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   const onWheel = (e) => { e.preventDefault(); setZoom(z => Math.min(3, Math.max(0.3, z * (e.deltaY < 0 ? 1.1 : 0.91)))); };
 
   const addNode = async () => {
-    const host = await onCreateHost({ pid: projectId, ip: `0.0.0.${Math.floor(Math.random() * 200 + 20)}`, hostname: 'new-host', os: 'Unknown', status: 'unknown', ports: [], services: [], tags: [], notes: '' });
-    const id = 'h' + Date.now();
-    emit({ nodes: [...nodes, { id, x: (300 - pan.x) / zoom, y: (200 - pan.y) / zoom, label: host.hostname || host.ip, ip: host.ip, type: guessNodeType(host), status: host.status, ports: host.ports || [], notes: host.notes || '' }] });
-    setSelectedNodeIds([id]);
+    const ip = nodeDraft.ip.trim();
+    const hostname = nodeDraft.hostname.trim();
+    if (!ip && !hostname) return;
+    let host = hosts.find(h => h.pid === projectId && ((ip && h.ip === ip) || (hostname && h.hostname?.toLowerCase() === hostname.toLowerCase())));
+    if (host) {
+      host = await onUpdateHost?.(host.id, { hostname: hostname || host.hostname, ip: ip || host.ip, os: nodeDraft.os, role: nodeDraft.role, is_attacker: nodeDraft.role === 'attacker', status: nodeDraft.role === 'attacker' ? 'attacker' : nodeDraft.status, domain: nodeDraft.domain }) || host;
+    } else {
+      host = await onCreateHost({ pid: projectId, ip: ip || `0.0.0.${Math.floor(Math.random() * 200 + 20)}`, hostname: hostname || 'new-host', os: nodeDraft.os, role: nodeDraft.role, is_attacker: nodeDraft.role === 'attacker', domain: nodeDraft.domain, status: nodeDraft.role === 'attacker' ? 'attacker' : nodeDraft.status, ports: [], services: [], tags: [], notes: '' });
+    }
+    const existingNode = nodes.find(n => (n.host_id && n.host_id === host.id) || n.ip === host.ip);
+    if (existingNode) {
+      emit({ nodes: nodes.map(n => n.id === existingNode.id ? { ...n, host_id: host.id, label: host.hostname || host.ip, ip: host.ip, ips: host.ips || [host.ip], type: guessNodeType(host), status: isAttackerHost(host) ? 'attacker' : host.status, ports: host.ports || [], notes: host.notes || '' } : n) });
+      setSelectedNodeIds([existingNode.id]);
+    } else {
+      const id = 'h' + Date.now();
+      emit({ nodes: [...nodes, { id, host_id: host.id, x: (300 - pan.x) / zoom, y: (200 - pan.y) / zoom, label: host.hostname || host.ip, ip: host.ip, ips: host.ips || [host.ip], type: guessNodeType(host), status: isAttackerHost(host) ? 'attacker' : host.status, ports: host.ports || [], notes: host.notes || '' }] });
+      setSelectedNodeIds([id]);
+    }
+    setNodeDraft({ ip: '', hostname: '', os: 'Unknown', role: 'unknown', status: 'unknown', domain: '' });
+    setShowCreateNode(false);
   };
 
   const addRegion = () => {
@@ -471,7 +500,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   const addFromProject = (selectedIps) => {
     const toAdd = hosts.filter(h => selectedIps.has(h.ip));
     const cols = Math.ceil(Math.sqrt(toAdd.length + 1));
-    const newNodes = toAdd.map((h, i) => ({ id: 'h' + Date.now() + i, x: 120 + (i % cols) * 140, y: 120 + Math.floor(i / cols) * 140, label: h.hostname || h.ip, ip: h.ip, type: guessNodeType(h), status: h.status || 'alive', ports: h.ports || [], notes: h.notes || '' }));
+    const newNodes = toAdd.map((h, i) => ({ id: 'h' + Date.now() + i, host_id: h.id, x: 120 + (i % cols) * 140, y: 120 + Math.floor(i / cols) * 140, label: h.hostname || h.ip, ip: h.ip, ips: h.ips || [], type: guessNodeType(h), status: isAttackerHost(h) ? 'attacker' : h.status || 'alive', ports: h.ports || [], notes: h.notes || '' }));
     emit({ nodes: [...nodes, ...newNodes] });
     setShowAddFromProject(false);
   };
@@ -491,12 +520,22 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
         {unplaced.length > 0 && <button onClick={() => setShowAddFromProject(v => !v)} style={{ background: 'none', border: `1px solid ${accent}66`, borderRadius: 4, padding: '4px 10px', color: accent, cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>+ from project ({unplaced.length})</button>}
         <button onClick={() => setShowAttackAnalyzer(true)} style={{ background: 'none', border: '1px solid #cc223366', borderRadius: 4, padding: '4px 10px', color: '#cc2233', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>⚡ Attack paths</button>
         <button onClick={addRegion} style={{ background: 'none', border: `1px solid ${accentGreen}66`, borderRadius: 4, padding: '4px 10px', color: accentGreen, cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Region</button>
-        <button onClick={addNode} style={{ background: accent, border: 'none', borderRadius: 4, padding: '4px 10px', color: '#fff', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Node</button>
+        <button onClick={() => setShowCreateNode(v => !v)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '4px 10px', color: '#fff', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Node</button>
         {selectedNodeIds.length > 0 && <><button onClick={() => setConnecting(selectedNodeIds[0])} title={selectedNodeIds.length > 1 ? `Create edges from ${selectedNodeIds.length} nodes` : 'Create edge'} style={{ background: connecting ? `${accentGreen}22` : 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: connecting ? accentGreen : '#606570', cursor: 'pointer' }}><Icon name="link" size={12} color="currentColor" />{selectedNodeIds.length > 1 && <span style={{ fontSize: 9, marginLeft: 4, fontFamily: 'JetBrains Mono' }}>×{selectedNodeIds.length}</span>}</button><button onClick={deleteSelected} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#cc2233', cursor: 'pointer' }}><Icon name="trash" size={12} color="currentColor" /></button></>}
         {selectedRegionId && regionEditMode && <><button onClick={deleteSelected} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#cc2233', cursor: 'pointer' }}><Icon name="trash" size={12} color="currentColor" /></button><button onClick={() => { setRegionEditMode(false); setSelectedRegionId(null); }} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 10px', color: '#606570', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Done</button></>}
       </div>
 
       {showAddFromProject && unplaced.length > 0 && <AddFromProjectPanel hosts={unplaced} accent={accent} onAdd={addFromProject} onClose={() => setShowAddFromProject(false)} />}
+      {showCreateNode && <div style={{ background: '#0c0e13', borderBottom: '1px solid #2a2d35', padding: '10px 14px', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <div style={{ width: 150 }}><div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>IP</div><input value={nodeDraft.ip} onChange={e => setNodeDraft(d => ({ ...d, ip: e.target.value }))} style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono' }} /></div>
+        <div style={{ width: 150 }}><div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Hostname</div><input value={nodeDraft.hostname} onChange={e => setNodeDraft(d => ({ ...d, hostname: e.target.value }))} style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono' }} /></div>
+        <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>OS</div><select value={nodeDraft.os} onChange={e => setNodeDraft(d => ({ ...d, os: e.target.value }))} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{['Unknown','Windows','Linux','macOS','Various'].map(v => <option key={v} value={v}>{v}</option>)}</select></div>
+        <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Role</div><select value={nodeDraft.role} onChange={e => setNodeDraft(d => ({ ...d, role: e.target.value }))} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{Object.entries(HOST_ROLES).map(([key, meta]) => <option key={key} value={key}>{meta.label}</option>)}</select></div>
+        <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Status</div><select value={nodeDraft.status} onChange={e => setNodeDraft(d => ({ ...d, status: e.target.value }))} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{Object.keys(NODE_STATUS).map(v => <option key={v} value={v}>{NODE_STATUS[v].label}</option>)}</select></div>
+        <div style={{ width: 160 }}><div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Domain</div><input value={nodeDraft.domain} onChange={e => setNodeDraft(d => ({ ...d, domain: e.target.value }))} style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono' }} /></div>
+        <button onClick={addNode} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 12px', color: '#fff', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Save node</button>
+        <button onClick={() => setShowCreateNode(false)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', color: '#606570', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Cancel</button>
+      </div>}
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: net?.background || '#07080b' }} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp} onContextMenu={e => e.preventDefault()}>
@@ -654,6 +693,24 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
               <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Type</div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{Object.entries(NODE_TYPES).map(([k, v]) => <button key={k} onClick={() => updateNode(selectedNode.id, { type: k })} style={{ background: selectedNode.type === k ? `${accent}22` : '#0e1016', border: `1px solid ${selectedNode.type === k ? accent + '77' : '#2a2d35'}`, borderRadius: 3, padding: '3px 8px', cursor: 'pointer', color: selectedNode.type === k ? accent : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{v.label}</button>)}</div></div>
               <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Status</div><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>{Object.entries(NODE_STATUS).map(([k, v]) => <button key={k} onClick={() => updateNode(selectedNode.id, { status: k })} style={{ background: selectedNode.status === k ? `${v.color}18` : 'transparent', border: `1px solid ${selectedNode.status === k ? v.color + '66' : '#2a2d35'}`, borderRadius: 4, padding: '4px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 6, height: 6, borderRadius: '50%', background: v.color }} /><span style={{ fontSize: 9, color: selectedNode.status === k ? v.color : '#606570', fontFamily: 'JetBrains Mono' }}>{v.label}</span></button>)}</div></div>
               <FieldInput label="Ports" value={(selectedNode.ports || []).join(', ')} onChange={v => updateNode(selectedNode.id, { ports: v.split(',').map(p => p.trim()).filter(Boolean) })} placeholder="22, 80, 443" />
+              {hostObj && (
+                <>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                    {getHostBadges(hostObj).map(b => <Badge key={b.label} label={b.label} color={b.color} />)}
+                  </div>
+                  {nodeCredSummary.total > 0 && (
+                    <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, padding: '7px 9px' }}>
+                      <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', marginBottom: 5 }}>Known credentials</div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <Badge label={`${nodeCredSummary.total} linked`} color={accent} />
+                        {nodeCredSummary.withSecrets > 0 && <Badge label={`${nodeCredSummary.withSecrets} secrets`} color="#39d353" />}
+                        {nodeCredSummary.passwords > 0 && <Badge label={`${nodeCredSummary.passwords} passwords`} color="#5b8af5" />}
+                        {nodeCredSummary.hashes > 0 && <Badge label={`${nodeCredSummary.hashes} hashes`} color="#c07af0" />}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
               <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Edges</div>{edges.filter(e => e.from === selectedNode.id || e.to === selectedNode.id).map(edge => <div key={edge.id} style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: '6px 0', borderBottom: '1px solid #14161b' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ fontSize: 10, color: '#9098a8', flex: 1 }}>{(nodes.find(n => n.id === (edge.from === selectedNode.id ? edge.to : edge.from)) || {}).label || '?'}</span><select value={edge.style} onChange={e => updateEdge(edge.id, { style: e.target.value })} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 3, color: '#606570', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '1px 4px' }}>{['normal', 'exploit', 'lateral', 'tunnel'].map(s => <option key={s} value={s}>{s}</option>)}</select></div><input value={edge.label || ''} onChange={e => updateEdge(edge.id, { label: e.target.value })} placeholder="VPN / SMB / trust" style={{ width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 6px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono' }} /></div>)}</div>
               {hostObj?.domain && (
                 <div style={{ background: '#c07af011', border: '1px solid #c07af033', borderRadius: 4, padding: '5px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -661,11 +718,16 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
                   <span style={{ fontSize: 10, color: '#c07af0', fontFamily: 'JetBrains Mono' }}>{hostObj.domain}</span>
                 </div>
               )}
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Credentials</div>
-                {nodeCreds.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No linked credentials</div>}
-                {hostObj ? nodeCreds.map(c => (
-                  <CredPanel key={c.id} cred={c} host={hostObj} accent={accent} pid={projectId} linkType={c._linkType} />
+                <div>
+                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Credentials</div>
+                  {nodeCreds.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No linked credentials</div>}
+                  {hostObj ? nodeCreds.map(c => (
+                  <div key={c.id} style={{ marginBottom: 6 }}>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
+                      {getCredBadges(c).slice(0, 5).map(b => <Badge key={`${c.id}-${b.label}`} label={b.label} color={b.color} />)}
+                    </div>
+                    <CredPanel cred={c} host={hostObj} accent={accent} pid={projectId} linkType={c._linkType} />
+                  </div>
                 )) : nodeCreds.map(c => (
                   <div key={c.id} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, padding: '6px 8px', marginBottom: 6 }}>
                     <div style={{ fontSize: 10, color: '#e0e4ec', fontFamily: 'JetBrains Mono' }}>{c.username}</div>
@@ -681,7 +743,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onSyncHostByIp,
   );
 }
 
-export default function NetworkView({ projectId, accent, accentGreen, networks, onCreateNetwork, onUpdateNetwork, onDeleteNetwork, onCreateHost, onSyncHostByIp, hosts, creds }) {
+export default function NetworkView({ projectId, accent, accentGreen, networks, onCreateNetwork, onUpdateNetwork, onDeleteNetwork, onCreateHost, onUpdateHost, onSyncHostByIp, hosts, creds }) {
   const [activeNetId, setActiveNetId] = useState(null);
   const [editingName, setEditingName] = useState(null);
   const [nameVal, setNameVal] = useState('');
@@ -709,7 +771,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
         {activeNet && <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingRight: 10 }}>{NETWORK_BACKGROUNDS.map(bg => <button key={bg} onClick={() => onUpdateNetwork(activeNet.id, { background: bg })} style={{ width: 14, height: 14, borderRadius: 3, background: bg, border: `1px solid ${(activeNet.background || '#07080b') === bg ? accent : '#2a2d35'}`, cursor: 'pointer' }} />)}</div>}
         <button onClick={() => onCreateNetwork({ pid: projectId, name: `Network ${networks.length + 1}`, background: NETWORK_BACKGROUNDS[networks.length % NETWORK_BACKGROUNDS.length] })} style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="plus" size={11} color="currentColor" /> Network</button>
       </div>
-      {activeNet ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} creds={creds} /> : <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 14, color: '#303540' }}><Icon name="network" size={40} color="#2a2d35" /><div style={{ fontSize: 13, color: '#404550' }}>No network maps</div><button onClick={() => onCreateNetwork({ pid: projectId, name: 'Main network', background: '#07080b' })} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 20px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7 }}><Icon name="plus" size={12} color="#fff" /> Create first map</button></div>}
+      {activeNet ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} creds={creds} /> : <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 14, color: '#303540' }}><Icon name="network" size={40} color="#2a2d35" /><div style={{ fontSize: 13, color: '#404550' }}>No network maps</div><button onClick={() => onCreateNetwork({ pid: projectId, name: 'Main network', background: '#07080b' })} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 20px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7 }}><Icon name="plus" size={12} color="#fff" /> Create first map</button></div>}
     </div>
   );
 }

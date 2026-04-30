@@ -1,23 +1,23 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
-import { SEVERITY, FINDING_STATUS, FINDING_TEMPLATES } from '../constants.js';
+import { SEVERITY, FINDING_STATUS } from '../constants.js';
 import { api } from '../api.js';
 import NessusParser from '../components/NessusParser.jsx';
 
 const SEV_COLORS = { critical:'#cc2233', high:'#e8574a', medium:'#f09a3a', low:'#e8cc42', info:'#5b8af5' };
-
-function TemplateLibrary({ accent, onUse, onClose }) {
+function TemplateLibrary({ accent, templates, onUse, onDeleteCustom, onImport, onExport, onClose }) {
   const [search, setSearch] = useState('');
   const [filterSev, setFilterSev] = useState(null);
+  const fileRef = useRef();
   const filtered = useMemo(() => {
-    let list = FINDING_TEMPLATES;
+    let list = templates;
     if (filterSev) list = list.filter(t => t.severity === filterSev);
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(t => t.title.toLowerCase().includes(q) || t.cve?.toLowerCase().includes(q));
     }
     return list;
-  }, [search, filterSev]);
+  }, [templates, search, filterSev]);
 
   return (
     <div style={{ position:'fixed', inset:0, background:'#000000cc', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, backdropFilter:'blur(4px)' }}>
@@ -25,7 +25,10 @@ function TemplateLibrary({ accent, onUse, onClose }) {
         <div style={{ padding:'18px 24px', borderBottom:'1px solid #1e2029', display:'flex', alignItems:'center', gap:10, flexShrink:0 }}>
           <Icon name="list" size={16} color={accent} />
           <span style={{ fontSize:14, fontWeight:700, color:'#f0f2f6', fontFamily:'Space Grotesk', flex:1 }}>Template library</span>
-          <span style={{ fontSize:10, color:'#404550', fontFamily:'JetBrains Mono' }}>{FINDING_TEMPLATES.length} templates</span>
+          <span style={{ fontSize:10, color:'#404550', fontFamily:'JetBrains Mono' }}>{templates.length} templates</span>
+          <button onClick={() => fileRef.current?.click()} style={{ background:'none', border:'1px solid #2a2d35', borderRadius:5, padding:'5px 10px', cursor:'pointer', color:'#808590', fontSize:10, fontFamily:'JetBrains Mono' }}>Import</button>
+          <button onClick={onExport} style={{ background:'none', border:'1px solid #2a2d35', borderRadius:5, padding:'5px 10px', cursor:'pointer', color:'#808590', fontSize:10, fontFamily:'JetBrains Mono' }}>Export</button>
+          <input ref={fileRef} type="file" accept="application/json,.json" style={{ display:'none' }} onChange={e => e.target.files?.[0] && onImport(e.target.files[0])} />
           <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', display:'flex' }}>
             <Icon name="close" size={14} color="#606570" />
           </button>
@@ -48,16 +51,23 @@ function TemplateLibrary({ accent, onUse, onClose }) {
               <div style={{ flex:1 }}>
                 <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
                   <span style={{ fontSize:9, fontWeight:700, color:SEV_COLORS[t.severity], background:SEV_COLORS[t.severity]+'22', border:`1px solid ${SEV_COLORS[t.severity]}44`, borderRadius:3, padding:'1px 5px', fontFamily:'JetBrains Mono', textTransform:'uppercase' }}>{t.severity}</span>
+                  {t.is_custom && <span style={{ fontSize:9, fontWeight:700, color:'#15bbb1', background:'#15bbb122', border:'1px solid #15bbb144', borderRadius:3, padding:'1px 5px', fontFamily:'JetBrains Mono', textTransform:'uppercase' }}>custom</span>}
                   {t.cvss && <span style={{ fontSize:9, color:'#808590', fontFamily:'JetBrains Mono' }}>CVSS: {t.cvss}</span>}
                   {t.cve && <span style={{ fontSize:9, color:'#5b8af5', fontFamily:'JetBrains Mono' }}>{t.cve}</span>}
                 </div>
                 <div style={{ fontSize:12, fontWeight:600, color:'#e0e4ec', fontFamily:'Space Grotesk', marginBottom:4 }}>{t.title}</div>
                 <div style={{ fontSize:10, color:'#606570', lineHeight:1.5, overflow:'hidden', textOverflow:'ellipsis', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>{t.description}</div>
               </div>
-              <button onClick={() => { onUse(t); onClose(); }}
-                style={{ background:accent, border:'none', borderRadius:5, padding:'6px 14px', cursor:'pointer', color:'#fff', fontSize:10, fontWeight:600, fontFamily:'JetBrains Mono', flexShrink:0 }}>
-                Use
-              </button>
+              <div style={{ display:'flex', gap:6, flexShrink:0 }}>
+                {t.is_custom && <button onClick={() => onDeleteCustom(t.id)}
+                  style={{ background:'transparent', border:'1px solid #cc223344', borderRadius:5, padding:'6px 10px', cursor:'pointer', color:'#cc2233', fontSize:10, fontWeight:600, fontFamily:'JetBrains Mono' }}>
+                  Delete
+                </button>}
+                <button onClick={() => { onUse(t); onClose(); }}
+                  style={{ background:accent, border:'none', borderRadius:5, padding:'6px 14px', cursor:'pointer', color:'#fff', fontSize:10, fontWeight:600, fontFamily:'JetBrains Mono' }}>
+                  Use
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -86,15 +96,26 @@ function StatusBadge({ status }) {
   );
 }
 
-function FindingForm({ finding, hosts, accent, onSave, onCancel }) {
+function FindingForm({ finding, hosts, accent, onSave, onSaveTemplate, onCancel }) {
   const [form, setForm] = useState(finding || {
     title: '', severity: 'medium', cvss: '', cve: '', host_id: null,
     description: '', proof: '', recommendation: '', status: 'open',
   });
+  const [templateState, setTemplateState] = useState({ saving: false, type: '', message: '' });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const inp = (style = {}) => ({ background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#c8cdd6', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', width: '100%', ...style });
   const label = (text) => <div style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 5 }}>{text}</div>;
   const field = (style = {}) => ({ marginBottom: 14, ...style });
+
+  const handleSaveTemplateClick = async () => {
+    setTemplateState({ saving: true, type: '', message: '' });
+    try {
+      const message = await onSaveTemplate(form);
+      setTemplateState({ saving: false, type: 'success', message: message || 'Template saved' });
+    } catch (e) {
+      setTemplateState({ saving: false, type: 'error', message: e.message || 'Failed to save template' });
+    }
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, height: '100%', overflow: 'hidden' }}>
@@ -102,6 +123,8 @@ function FindingForm({ finding, hosts, accent, onSave, onCancel }) {
         <span style={{ fontSize: 13, fontWeight: 600, color: '#f0f2f6', fontFamily: 'Space Grotesk', flex: 1 }}>
           {finding ? 'Edit finding' : 'New finding'}
         </span>
+        {templateState.message && <span style={{ fontSize: 10, color: templateState.type === 'error' ? '#cc2233' : '#39d353', fontFamily: 'JetBrains Mono' }}>{templateState.message}</span>}
+        <button onClick={handleSaveTemplateClick} disabled={templateState.saving} style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 12px', cursor: templateState.saving ? 'wait' : 'pointer', color: '#808590', fontSize: 11, fontFamily: 'JetBrains Mono', opacity: templateState.saving ? 0.7 : 1 }}>{templateState.saving ? 'Saving...' : 'Save as template'}</button>
         <button onClick={onCancel} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
         <button onClick={() => onSave(form)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '5px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>Save</button>
       </div>
@@ -162,6 +185,11 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
   const [filterSev, setFilterSev] = useState(null);
   const [showNessus, setShowNessus] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [templates, setTemplates] = useState([]);
+
+  useEffect(() => {
+    api.listFindingTemplates().then(setTemplates).catch(() => {});
+  }, []);
 
   const handleNessusImport = async (items, allHosts) => {
     const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');
@@ -205,10 +233,48 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
     setEditing(false);
   };
 
+  const handleSaveTemplate = async (form) => {
+    const title = (form.title || '').trim();
+    if (!title) throw new Error('Template title is required');
+    const created = await api.createCustomFindingTemplate({
+      title,
+      severity: form.severity || 'medium',
+      cvss: form.cvss || '',
+      cve: form.cve || '',
+      description: form.description || '',
+      proof: form.proof || '',
+      recommendation: form.recommendation || '',
+    });
+    setTemplates(prev => [{ ...created, is_custom: true }, ...prev]);
+    return 'Template saved';
+  };
+
+  const handleDeleteCustomTemplate = async (id) => {
+    await api.deleteCustomFindingTemplate(id);
+    setTemplates(prev => prev.filter(t => t.id !== id));
+  };
+
+  const handleExportTemplates = async () => {
+    const blob = await api.exportFindingTemplates();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'finding_templates.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportTemplates = async (file) => {
+    await api.importFindingTemplates(file);
+    const items = await api.listFindingTemplates();
+    setTemplates(items);
+  };
+
   if (editing) {
     return (
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <FindingForm finding={selFinding || templateData} hosts={projHosts} accent={accent}
+          onSaveTemplate={handleSaveTemplate}
           onSave={handleSave} onCancel={() => { setEditing(false); setTemplateData(null); }} />
       </div>
     );
@@ -222,7 +288,7 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
           onClose={() => setShowNessus(false)} />
       )}
       {showTemplates && (
-        <TemplateLibrary accent={accent} onClose={() => setShowTemplates(false)}
+        <TemplateLibrary accent={accent} templates={templates} onClose={() => setShowTemplates(false)} onDeleteCustom={handleDeleteCustomTemplate} onImport={handleImportTemplates} onExport={handleExportTemplates}
           onUse={tpl => {
             setShowTemplates(false);
             setSelected(null);

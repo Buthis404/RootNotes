@@ -1,7 +1,9 @@
 import { useState, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
-import { CredTypeBadge, SearchBar, FieldInput } from '../components/UI.jsx';
+import { Badge, CredTypeBadge, SearchBar, FieldInput, TagEditor } from '../components/UI.jsx';
 import { CRED_TYPES } from '../constants.js';
+import { getCredBadges, getCredTagMeta, normalizeDomain } from '../utils/hostMeta.js';
+import { useColumnResize } from '../hooks/useColumnResize.js';
 
 const COMMON_SERVICES = ['SSH','SMB','RDP','HTTP','HTTPS','FTP','MySQL','PostgreSQL','MSSQL','Oracle','WinRM','LDAP','Kerberos','VNC','Telnet','WebApp'];
 
@@ -10,8 +12,9 @@ const isWindows = h => h.os === 'Windows' || (h.os || '').toLowerCase().includes
 // Returns { confirmed: Host[], predicted: Host[] } for a cred
 function getApplicableHosts(cred, projectHosts) {
   const confirmed = projectHosts.filter(h => (cred.host_ids || []).includes(h.id));
+  const credDomain = normalizeDomain(cred.domain || '');
   const predicted = cred.is_domain
-    ? projectHosts.filter(h => !confirmed.some(c => c.id === h.id) && isWindows(h))
+    ? projectHosts.filter(h => !confirmed.some(c => c.id === h.id) && isWindows(h) && normalizeDomain(h.domain || '') && normalizeDomain(h.domain || '') === credDomain)
     : [];
   return { confirmed, predicted };
 }
@@ -113,15 +116,18 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState(null);
   const [filterDomain, setFilterDomain] = useState(false);
+  const [filterTag, setFilterTag] = useState(null);
   const [showSecrets, setShowSecrets] = useState({});
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
-  const [newCred, setNewCred] = useState({ username: '', secret: '', type: 'plain', service: '', host: '', cracked: false, notes: '', is_domain: false, host_ids: [] });
+  const [newCred, setNewCred] = useState({ username: '', secret: '', type: 'plain', service: '', host: '', domain: '', cracked: false, notes: '', tags: [], is_domain: false, host_ids: [] });
   const [bulkDelimiter, setBulkDelimiter] = useState(';');
   const [bulkText, setBulkText] = useState('');
   const [copied, setCopied] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [checkedIds, setCheckedIds] = useState([]);
+  const { widths, startResize } = useColumnResize({ username: 150, type: 90, service: 90, hosts: 160, tags: 160, cracked: 70 });
+  const colBorder = '1px solid #14161b';
 
   const projectHosts = (hosts || []).filter(h => h.pid === selectedProject);
   const windowsHosts = projectHosts.filter(isWindows);
@@ -131,11 +137,19 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
     .filter(c => c.pid === selectedProject)
     .filter(c => !filterType || c.type === filterType)
     .filter(c => !filterDomain || c.is_domain)
-    .filter(c => !search || [c.username, c.service, c.host, c.notes].join(' ').toLowerCase().includes(search.toLowerCase()));
+    .filter(c => !filterTag || (c.tags || []).includes(filterTag))
+    .filter(c => !search || [c.username, c.service, c.host, c.notes, (c.tags || []).join(' ')].join(' ').toLowerCase().includes(search.toLowerCase()));
 
   const selCred = creds.find(c => c.id === selectedId);
   const crackedCount = filtered.filter(c => c.cracked).length;
   const domainCount = creds.filter(c => c.pid === selectedProject && c.is_domain).length;
+  const tagCounts = useMemo(() => {
+    const counts = new Map();
+    creds.filter(c => c.pid === selectedProject).forEach(c => {
+      (c.tags || []).forEach(tag => counts.set(tag, (counts.get(tag) || 0) + 1));
+    });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  }, [creds, selectedProject]);
 
   const copy = (text, id) => {
     navigator.clipboard?.writeText(text).catch(() => {});
@@ -147,7 +161,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
   const addCred = () => {
     if (!newCred.username.trim()) return;
     onAdd({ pid: selectedProject, ...newCred });
-    setNewCred({ username: '', secret: '', type: 'plain', service: '', host: '', cracked: false, notes: '', is_domain: false, host_ids: [] });
+    setNewCred({ username: '', secret: '', type: 'plain', service: '', host: '', domain: '', cracked: false, notes: '', tags: [], is_domain: false, host_ids: [] });
     setShowAdd(false);
   };
 
@@ -157,8 +171,8 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
     for (const line of lines) {
       const parts = line.split(delim).map(x => x.trim());
       if (parts.length < 2) continue;
-      const [username, secret, type = 'plain', service = '', host = '', cracked = 'false', notes = ''] = parts;
-      await onAdd({ pid: selectedProject, username, secret, type: type || 'plain', service, host, cracked: ['1','true','yes','y','+'].includes(String(cracked).toLowerCase()), notes, host_ids: [], is_domain: false });
+      const [username, secret, type = 'plain', service = '', host = '', cracked = 'false', notes = '', tags = ''] = parts;
+      await onAdd({ pid: selectedProject, username, secret, type: type || 'plain', service, host, domain: '', cracked: ['1','true','yes','y','+'].includes(String(cracked).toLowerCase()), notes, tags: tags.split(',').map(t => t.trim()).filter(Boolean), host_ids: [], is_domain: false });
     }
     setBulkText('');
     setShowBulk(false);
@@ -228,17 +242,35 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
         </button>
       </div>
 
+      {tagCounts.length > 0 && (
+        <div style={{ padding: '8px 18px', borderBottom: '1px solid #1a1c22', background: '#0c0e13', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Tags</span>
+          {tagCounts.map(([tag, count]) => {
+            const meta = getCredTagMeta(tag);
+            const active = filterTag === tag;
+            return (
+              <button key={tag} onClick={() => setFilterTag(active ? null : tag)}
+                style={{ background: active ? `${meta.color}22` : '#0e1016', border: `1px solid ${active ? meta.color + '88' : '#2a2d35'}`, borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: active ? meta.color : '#808590', fontSize: 9, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span>{meta.label}</span>
+                <span style={{ opacity: 0.75 }}>{count}</span>
+              </button>
+            );
+          })}
+          {filterTag && <button onClick={() => setFilterTag(null)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>Clear</button>}
+        </div>
+      )}
+
       {/* Bulk import */}
       {showBulk && (
         <div style={{ padding: '14px 18px', borderBottom: '1px solid #1a1c22', background: '#0c0e13' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div style={{ fontSize: 10, color: '#808590' }}>Format: username secret type service host cracked notes</div>
+            <div style={{ fontSize: 10, color: '#808590' }}>Format: username secret type service host cracked notes tags</div>
             <select value={bulkDelimiter} onChange={e => setBulkDelimiter(e.target.value)} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
               {[';', ',', '|', '\t'].map(d => <option key={d} value={d}>{d === '\t' ? 'TAB' : d}</option>)}
             </select>
           </div>
           <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-            placeholder={'admin;Password123!;plain;SMB;10.0.0.5;true\nDOMAIN\\user1;aad3b435:ntlmhash;ntlm;SMB;;false'}
+            placeholder={'admin;Password123!;plain;SMB;10.0.0.5;true;local admin;shared,prod\nDOMAIN\\user1;aad3b435:ntlmhash;ntlm;SMB;;false;BH import;domain-admin,kerberoastable'}
             style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, padding: '8px 10px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', resize: 'vertical', boxSizing: 'border-box' }} />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <button onClick={importBulkCreds} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>Import</button>
@@ -276,6 +308,11 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
               {projectHosts.map(h => <option key={h.id} value={h.ip}>{h.ip}{h.hostname ? ` (${h.hostname})` : ''}</option>)}
             </select>
           </div>
+          <div style={{ width: 150 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Domain</div>
+            <input value={newCred.domain} onChange={e => setNewCred(c => ({ ...c, domain: e.target.value }))}
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
+          </div>
           {/* Domain toggle */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase' }}>Flags</div>
@@ -293,15 +330,29 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
       )}
 
       {/* Table header */}
-      <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', borderBottom: '1px solid #1a1c22', background: '#090b0f', flexShrink: 0, gap: 12 }}>
-        <div style={{ width: 28, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ display: 'flex', alignItems: 'stretch', padding: '8px 18px', borderBottom: '1px solid #1a1c22', background: '#090b0f', flexShrink: 0 }}>
+        <div style={{ width: 28, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
           <input type="checkbox" checked={checkedIds.length === filtered.length && filtered.length > 0}
             onChange={e => setCheckedIds(e.target.checked ? filtered.map(c => c.id) : [])}
             style={{ width: 13, height: 13, cursor: 'pointer', accentColor: accent }} />
         </div>
-        {[['Username', 150], ['Type', 90], ['Service', 90], ['Hosts', 180], ['Secret / Hash', 0], ['Cracked', 70]].map(([l, w]) => (
-          <div key={l} style={{ width: w || undefined, flex: w ? undefined : 1, fontSize: Math.max(9, fs - 4), color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em' }}>{l}</div>
+        {[
+          ['Username', 'username', widths.username],
+          ['Type', 'type', widths.type],
+          ['Service', 'service', widths.service],
+          ['Hosts', 'hosts', widths.hosts],
+          ['Tags', 'tags', widths.tags],
+        ].map(([label, key, width]) => (
+          <div key={key} style={{ width, flexShrink: 0, fontSize: Math.max(9, fs - 4), color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', position: 'relative', minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
+            {label}
+            <span onMouseDown={(e) => startResize(key, e)} style={{ position: 'absolute', right: -6, top: -8, bottom: -8, width: 12, cursor: 'col-resize' }} />
+          </div>
         ))}
+        <div style={{ flex: 1, minWidth: 0, fontSize: Math.max(9, fs - 4), color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>Secret / Hash</div>
+        <div style={{ width: widths.cracked, flexShrink: 0, fontSize: Math.max(9, fs - 4), color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', position: 'relative', borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Cracked</span>
+          <span onMouseDown={(e) => startResize('cracked', e)} style={{ position: 'absolute', right: -6, top: -8, bottom: -8, width: 12, cursor: 'col-resize' }} />
+        </div>
         <div style={{ width: 56 }} />
       </div>
 
@@ -316,19 +367,19 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
             const { confirmed, predicted } = getApplicableHosts(cred, projectHosts);
             return (
               <div key={cred.id} onClick={(e) => { if (e.target.type !== 'checkbox') setSelectedId(isSel ? null : cred.id); }}
-                style={{ display: 'flex', alignItems: 'center', minHeight: 44, padding: '8px 18px', borderBottom: '1px solid #14161b', gap: 12, transition: 'background .1s', cursor: 'pointer', background: isSel ? '#ffffff06' : checkedIds.includes(cred.id) ? '#ffffff04' : 'transparent', borderLeft: isSel ? `2px solid ${accent}` : cred.is_domain ? '2px solid #c07af033' : '2px solid transparent' }}
+                style={{ display: 'flex', alignItems: 'stretch', minHeight: 44, padding: '8px 18px', borderBottom: '1px solid #14161b', transition: 'background .1s', cursor: 'pointer', background: isSel ? '#ffffff06' : checkedIds.includes(cred.id) ? '#ffffff04' : 'transparent', borderLeft: isSel ? `2px solid ${accent}` : cred.is_domain ? '2px solid #c07af033' : '2px solid transparent' }}
                 onMouseEnter={e => !isSel && (e.currentTarget.style.background = '#ffffff04')}
                 onMouseLeave={e => !isSel && !checkedIds.includes(cred.id) && (e.currentTarget.style.background = 'transparent')}>
 
                 {/* Checkbox */}
-                <div style={{ width: 28, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={e => e.stopPropagation()}>
+                <div style={{ width: 28, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRight: colBorder, paddingRight: 12, marginRight: 12 }} onClick={e => e.stopPropagation()}>
                   <input type="checkbox" checked={checkedIds.includes(cred.id)}
                     onChange={e => setCheckedIds(prev => e.target.checked ? [...prev, cred.id] : prev.filter(id => id !== cred.id))}
                     style={{ width: 13, height: 13, cursor: 'pointer', accentColor: accent }} />
                 </div>
 
                 {/* Username + notes */}
-                <div style={{ width: 150, flexShrink: 0, minWidth: 0 }}>
+                <div style={{ width: widths.username, flexShrink: 0, minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                   <div style={{ fontSize: Math.max(11, fs - 1), color: '#e0e4ec', fontFamily: 'JetBrains Mono', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {cred.username}
                   </div>
@@ -336,13 +387,13 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                 </div>
 
                 {/* Type */}
-                <div style={{ width: 90, flexShrink: 0 }}><CredTypeBadge type={cred.type} /></div>
+                <div style={{ width: widths.type, flexShrink: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center', overflow: 'hidden' }}><CredTypeBadge type={cred.type} /></div>
 
                 {/* Service */}
-                <div style={{ width: 90, flexShrink: 0, fontSize: Math.max(10, fs - 3), color: '#606570', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cred.service || '—'}</div>
+                <div style={{ width: widths.service, flexShrink: 0, fontSize: Math.max(10, fs - 3), color: '#606570', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center' }}>{cred.service || '—'}</div>
 
                 {/* Hosts column */}
-                <div style={{ width: 180, flexShrink: 0, minWidth: 0 }}>
+                <div style={{ width: widths.hosts, flexShrink: 0, minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                   <HostChips cred={cred} projectHosts={projectHosts} maxVisible={2} />
                   {/* Predicted count hint */}
                   {cred.is_domain && predicted.length > 0 && (
@@ -352,19 +403,31 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                   )}
                 </div>
 
+                {/* Tags */}
+                <div style={{ width: widths.tags, flexShrink: 0, minWidth: 0, display: 'flex', gap: 3, flexWrap: 'nowrap', alignItems: 'center', overflow: 'hidden', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
+                  {(cred.tags || []).length === 0 && <span style={{ fontSize: Math.max(9, fs - 4), color: '#303540', fontFamily: 'JetBrains Mono' }}>—</span>}
+                  {(cred.tags || []).slice(0, 3).map(tag => (
+                    (() => {
+                      const meta = getCredTagMeta(tag);
+                      return <span key={tag} style={{ fontSize: Math.max(9, fs - 4), color: meta.color, background: `${meta.color}18`, border: `1px solid ${meta.color}44`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>{meta.label}</span>;
+                    })()
+                  ))}
+                  {(cred.tags || []).length > 3 && <span style={{ fontSize: Math.max(9, fs - 4), color: '#505560', fontFamily: 'JetBrains Mono' }}>+{cred.tags.length - 3}</span>}
+                </div>
+
                 {/* Secret */}
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, overflow: 'hidden' }}>
                   <span style={{ fontSize: Math.max(10, fs - 3), color: shown ? '#c8cdd6' : '#404550', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, filter: shown ? 'none' : 'blur(4px)', transition: 'filter .2s', userSelect: shown ? 'text' : 'none' }}>
                     {cred.secret || '(empty)'}
                   </span>
                 </div>
 
                 {/* Cracked */}
-                <div style={{ width: 70, flexShrink: 0 }}>
+                <div style={{ width: widths.cracked, flexShrink: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
                   {cred.cracked
-                    ? <span style={{ fontSize: 9, color: '#39d353', background: '#39d35322', border: '1px solid #39d35344', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>✓ cracked</span>
+                    ? <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 9, color: '#39d353', background: '#39d35322', border: '1px solid #39d35344', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>✓ cracked</span>
                     : <button onClick={e => { e.stopPropagation(); onUpdate(cred.id, { cracked: true }); }}
-                        style={{ fontSize: 9, color: '#404550', background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', cursor: 'pointer' }}>hash</button>}
+                        style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 9, color: '#404550', background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', cursor: 'pointer' }}>hash</button>}
                 </div>
 
                 {/* Actions */}
@@ -404,6 +467,9 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
             </div>
 
             <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {getCredBadges(selCred).map(b => <Badge key={b.label} label={b.label} color={b.color} />)}
+              </div>
               <FieldInput label="Username" value={selCred.username} onChange={v => onUpdate(selCred.id, { username: v })} placeholder="DOMAIN\admin" />
               <FieldInput label="Secret / Password / Hash" value={selCred.secret} onChange={v => onUpdate(selCred.id, { secret: v })} placeholder="P@ssw0rd or NTLM" />
 
@@ -461,6 +527,8 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                   style={{ width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
               </div>
 
+              <FieldInput label="Domain" value={selCred.domain || ''} onChange={v => onUpdate(selCred.id, { domain: v })} placeholder="edu.stf" />
+
               {/* Service */}
               <div>
                 <div style={{ fontSize: 9, color: '#505560', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '.1em' }}>Service</div>
@@ -473,6 +541,8 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                 <input value={selCred.service || ''} onChange={e => onUpdate(selCred.id, { service: e.target.value })} placeholder="SSH"
                   style={{ width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
               </div>
+
+              <TagEditor label="Tags" tags={selCred.tags || []} onChange={tags => onUpdate(selCred.id, { tags })} placeholder="domain-admin, kerberoastable" />
 
               {/* Cracked */}
               <div>

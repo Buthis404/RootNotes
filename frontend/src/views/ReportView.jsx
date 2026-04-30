@@ -1,15 +1,17 @@
 import Icon from '../components/Icon.jsx';
 import { StatusDot, PhaseTag, HostStatusBadge, CredTypeBadge } from '../components/UI.jsx';
 import { PHASES, PHASE_COLORS, NODE_STATUS, SEVERITY, FINDING_STATUS } from '../constants.js';
+import { isAttackerHost } from '../utils/hostMeta.js';
 
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 
-export default function ReportView({ projects, notes, hosts, creds, findings = [], selectedProject, accent }) {
+export default function ReportView({ projects, notes, hosts, creds, findings = [], hostActivities = [], selectedProject, accent }) {
   const proj = projects.find(p => p.id === selectedProject);
   const pNotes = notes.filter(n => n.pid === selectedProject);
-  const pHosts = hosts.filter(h => h.pid === selectedProject && h.status !== 'attacker');
+  const pHosts = hosts.filter(h => h.pid === selectedProject && !isAttackerHost(h));
   const pCreds = creds.filter(c => c.pid === selectedProject);
   const pFindings = [...(findings.filter(f => f.pid === selectedProject))].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
+  const pActivities = [...hostActivities.filter(a => a.pid === selectedProject && pHosts.some(h => h.id === a.host_id))].sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
 
   const phaseStat = PHASES.map(ph => ({ ph, count: pNotes.filter(n => n.phase === ph).length })).filter(x => x.count > 0);
   const hostsBySt = Object.entries(NODE_STATUS).map(([k, v]) => ({ ...v, key: k, count: pHosts.filter(h => h.status === k).length })).filter(x => x.count > 0);
@@ -39,7 +41,7 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12, marginBottom: 24 }}>
-        {[['notes', 'Notes', pNotes.length, '#6fc8f0'], ['hosts', 'Hosts', pHosts.length, '#c07af0'], ['creds', 'Creds', pCreds.length, '#39d353'], ['target', 'Pwned', critHosts.length, '#cc2233'], ['bug', 'Findings', pFindings.length, '#e8574a']].map(([icon, l, v, c]) => (
+        {[['notes', 'Notes', pNotes.length, '#6fc8f0'], ['hosts', 'Hosts', pHosts.length, '#c07af0'], ['person', 'Creds', pCreds.length, '#39d353'], ['target', 'Pwned', critHosts.length, '#cc2233'], ['bug', 'Findings', pFindings.length, '#e8574a']].map(([icon, l, v, c]) => (
           <div key={l} style={{ background: '#0d0f14', border: `1px solid ${v > 0 && (l === 'Pwned' || l === 'Findings') ? c + '44' : '#1e2029'}`, borderRadius: 8, padding: '14px 16px' }}>
             <div style={{ fontSize: 26, fontWeight: 700, color: v > 0 ? c : '#303540', fontFamily: 'Space Grotesk', marginBottom: 4 }}>{v}</div>
             <div style={{ fontSize: 10, color: '#606570', display: 'flex', alignItems: 'center', gap: 6 }}><Icon name={icon} size={11} color="#404550" />{l}</div>
@@ -94,7 +96,7 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
       {crackedCreds.length > 0 && (
         <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: 18, marginBottom: 16 }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Icon name="key" size={13} color="#39d353" />Cracked credentials
+            <Icon name="person" size={13} color="#39d353" />Cracked credentials
           </div>
           {crackedCreds.map(c => (
             <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: '1px solid #14161b' }}>
@@ -143,6 +145,30 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
                   {linkedHost && <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>{linkedHost.ip}</span>}
                 </div>
                 {f.description && <div style={{ fontSize: 11, color: '#808590', lineHeight: 1.5 }}>{f.description.slice(0, 200)}{f.description.length > 200 ? '...' : ''}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {pActivities.length > 0 && (
+        <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: 18, marginTop: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="terminal" size={13} color={accent} />Host activity log
+          </div>
+          {pActivities.slice(0, 12).map(a => {
+            const host = hosts.find(h => h.id === a.host_id);
+            return (
+              <div key={a.id} style={{ padding: '10px 0', borderBottom: '1px solid #14161b' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 8, color: accent, background: accent + '18', border: `1px solid ${accent}44`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono', textTransform: 'uppercase' }}>{a.activity_type}</span>
+                  <span style={{ fontSize: 8, color: '#808590', background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono', textTransform: 'uppercase' }}>{a.status}</span>
+                  {host && <span style={{ fontSize: 10, color: '#5b8af5', fontFamily: 'JetBrains Mono' }}>{host.ip}{host.hostname ? ` (${host.hostname})` : ''}</span>}
+                  <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginLeft: 'auto' }}>{a.ts}</span>
+                </div>
+                <div style={{ fontSize: 11, color: '#e0e4ec', fontWeight: 600, marginBottom: 3 }}>{a.title || 'Untitled activity'}</div>
+                {a.command && <div style={{ fontSize: 10, color: '#9098a8', fontFamily: 'JetBrains Mono', marginBottom: 3, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{a.command}</div>}
+                {a.summary && <div style={{ fontSize: 10, color: '#808590', lineHeight: 1.5 }}>{a.summary}</div>}
               </div>
             );
           })}

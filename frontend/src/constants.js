@@ -84,7 +84,7 @@ export const TABS = [
   {id:'projects',   icon:'projects',  label:'Projects'},
   {id:'notes',      icon:'notes',     label:'Notes'},
   {id:'hosts',      icon:'hosts',     label:'Hosts'},
-  {id:'creds',      icon:'creds',     label:'Creds'},
+  {id:'creds',      icon:'person',    label:'Creds'},
   {id:'findings',   icon:'bug',       label:'Findings'},
   {id:'objectives', icon:'flag',      label:'Objectives'},
   {id:'attackpath', icon:'attackpath',label:'Attack Path'},

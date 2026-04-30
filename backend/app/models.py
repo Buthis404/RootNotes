@@ -69,6 +69,8 @@ class Host(Base):
     tags = Column(ARRAY(String), nullable=False, default=[])
     notes = Column(Text, nullable=False, default="")
     domain = Column(String, nullable=False, default="")
+    role = Column(String, nullable=False, default="unknown")
+    is_attacker = Column(Boolean, nullable=False, default=False)
 
 
 class Cred(Base):
@@ -81,8 +83,10 @@ class Cred(Base):
     type = Column(String, nullable=False, default="plain")
     service = Column(String, nullable=False, default="")
     host = Column(String, nullable=False, default="")
+    domain = Column(String, nullable=False, default="")
     cracked = Column(Boolean, nullable=False, default=False)
     notes = Column(Text, nullable=False, default="")
+    tags = Column(ARRAY(String), nullable=False, default=[])
     host_ids = Column(ARRAY(String), nullable=False, default=[])
     is_domain = Column(Boolean, nullable=False, default=False)
 
@@ -216,3 +220,44 @@ class Objective(Base):
     captured_by = Column(String, nullable=False, default="")
     captured_at = Column(String, nullable=False, default="")
     ts = Column(String, nullable=False)
+
+
+class HostActivity(Base):
+    __tablename__ = "host_activities"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    host_id = Column(String, ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String, nullable=False, default="")
+    activity_type = Column(String, nullable=False, default="recon")
+    command = Column(Text, nullable=False, default="")
+    summary = Column(Text, nullable=False, default="")
+    output = Column(Text, nullable=False, default="")
+    status = Column(String, nullable=False, default="done")
+    ts = Column(String, nullable=False)
+
+
+class FindingTemplate(Base):
+    __tablename__ = "finding_templates_custom"
+
+    id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    severity = Column(String, nullable=False, default="medium")
+    cvss = Column(String, nullable=False, default="")
+    cve = Column(String, nullable=False, default="")
+    description = Column(Text, nullable=False, default="")
+    proof = Column(Text, nullable=False, default="")
+    recommendation = Column(Text, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+
+
+class CustomSnippet(Base):
+    __tablename__ = "custom_snippets"
+
+    id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=False, default="Misc")
+    command = Column(Text, nullable=False, default="")
+    tags = Column(ARRAY(String), nullable=False, default=[])
+    opsec = Column(Text, nullable=False, default="")
+    created_at = Column(String, nullable=False)

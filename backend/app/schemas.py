@@ -117,6 +117,8 @@ class HostBase(BaseModel):
     tags: List[str] = []
     notes: str = ""
     domain: str = ""
+    role: str = "unknown"
+    is_attacker: bool = False
 
 
 class HostCreate(HostBase):
@@ -134,6 +136,8 @@ class HostUpdate(BaseModel):
     tags: Optional[List[str]] = None
     notes: Optional[str] = None
     domain: Optional[str] = None
+    role: Optional[str] = None
+    is_attacker: Optional[bool] = None
 
 
 class Host(HostBase):
@@ -149,8 +153,10 @@ class CredBase(BaseModel):
     type: str = "plain"
     service: str = ""
     host: str = ""
+    domain: str = ""
     cracked: bool = False
     notes: str = ""
+    tags: List[str] = []
     host_ids: List[str] = []
     is_domain: bool = False
 
@@ -165,8 +171,10 @@ class CredUpdate(BaseModel):
     type: Optional[str] = None
     service: Optional[str] = None
     host: Optional[str] = None
+    domain: Optional[str] = None
     cracked: Optional[bool] = None
     notes: Optional[str] = None
+    tags: Optional[List[str]] = None
     host_ids: Optional[List[str]] = None
     is_domain: Optional[bool] = None
 
@@ -406,6 +414,38 @@ class Objective(ObjectiveBase):
     model_config = {"from_attributes": True}
 
 
+# ── Host Activities ────────────────────────────────────────────────────
+class HostActivityBase(BaseModel):
+    pid: str
+    host_id: str
+    title: str = ""
+    activity_type: str = "recon"
+    command: str = ""
+    summary: str = ""
+    output: str = ""
+    status: str = "done"
+    ts: str = ""
+
+
+class HostActivityCreate(HostActivityBase):
+    pass
+
+
+class HostActivityUpdate(BaseModel):
+    title: Optional[str] = None
+    activity_type: Optional[str] = None
+    command: Optional[str] = None
+    summary: Optional[str] = None
+    output: Optional[str] = None
+    status: Optional[str] = None
+    ts: Optional[str] = None
+
+
+class HostActivity(HostActivityBase):
+    id: str
+    model_config = {"from_attributes": True}
+
+
 # ── CredHostNote ──────────────────────────────────────────────────────
 class CredHostNoteCreate(BaseModel):
     cred_id: str
@@ -438,4 +478,54 @@ class TimelineEvent(BaseModel):
     label: str
     meta: Any = {}
     ts: str
+    model_config = {"from_attributes": True}
+
+
+# ── Custom Finding Templates ───────────────────────────────────────────
+class FindingTemplateBase(BaseModel):
+    title: str
+    severity: str = "medium"
+    cvss: str = ""
+    cve: str = ""
+    description: str = ""
+    proof: str = ""
+    recommendation: str = ""
+
+
+class FindingTemplateCreate(FindingTemplateBase):
+    pass
+
+
+class FindingTemplate(FindingTemplateBase):
+    id: str
+    created_at: str = ""
+    is_custom: bool = False
+    model_config = {"from_attributes": True}
+
+
+# ── Custom Snippets ────────────────────────────────────────────────────
+class CustomSnippetBase(BaseModel):
+    title: str
+    category: str = "Misc"
+    command: str = ""
+    tags: List[str] = []
+    opsec: str = ""
+
+
+class CustomSnippetCreate(CustomSnippetBase):
+    pass
+
+
+class CustomSnippetUpdate(BaseModel):
+    title: Optional[str] = None
+    category: Optional[str] = None
+    command: Optional[str] = None
+    tags: Optional[List[str]] = None
+    opsec: Optional[str] = None
+
+
+class CustomSnippet(CustomSnippetBase):
+    id: str
+    created_at: str = ""
+    is_custom: bool = False
     model_config = {"from_attributes": True}

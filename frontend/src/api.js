@@ -133,6 +133,12 @@ export const api = {
   updateScope:  (id, data) => req('PATCH',  `/scopes/${id}`,    data),
   deleteScope:  (id)       => req('DELETE', `/scopes/${id}`),
 
+  // Host activities
+  getHostActivities: (pid, hostId) => req('GET', `/host-activities${pid || hostId ? `?${new URLSearchParams({ ...(pid ? { pid } : {}), ...(hostId ? { host_id: hostId } : {}) }).toString()}` : ''}`),
+  createHostActivity: (data) => req('POST', '/host-activities', data),
+  updateHostActivity: (id, data) => req('PATCH', `/host-activities/${id}`, data),
+  deleteHostActivity: (id) => req('DELETE', `/host-activities/${id}`),
+
   // Cred-host notes
   getCredHostNotes: (params) => {
     const qs = new URLSearchParams(params).toString();
@@ -147,6 +153,51 @@ export const api = {
 
   // Global presence
   getPresence: () => req('GET', '/presence'),
+
+  // Custom finding templates
+  listFindingTemplates: () => req('GET', '/finding-templates'),
+  listCustomFindingTemplates: () => req('GET', '/finding-templates/custom'),
+  createCustomFindingTemplate: (data) => req('POST', '/finding-templates/custom', data),
+  deleteCustomFindingTemplate: (id) => req('DELETE', `/finding-templates/custom/${id}`),
+  exportFindingTemplates: () => fetch(BASE + '/finding-templates/export', {
+    headers: { 'Authorization': `Bearer ${getToken()}` },
+  }).then(async res => {
+    if (!res.ok) throw new Error(await res.text());
+    return res.blob();
+  }),
+  importFindingTemplates: async (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(BASE + '/finding-templates/import', {
+      method: 'POST', body: form,
+      headers: { 'Authorization': `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  },
+
+  // Custom snippets
+  listSnippets: () => req('GET', '/snippets'),
+  listCustomSnippets: () => req('GET', '/snippets/custom'),
+  createCustomSnippet: (data) => req('POST', '/snippets/custom', data),
+  updateCustomSnippet: (id, data) => req('PATCH', `/snippets/custom/${id}`, data),
+  deleteCustomSnippet: (id) => req('DELETE', `/snippets/custom/${id}`),
+  exportSnippets: () => fetch(BASE + '/snippets/export', {
+    headers: { 'Authorization': `Bearer ${getToken()}` },
+  }).then(async res => {
+    if (!res.ok) throw new Error(await res.text());
+    return res.blob();
+  }),
+  importSnippets: async (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(BASE + '/snippets/import', {
+      method: 'POST', body: form,
+      headers: { 'Authorization': `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  },
 
   // Batch import
   batchImport: (pid, data) => req('POST', `/import/${pid}`, data),

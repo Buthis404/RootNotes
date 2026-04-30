@@ -14,45 +14,67 @@ The project in this repository is split into:
 
 ### Login
 ![Login](docs/screenshots/01_login.png)
+Fast private access for the team workspace.
 
 ### Projects
 ![Projects](docs/screenshots/02_projects.png)
+Manage multiple engagements with status, counters, and import/export in one place.
 
 ### Notes
 ![Notes](docs/screenshots/03_notes.png)
+Structured operator notes with phases, tags, and live-ready documentation.
 
 ### Hosts
 ![Hosts](docs/screenshots/04_hosts.png)
+Track hosts, exposure, tags, services, and linked credentials from one screen.
 
 ### Credentials
 ![Credentials](docs/screenshots/05_creds.png)
+Centralized credential view with AD context, cracked state, tags, and host linkage.
 
 ### Findings
 ![Findings](docs/screenshots/06_findings.png)
+Turn technical evidence into report-ready findings with templates and workflow states.
 
 ### Loot
 ![Loot](docs/screenshots/07_loot.png)
+Keep files, hashes, secrets, and artifacts indexed and easy to review.
 
 ### Objectives
 ![Objectives](docs/screenshots/08_objectives.png)
+Track mission goals, captured flags, ownership, and progress at a glance.
 
 ### Attack Path
 ![Attack Path](docs/screenshots/09_attackpath.png)
+Model escalation paths clearly for operators, reviewers, and final reporting.
 
 ### Global Search
 ![Search](docs/screenshots/10_search.png)
+Search across notes, hosts, creds, loot, and findings without losing context.
 
 ### Admin
 ![Admin](docs/screenshots/11_admin.png)
+Support multi-user operations with shared access and centralized administration.
 
 ### Checklist
 ![Checklist](docs/screenshots/12_checklist.png)
+Keep engagements disciplined with a phase-based operational checklist.
 
 ### Timeline
 ![Timeline](docs/screenshots/13_timeline.png)
+See who changed what and when through a built-in engagement timeline.
 
 ### Scope
 ![Scope](docs/screenshots/14_scope.png)
+Keep scope visible and reduce mistakes on live engagements.
+
+### Network
+![Network](docs/screenshots/15_network.png)
+Visualize infrastructure, relationships, and attack flow on a single map.
+
+### Report
+![Report](docs/screenshots/16_report.png)
+Get a fast executive-style summary of the whole engagement.
 
 ## Features
 

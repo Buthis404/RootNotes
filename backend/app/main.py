@@ -32,6 +32,7 @@ models.Base.metadata.create_all(bind=engine)
 UPLOAD_ROOT = Path(os.environ.get("UPLOAD_ROOT", "/data/uploads"))
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 SAFE_UPLOAD_RE = re.compile(r"[^A-Za-z0-9._-]+")
+DEFAULT_CATALOG_PATH = Path(__file__).with_name("default_catalog.json")
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "redteam-notes-change-me-in-production")
 JWT_ALGO   = "HS256"
@@ -92,11 +93,16 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text("ALTER TABLE creds ADD COLUMN IF NOT EXISTS host_ids TEXT[] NOT NULL DEFAULT '{}'"))
     conn.execute(text("ALTER TABLE creds ADD COLUMN IF NOT EXISTS is_domain BOOLEAN NOT NULL DEFAULT FALSE"))
+    conn.execute(text("ALTER TABLE creds ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'"))
+    conn.execute(text("ALTER TABLE creds ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'unknown'"))
+    conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS is_attacker BOOLEAN NOT NULL DEFAULT FALSE"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, title TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'medium', cvss TEXT NOT NULL DEFAULT '', cve TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', proof TEXT NOT NULL DEFAULT '', recommendation TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS checklist_items (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, phase TEXT NOT NULL, text TEXT NOT NULL, done BOOLEAN NOT NULL DEFAULT FALSE, order_idx INTEGER NOT NULL DEFAULT 0)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS timeline_events (id TEXT PRIMARY KEY, pid TEXT NOT NULL, username TEXT, entity TEXT NOT NULL, action TEXT NOT NULL, label TEXT NOT NULL, meta JSONB NOT NULL DEFAULT '{}', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS objectives (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'flag', points INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'not_started', flag_value TEXT NOT NULL DEFAULT '', captured_by TEXT NOT NULL DEFAULT '', captured_at TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
+    conn.execute(text("CREATE TABLE IF NOT EXISTS host_activities (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, title TEXT NOT NULL DEFAULT '', activity_type TEXT NOT NULL DEFAULT 'recon', command TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'done', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS attack_paths (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, name TEXT NOT NULL DEFAULT 'Attack Path', description TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS attack_steps (id TEXT PRIMARY KEY, path_id TEXT NOT NULL REFERENCES attack_paths(id) ON DELETE CASCADE, pid TEXT NOT NULL, step_order INTEGER NOT NULL DEFAULT 0, node_type TEXT NOT NULL DEFAULT 'host', label TEXT NOT NULL DEFAULT '', sublabel TEXT NOT NULL DEFAULT '', technique TEXT NOT NULL DEFAULT '', mitre_id TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS loots (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, loot_type TEXT NOT NULL DEFAULT 'file', value TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', source_path TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
@@ -104,6 +110,8 @@ with engine.begin() as conn:
     conn.execute(text("CREATE TABLE IF NOT EXISTS cred_host_notes (id TEXT PRIMARY KEY, cred_id TEXT NOT NULL REFERENCES creds(id) ON DELETE CASCADE, host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, notes TEXT NOT NULL DEFAULT '', access TEXT[] NOT NULL DEFAULT '{}')"))
     conn.execute(text("ALTER TABLE cred_host_notes ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("ALTER TABLE cred_host_notes ADD COLUMN IF NOT EXISTS access TEXT[] NOT NULL DEFAULT '{}'"))
+    conn.execute(text("CREATE TABLE IF NOT EXISTS finding_templates_custom (id TEXT PRIMARY KEY, title TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'medium', cvss TEXT NOT NULL DEFAULT '', cve TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', proof TEXT NOT NULL DEFAULT '', recommendation TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"))
+    conn.execute(text("CREATE TABLE IF NOT EXISTS custom_snippets (id TEXT PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Misc', command TEXT NOT NULL DEFAULT '', tags TEXT[] NOT NULL DEFAULT '{}', opsec TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"))
 
 app = FastAPI(title="RootNotes API", lifespan=lifespan)
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
@@ -178,10 +186,97 @@ def new_id(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
 
+def _norm_text(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _normalize_domain(value: str) -> str:
+    return (value or "").strip().lower().rstrip('.')
+
+
 def safe_upload_name(name: str) -> str:
     base = Path(name or "attachment.bin").name
     cleaned = SAFE_UPLOAD_RE.sub("_", base).strip("._")
     return cleaned or "attachment.bin"
+
+
+def _split_scope_values(raw: str) -> list[str]:
+    parts = re.split(r"[\n,;]+", raw or "")
+    out = []
+    seen = set()
+    for part in parts:
+        value = part.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _infer_scope_type(value: str) -> str:
+    val = (value or "").strip().lower()
+    if val.startswith("http://") or val.startswith("https://"):
+        return "url"
+    if "/" in val and re.match(r"^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$", val):
+        return "cidr"
+    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", val):
+        return "cidr"
+    if "." in val and not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", val):
+        return "domain" if val.count(".") == 1 or val.endswith(".local") or val.endswith(".corp") or val.endswith(".lan") else "hostname"
+    return "hostname"
+
+
+def _is_project_network_value(value: str) -> bool:
+    val = (value or "").strip()
+    return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?$", val))
+
+
+def _sync_project_ip_from_scopes(db: Session, pid: str):
+    project = db.query(models.Project).filter(models.Project.id == pid).first()
+    if not project:
+        return
+    scopes = db.query(models.Scope).filter(models.Scope.pid == pid, models.Scope.in_scope == True).all()
+    values = [s.value.strip() for s in scopes if (s.value or "").strip() and s.scope_type == "cidr" and _is_project_network_value(s.value)]
+    next_ip = ", ".join(values)
+    if project.ip != next_ip:
+        project.ip = next_ip
+
+
+def _sync_scopes_from_project_ip(db: Session, pid: str):
+    project = db.query(models.Project).filter(models.Project.id == pid).first()
+    if not project:
+        return
+    target_values = [value for value in _split_scope_values(project.ip) if _is_project_network_value(value)]
+    scopes = db.query(models.Scope).filter(models.Scope.pid == pid, models.Scope.in_scope == True, models.Scope.scope_type == "cidr").all()
+    by_value = {s.value.strip(): s for s in scopes if (s.value or "").strip()}
+
+    for value in target_values:
+        existing = by_value.get(value)
+        inferred_type = _infer_scope_type(value)
+        if existing:
+            if existing.scope_type != inferred_type:
+                existing.scope_type = inferred_type
+        else:
+            db.add(models.Scope(id=new_id("sc"), pid=pid, value=value, scope_type=inferred_type, in_scope=True, description=""))
+
+    for scope in scopes:
+        if (scope.value or "").strip() not in target_values:
+            db.delete(scope)
+
+
+def _load_default_catalog() -> dict:
+    try:
+        return json.loads(DEFAULT_CATALOG_PATH.read_text())
+    except Exception:
+        return {"finding_templates": [], "snippets": []}
+
+
+def _list_default_finding_templates() -> list[dict]:
+    return [{**item, "created_at": "", "is_custom": False} for item in _load_default_catalog().get("finding_templates", [])]
+
+
+def _list_default_snippets() -> list[dict]:
+    return [{**item, "created_at": "", "is_custom": False} for item in _load_default_catalog().get("snippets", [])]
 
 
 def ensure_under_upload_root(path: Path) -> Path:
@@ -325,6 +420,8 @@ def list_projects(db: Session = Depends(get_db)):
 def create_project(body: schemas.ProjectCreate, db: Session = Depends(get_db)):
     project = models.Project(id=new_id("p"), **body.model_dump())
     db.add(project)
+    db.flush()
+    _sync_scopes_from_project_ip(db, project.id)
     db.commit()
     db.refresh(project)
     # Broadcast to all (no pid room yet, skip)
@@ -336,8 +433,12 @@ def update_project(pid: str, body: schemas.ProjectUpdate, db: Session = Depends(
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
+    ip_changed = body.ip is not None
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(project, k, v)
+    if ip_changed:
+        _sync_scopes_from_project_ip(db, pid)
+        _sync_project_ip_from_scopes(db, pid)
     db.commit()
     db.refresh(project)
     p = schemas.Project.model_validate(project)
@@ -474,6 +575,11 @@ def list_hosts(pid: str | None = None, db: Session = Depends(get_db)):
 @app.post("/api/hosts", response_model=schemas.Host, status_code=201)
 def create_host(body: schemas.HostCreate, request: Request, db: Session = Depends(get_db)):
     payload = body.model_dump()
+    payload['domain'] = _normalize_domain(payload.get('domain', ''))
+    payload['role'] = payload.get('role') or 'unknown'
+    payload['is_attacker'] = bool(payload.get('is_attacker')) or payload['role'] == 'attacker'
+    if payload['is_attacker']:
+        payload['status'] = 'attacker'
     host = models.Host(id=new_id("hst"), **payload)
     db.add(host)
     label = f"Host added: {host.ip}" + (f" ({host.hostname})" if host.hostname else "")
@@ -491,7 +597,16 @@ def update_host(hid: str, body: schemas.HostUpdate, request: Request, db: Sessio
     if not host:
         raise HTTPException(404, "Host not found")
     old_status = host.status
-    for k, v in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+    if 'domain' in updates:
+        updates['domain'] = _normalize_domain(updates.get('domain', ''))
+    if 'role' in updates and updates['role'] == 'attacker':
+        updates['is_attacker'] = True
+        updates['status'] = 'attacker'
+    if updates.get('is_attacker') is True:
+        updates['role'] = 'attacker'
+        updates['status'] = 'attacker'
+    for k, v in updates.items():
         setattr(host, k, v)
     if body.status is not None and body.status != old_status:
         log_event(db, host.pid, getattr(request.state, 'username', None), 'host', 'status',
@@ -526,7 +641,9 @@ def list_creds(pid: str | None = None, db: Session = Depends(get_db)):
 
 @app.post("/api/creds", response_model=schemas.Cred, status_code=201)
 def create_cred(body: schemas.CredCreate, request: Request, db: Session = Depends(get_db)):
-    cred = models.Cred(id=new_id("c"), **body.model_dump())
+    payload = body.model_dump()
+    payload['domain'] = _normalize_domain(payload.get('domain', ''))
+    cred = models.Cred(id=new_id("c"), **payload)
     db.add(cred)
     label = f"Cred added: {cred.username}" + (f"@{cred.host}" if cred.host else "")
     log_event(db, cred.pid, getattr(request.state, 'username', None), 'cred', 'create', label, {"username": cred.username})
@@ -543,7 +660,10 @@ def update_cred(cid: str, body: schemas.CredUpdate, request: Request, db: Sessio
     if not cred:
         raise HTTPException(404, "Cred not found")
     old_cracked = cred.cracked
-    for k, v in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+    if 'domain' in updates:
+        updates['domain'] = _normalize_domain(updates.get('domain', ''))
+    for k, v in updates.items():
         setattr(cred, k, v)
     if body.cracked is not None and body.cracked and not old_cracked:
         log_event(db, cred.pid, getattr(request.state, 'username', None), 'cred', 'cracked',
@@ -628,6 +748,184 @@ def health():
 @app.get("/api/presence")
 def get_global_presence():
     return {"online": manager.get_all_online()}
+
+
+# ── Global custom data ────────────────────────────────────────────────
+@app.get("/api/finding-templates", response_model=list[schemas.FindingTemplate])
+def list_finding_templates(db: Session = Depends(get_db)):
+    custom = [
+        {**schemas.FindingTemplate.model_validate(item).model_dump(), "is_custom": True}
+        for item in db.query(models.FindingTemplate).order_by(models.FindingTemplate.created_at.desc()).all()
+    ]
+    return custom + _list_default_finding_templates()
+
+
+@app.get("/api/finding-templates/custom", response_model=list[schemas.FindingTemplate])
+def list_custom_finding_templates(db: Session = Depends(get_db)):
+    return [{**schemas.FindingTemplate.model_validate(item).model_dump(), "is_custom": True} for item in db.query(models.FindingTemplate).order_by(models.FindingTemplate.created_at.desc()).all()]
+
+
+@app.post("/api/finding-templates/custom", response_model=schemas.FindingTemplate, status_code=201)
+def create_custom_finding_template(body: schemas.FindingTemplateCreate, db: Session = Depends(get_db)):
+    incoming = body.model_dump()
+    existing = db.query(models.FindingTemplate).all()
+    for item in existing:
+        if (
+            _norm_text(item.title) == _norm_text(incoming["title"]) and
+            _norm_text(item.severity) == _norm_text(incoming["severity"]) and
+            _norm_text(item.cvss) == _norm_text(incoming["cvss"]) and
+            _norm_text(item.cve) == _norm_text(incoming["cve"]) and
+            _norm_text(item.description) == _norm_text(incoming["description"]) and
+            _norm_text(item.proof) == _norm_text(incoming["proof"]) and
+            _norm_text(item.recommendation) == _norm_text(incoming["recommendation"])
+        ):
+            raise HTTPException(409, "A custom finding template with the same content already exists")
+    item = models.FindingTemplate(id=new_id("ft"), created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"), **body.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.delete("/api/finding-templates/custom/{tid}", status_code=204)
+def delete_custom_finding_template(tid: str, db: Session = Depends(get_db)):
+    item = db.query(models.FindingTemplate).filter(models.FindingTemplate.id == tid).first()
+    if not item:
+        raise HTTPException(404, "Template not found")
+    db.delete(item)
+    db.commit()
+
+
+@app.get("/api/finding-templates/export")
+def export_finding_templates(db: Session = Depends(get_db)):
+    data = list_finding_templates(db)
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
+    return StreamingResponse(io.BytesIO(payload), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="finding_templates.json"'})
+
+
+@app.post("/api/finding-templates/import", status_code=201)
+async def import_finding_templates(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    items = json.loads((await file.read()).decode())
+    imported = 0
+    existing = db.query(models.FindingTemplate).all()
+    for item in items:
+        if not item.get("is_custom"):
+            continue
+        duplicate = next((x for x in existing if _norm_text(x.title) == _norm_text(item.get("title", "")) and _norm_text(x.severity) == _norm_text(item.get("severity", "")) and _norm_text(x.cvss) == _norm_text(item.get("cvss", "")) and _norm_text(x.cve) == _norm_text(item.get("cve", "")) and _norm_text(x.description) == _norm_text(item.get("description", "")) and _norm_text(x.proof) == _norm_text(item.get("proof", "")) and _norm_text(x.recommendation) == _norm_text(item.get("recommendation", ""))), None)
+        if duplicate:
+            continue
+        obj = models.FindingTemplate(id=new_id("ft"), title=item.get("title", ""), severity=item.get("severity", "medium"), cvss=item.get("cvss", ""), cve=item.get("cve", ""), description=item.get("description", ""), proof=item.get("proof", ""), recommendation=item.get("recommendation", ""), created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"))
+        db.add(obj)
+        existing.append(obj)
+        imported += 1
+    db.commit()
+    return {"imported": imported}
+
+
+@app.get("/api/snippets", response_model=list[schemas.CustomSnippet])
+def list_snippets(db: Session = Depends(get_db)):
+    custom = [
+        {**schemas.CustomSnippet.model_validate(item).model_dump(), "is_custom": True}
+        for item in db.query(models.CustomSnippet).order_by(models.CustomSnippet.created_at.desc()).all()
+    ]
+    return custom + _list_default_snippets()
+
+
+@app.get("/api/snippets/custom", response_model=list[schemas.CustomSnippet])
+def list_custom_snippets(db: Session = Depends(get_db)):
+    return [{**schemas.CustomSnippet.model_validate(item).model_dump(), "is_custom": True} for item in db.query(models.CustomSnippet).order_by(models.CustomSnippet.created_at.desc()).all()]
+
+
+@app.post("/api/snippets/custom", response_model=schemas.CustomSnippet, status_code=201)
+def create_custom_snippet(body: schemas.CustomSnippetCreate, db: Session = Depends(get_db)):
+    incoming = body.model_dump()
+    incoming_tags = sorted([_norm_text(tag) for tag in incoming.get("tags", []) if _norm_text(tag)])
+    existing = db.query(models.CustomSnippet).all()
+    for item in existing:
+        item_tags = sorted([_norm_text(tag) for tag in (item.tags or []) if _norm_text(tag)])
+        if (
+            _norm_text(item.title) == _norm_text(incoming["title"]) and
+            _norm_text(item.category) == _norm_text(incoming["category"]) and
+            _norm_text(item.command) == _norm_text(incoming["command"]) and
+            _norm_text(item.opsec) == _norm_text(incoming["opsec"]) and
+            item_tags == incoming_tags
+        ):
+            raise HTTPException(409, "A custom snippet with the same content already exists")
+    item = models.CustomSnippet(id=new_id("snp"), created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"), **body.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.patch("/api/snippets/custom/{sid}", response_model=schemas.CustomSnippet)
+def update_custom_snippet(sid: str, body: schemas.CustomSnippetUpdate, db: Session = Depends(get_db)):
+    item = db.query(models.CustomSnippet).filter(models.CustomSnippet.id == sid).first()
+    if not item:
+        raise HTTPException(404, "Snippet not found")
+
+    incoming = {**{
+        "title": item.title,
+        "category": item.category,
+        "command": item.command,
+        "tags": item.tags or [],
+        "opsec": item.opsec,
+    }, **body.model_dump(exclude_none=True)}
+    incoming_tags = sorted([_norm_text(tag) for tag in incoming.get("tags", []) if _norm_text(tag)])
+
+    existing = db.query(models.CustomSnippet).filter(models.CustomSnippet.id != sid).all()
+    for other in existing:
+        other_tags = sorted([_norm_text(tag) for tag in (other.tags or []) if _norm_text(tag)])
+        if (
+            _norm_text(other.title) == _norm_text(incoming["title"]) and
+            _norm_text(other.category) == _norm_text(incoming["category"]) and
+            _norm_text(other.command) == _norm_text(incoming["command"]) and
+            _norm_text(other.opsec) == _norm_text(incoming["opsec"]) and
+            other_tags == incoming_tags
+        ):
+            raise HTTPException(409, "A custom snippet with the same content already exists")
+
+    for key, value in body.model_dump(exclude_none=True).items():
+        setattr(item, key, value)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.delete("/api/snippets/custom/{sid}", status_code=204)
+def delete_custom_snippet(sid: str, db: Session = Depends(get_db)):
+    item = db.query(models.CustomSnippet).filter(models.CustomSnippet.id == sid).first()
+    if not item:
+        raise HTTPException(404, "Snippet not found")
+    db.delete(item)
+    db.commit()
+
+
+@app.get("/api/snippets/export")
+def export_snippets(db: Session = Depends(get_db)):
+    data = list_snippets(db)
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
+    return StreamingResponse(io.BytesIO(payload), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="snippets.json"'})
+
+
+@app.post("/api/snippets/import", status_code=201)
+async def import_snippets(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    items = json.loads((await file.read()).decode())
+    imported = 0
+    existing = db.query(models.CustomSnippet).all()
+    for item in items:
+        if not item.get("is_custom"):
+            continue
+        incoming_tags = sorted([_norm_text(tag) for tag in item.get("tags", []) if _norm_text(tag)])
+        duplicate = next((x for x in existing if _norm_text(x.title) == _norm_text(item.get("title", "")) and _norm_text(x.category) == _norm_text(item.get("category", "")) and _norm_text(x.command) == _norm_text(item.get("command", "")) and _norm_text(x.opsec) == _norm_text(item.get("opsec", "")) and sorted([_norm_text(tag) for tag in (x.tags or []) if _norm_text(tag)]) == incoming_tags), None)
+        if duplicate:
+            continue
+        obj = models.CustomSnippet(id=new_id("snp"), title=item.get("title", ""), category=item.get("category", "Misc"), command=item.get("command", ""), tags=item.get("tags", []), opsec=item.get("opsec", ""), created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"))
+        db.add(obj)
+        existing.append(obj)
+        imported += 1
+    db.commit()
+    return {"imported": imported}
 
 
 # ── Findings ──────────────────────────────────────────────────────────
@@ -788,6 +1086,54 @@ def delete_objective(oid: str, request: Request, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+# ── Host Activities ────────────────────────────────────────────────────
+@app.get("/api/host-activities", response_model=list[schemas.HostActivity])
+def list_host_activities(pid: str | None = None, host_id: str | None = None, db: Session = Depends(get_db)):
+    q = db.query(models.HostActivity)
+    if pid:
+        q = q.filter(models.HostActivity.pid == pid)
+    if host_id:
+        q = q.filter(models.HostActivity.host_id == host_id)
+    return q.order_by(models.HostActivity.ts.desc()).all()
+
+
+@app.post("/api/host-activities", response_model=schemas.HostActivity, status_code=201)
+def create_host_activity(body: schemas.HostActivityCreate, request: Request, db: Session = Depends(get_db)):
+    item = models.HostActivity(id=new_id("ha"), **body.model_dump())
+    db.add(item)
+    host = db.query(models.Host).filter(models.Host.id == item.host_id).first()
+    host_label = host.hostname or host.ip if host else item.host_id
+    log_event(db, item.pid, getattr(request.state, 'username', None), 'host_activity', 'create', f"Host activity added: {host_label} / {item.title or item.activity_type}", {"host_id": item.host_id, "type": item.activity_type})
+    db.commit()
+    db.refresh(item)
+    bcast(item.pid, "host_activity", "create", schemas.HostActivity.model_validate(item).model_dump())
+    return item
+
+
+@app.patch("/api/host-activities/{aid}", response_model=schemas.HostActivity)
+def update_host_activity(aid: str, body: schemas.HostActivityUpdate, request: Request, db: Session = Depends(get_db)):
+    item = db.query(models.HostActivity).filter(models.HostActivity.id == aid).first()
+    if not item:
+        raise HTTPException(404, "Host activity not found")
+    for k, v in body.model_dump(exclude_none=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    bcast(item.pid, "host_activity", "update", schemas.HostActivity.model_validate(item).model_dump())
+    return item
+
+
+@app.delete("/api/host-activities/{aid}", status_code=204)
+def delete_host_activity(aid: str, request: Request, db: Session = Depends(get_db)):
+    item = db.query(models.HostActivity).filter(models.HostActivity.id == aid).first()
+    if not item:
+        raise HTTPException(404, "Host activity not found")
+    pid = item.pid
+    db.delete(item)
+    db.commit()
+    bcast(pid, "host_activity", "delete", {"id": aid})
+
+
 # ── Attack Paths ─────────────────────────────────────────────────────
 @app.get("/api/attack-paths", response_model=list[schemas.AttackPath])
 def list_attack_paths(pid: str | None = None, db: Session = Depends(get_db)):
@@ -930,6 +1276,7 @@ def list_scopes(pid: str | None = None, db: Session = Depends(get_db)):
 def create_scope(body: schemas.ScopeCreate, request: Request, db: Session = Depends(get_db)):
     scope = models.Scope(**body.model_dump(), id=new_id("sc"))
     db.add(scope)
+    _sync_project_ip_from_scopes(db, scope.pid)
     log_event(db, scope.pid, getattr(request.state, 'username', None), 'scope', 'create',
               f"Scope {'added' if scope.in_scope else 'excluded'}: {scope.value}", {"type": scope.scope_type})
     db.commit()
@@ -944,6 +1291,7 @@ def update_scope(sid: str, body: schemas.ScopeUpdate, db: Session = Depends(get_
         raise HTTPException(404)
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(scope, k, v)
+    _sync_project_ip_from_scopes(db, scope.pid)
     db.commit()
     db.refresh(scope)
     bcast(scope.pid, "scope", "update", schemas.Scope.model_validate(scope).model_dump())
@@ -958,6 +1306,7 @@ def delete_scope(sid: str, request: Request, db: Session = Depends(get_db)):
     log_event(db, pid, getattr(request.state, 'username', None), 'scope', 'delete',
               f"Scope removed: {scope.value}")
     db.delete(scope)
+    _sync_project_ip_from_scopes(db, pid)
     db.commit()
     bcast(pid, "scope", "delete", {"id": sid})
 
@@ -1023,7 +1372,7 @@ def search(q: str = "", pid: str = "", limit: int = 30, db: Session = Depends(ge
         return ql in (f"{h.ip} {h.hostname} {h.notes} {' '.join(h.tags or [])}").lower()
 
     def match_cred(c):
-        return ql in (f"{c.username} {c.service} {c.host} {c.notes}").lower()
+        return ql in (f"{c.username} {c.service} {c.host} {c.notes} {' '.join(c.tags or [])}").lower()
 
     def match_note(n):
         return ql in (f"{n.title} {n.content[:500]} {' '.join(n.tags or [])}").lower()
@@ -1069,11 +1418,13 @@ def export_project(pid: str, db: Session = Depends(get_db)):
     attachments  = db.query(models.NoteAttachment).filter(models.NoteAttachment.pid == pid).all()
     findings     = db.query(models.Finding).filter(models.Finding.pid == pid).all()
     objectives   = db.query(models.Objective).filter(models.Objective.pid == pid).all()
+    host_activities = db.query(models.HostActivity).filter(models.HostActivity.pid == pid).all()
     attack_paths = db.query(models.AttackPath).filter(models.AttackPath.pid == pid).all()
     attack_steps = db.query(models.AttackStep).filter(models.AttackStep.pid == pid).all()
     loots        = db.query(models.Loot).filter(models.Loot.pid == pid).all()
     scopes       = db.query(models.Scope).filter(models.Scope.pid == pid).all()
     checklist    = db.query(models.ChecklistItem).filter(models.ChecklistItem.pid == pid).all()
+    cred_host_notes = db.query(models.CredHostNote).filter(models.CredHostNote.pid == pid).all()
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1091,13 +1442,13 @@ def export_project(pid: str, db: Session = Depends(get_db)):
         zf.writestr("hosts.json", json.dumps([{
             "id": h.id, "ip": h.ip, "ips": h.ips, "hostname": h.hostname,
             "os": h.os, "status": h.status, "ports": h.ports,
-            "services": h.services, "tags": h.tags, "notes": h.notes,
+            "services": h.services, "tags": h.tags, "notes": h.notes, "domain": h.domain, "role": h.role, "is_attacker": h.is_attacker,
         } for h in hosts], ensure_ascii=False))
 
         zf.writestr("creds.json", json.dumps([{
             "id": c.id, "host": c.host, "username": c.username,
             "secret": c.secret, "type": c.type, "service": c.service,
-            "notes": c.notes, "cracked": c.cracked,
+            "notes": c.notes, "tags": c.tags, "cracked": c.cracked, "domain": c.domain,
             "host_ids": c.host_ids or [], "is_domain": c.is_domain,
         } for c in creds], ensure_ascii=False))
 
@@ -1117,6 +1468,13 @@ def export_project(pid: str, db: Session = Depends(get_db)):
             "points": o.points, "status": o.status, "flag_value": o.flag_value,
             "captured_by": o.captured_by, "captured_at": o.captured_at, "ts": o.ts,
         } for o in objectives], ensure_ascii=False))
+
+        zf.writestr("host_activities.json", json.dumps([{
+            "id": a.id, "host_id": a.host_id, "title": a.title,
+            "activity_type": a.activity_type, "command": a.command,
+            "summary": a.summary, "output": a.output,
+            "status": a.status, "ts": a.ts,
+        } for a in host_activities], ensure_ascii=False))
 
         zf.writestr("attack_paths.json", json.dumps([{
             "id": ap.id, "name": ap.name, "description": ap.description, "ts": ap.ts,
@@ -1143,6 +1501,11 @@ def export_project(pid: str, db: Session = Depends(get_db)):
             "id": c.id, "phase": c.phase, "text": c.text,
             "done": c.done, "order_idx": c.order_idx,
         } for c in checklist], ensure_ascii=False))
+
+        zf.writestr("cred_host_notes.json", json.dumps([{
+            "id": n.id, "cred_id": n.cred_id, "host_id": n.host_id,
+            "notes": n.notes, "access": n.access,
+        } for n in cred_host_notes], ensure_ascii=False))
 
         atts_meta = []
         for att in attachments:
@@ -1193,11 +1556,13 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
         atts_data      = read_json("attachments.json")
         findings_data  = read_json("findings.json")
         obj_data       = read_json("objectives.json")
+        host_activity_data = read_json("host_activities.json")
         ap_data        = read_json("attack_paths.json")
         as_data        = read_json("attack_steps.json")
         loots_data     = read_json("loots.json")
         scopes_data    = read_json("scopes.json")
         checklist_data = read_json("checklist.json")
+        chn_data       = read_json("cred_host_notes.json")
     except Exception as e:
         raise HTTPException(400, f"Ошибка чтения архива: {e}")
 
@@ -1282,18 +1647,22 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 os=h.get("os", "Unknown"),
                 status=h.get("status", "unknown"),
                 ports=h.get("ports", []), services=h.get("services", []),
-                tags=h.get("tags", []), notes=h.get("notes", ""),
+                tags=h.get("tags", []), notes=h.get("notes", ""), domain=_normalize_domain(h.get("domain", "")), role=h.get("role", "unknown"), is_attacker=h.get("is_attacker", False),
             ))
 
         # ── Creds (remap host_ids) ──────────────────────────────
+        cred_id_map: dict[str, str] = {}
         for c in creds_data:
             old_hids = c.get("host_ids") or []
             new_hids = [host_id_map[hid] for hid in old_hids if hid in host_id_map]
+            new_cid = new_id("c")
+            if c.get("id"):
+                cred_id_map[c["id"]] = new_cid
             db.add(models.Cred(
-                id=new_id("c"), pid=new_pid,
+                id=new_cid, pid=new_pid,
                 host=c.get("host", ""), username=c.get("username", ""),
                 secret=c.get("secret", ""), type=c.get("type", "plain"),
-                service=c.get("service", ""), notes=c.get("notes", ""),
+                service=c.get("service", ""), notes=c.get("notes", ""), tags=c.get("tags", []), domain=_normalize_domain(c.get("domain", "")),
                 cracked=c.get("cracked", False),
                 host_ids=new_hids, is_domain=c.get("is_domain", False),
             ))
@@ -1335,6 +1704,19 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 captured_by=o.get("captured_by", ""),
                 captured_at=o.get("captured_at", ""),
                 ts=o.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
+            ))
+
+        # ── Host activities (remap host_id) ──────────────────────
+        for a in host_activity_data:
+            old_hid = a.get("host_id")
+            new_hid = host_id_map.get(old_hid)
+            if not new_hid:
+                continue
+            db.add(models.HostActivity(
+                id=new_id("ha"), pid=new_pid, host_id=new_hid,
+                title=a.get("title", ""), activity_type=a.get("activity_type", "recon"),
+                command=a.get("command", ""), summary=a.get("summary", ""), output=a.get("output", ""),
+                status=a.get("status", "done"), ts=a.get("ts", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
             ))
 
         # ── Attack Paths + Steps (build path id map) ─────────────
@@ -1388,6 +1770,11 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 description=s.get("description", ""),
             ))
 
+        if scopes_data:
+            _sync_project_ip_from_scopes(db, new_pid)
+        else:
+            _sync_scopes_from_project_ip(db, new_pid)
+
         # ── Checklist ─────────────────────────────────────────────
         for c in checklist_data:
             db.add(models.ChecklistItem(
@@ -1396,6 +1783,19 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 text=c.get("text", ""),
                 done=c.get("done", False),
                 order_idx=c.get("order_idx", 0),
+            ))
+
+        # ── Cred-host notes (remap ids) ──────────────────────────
+        for n in chn_data:
+            old_cred = n.get("cred_id")
+            old_host = n.get("host_id")
+            new_cred = cred_id_map.get(old_cred)
+            new_host = host_id_map.get(old_host)
+            if not new_cred or not new_host:
+                continue
+            db.add(models.CredHostNote(
+                id=new_id("chn"), cred_id=new_cred, host_id=new_host, pid=new_pid,
+                notes=n.get("notes", ""), access=n.get("access", []),
             ))
 
         db.commit()
@@ -1435,6 +1835,11 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db))
     for h in body.hosts:
         h_data = h.model_dump()
         h_data['pid'] = pid
+        h_data['domain'] = _normalize_domain(h_data.get('domain', ''))
+        h_data['role'] = h_data.get('role') or 'unknown'
+        h_data['is_attacker'] = bool(h_data.get('is_attacker')) or h_data['role'] == 'attacker'
+        if h_data['is_attacker']:
+            h_data['status'] = 'attacker'
 
         ip       = h_data.get('ip', '')
         hn_upper = (h_data.get('hostname') or '').upper()
@@ -1444,6 +1849,7 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db))
 
         if existing:
             # Merge ports / services / tags
+            existing.ips      = list(dict.fromkeys((existing.ips or []) + h_data.get('ips', [])))
             existing.ports    = list(set((existing.ports    or []) + h_data.get('ports',    [])))
             existing.services = list(set((existing.services or []) + h_data.get('services', [])))
             existing.tags     = list(set((existing.tags     or []) + h_data.get('tags',     [])))
@@ -1453,6 +1859,12 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db))
                 existing.hostname = h_data['hostname']
             if h_data.get('domain') and not existing.domain:
                 existing.domain = h_data['domain']
+            if h_data.get('role') and (existing.role in ('', 'unknown') or existing.role != 'attacker'):
+                existing.role = h_data['role']
+            if h_data.get('is_attacker'):
+                existing.is_attacker = True
+                existing.role = 'attacker'
+                existing.status = 'attacker'
 
             # Update IP if we now have a real one and existing is missing / was a hostname placeholder
             if h_data.get('ip') and (not existing.ip or existing.ip == existing.hostname):
@@ -1493,6 +1905,7 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db))
     for c in body.creds:
         c_data = c.model_dump()
         c_data['pid'] = pid
+        c_data['domain'] = _normalize_domain(c_data.get('domain', ''))
         cred = models.Cred(id=new_id("c"), **c_data)
         db.add(cred)
         creds_added += 1
