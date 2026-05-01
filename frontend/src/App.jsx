@@ -712,9 +712,29 @@ export default function App() {
 
   // ── After import: WS will push upserts, but also refresh immediately ─
   const handleImported = async () => {
-    const [h, c, acts] = await Promise.all([api.getHosts(), api.getCreds(), api.getHostActivities()]);
+    const [n, h, c, nets, f, obj, aps, ass, lts, scs, acts] = await Promise.all([
+      api.getNotes(),
+      api.getHosts(),
+      api.getCreds(),
+      api.getNetworks(),
+      api.getFindings(),
+      api.getObjectives(),
+      api.getAttackPaths(),
+      api.getAttackSteps(),
+      api.getLoots(),
+      api.getScopes(),
+      api.getHostActivities(),
+    ]);
+    setNotes(n);
     setHosts(h);
     setCreds(c);
+    setNetworks(nets);
+    setFindings(f);
+    setObjectives(obj);
+    setAttackPaths(aps);
+    setAttackSteps(ass);
+    setLoots(lts);
+    setScopes(scs);
     setHostActivities(acts);
   };
 
@@ -903,8 +923,32 @@ export default function App() {
             onDelete={deleteProject}
             onImport={pid => setImportProjectId(pid)}
             onProjectImported={async (result) => {
-              const [p, n, h, c, nets, acts] = await Promise.all([api.getProjects(), api.getNotes(), api.getHosts(), api.getCreds(), api.getNetworks(), api.getHostActivities()]);
-              setProjects(p); setNotes(n); setHosts(h); setCreds(c); setNetworks(nets); setHostActivities(acts);
+              const [p, n, h, c, nets, f, obj, aps, ass, lts, scs, acts] = await Promise.all([
+                api.getProjects(),
+                api.getNotes(),
+                api.getHosts(),
+                api.getCreds(),
+                api.getNetworks(),
+                api.getFindings(),
+                api.getObjectives(),
+                api.getAttackPaths(),
+                api.getAttackSteps(),
+                api.getLoots(),
+                api.getScopes(),
+                api.getHostActivities(),
+              ]);
+              setProjects(p);
+              setNotes(n);
+              setHosts(h);
+              setCreds(c);
+              setNetworks(nets);
+              setFindings(f);
+              setObjectives(obj);
+              setAttackPaths(aps);
+              setAttackSteps(ass);
+              setLoots(lts);
+              setScopes(scs);
+              setHostActivities(acts);
               setSelectedProject(result.project_id);
             }} />
         )}

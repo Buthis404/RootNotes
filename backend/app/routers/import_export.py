@@ -111,11 +111,22 @@ def export_project(pid: str, db: Session = Depends(get_db), user: models.User = 
             "technique": s.technique, "mitre_id": s.mitre_id, "notes": s.notes, "ts": s.ts,
         } for s in attack_steps], ensure_ascii=False))
 
-        zf.writestr("loots.json", json.dumps([{
-            "id": l.id, "host_id": l.host_id, "loot_type": l.loot_type,
-            "value": l.value, "description": l.description,
-            "source_path": l.source_path, "ts": l.ts,
-        } for l in loots], ensure_ascii=False))
+        loots_meta = []
+        for loot in loots:
+            loot_entry = {
+                "id": loot.id, "host_id": loot.host_id, "loot_type": loot.loot_type,
+                "value": loot.value, "description": loot.description,
+                "source_path": loot.source_path, "filename": loot.filename,
+                "content_type": loot.content_type, "file_size": loot.file_size,
+                "public_url": loot.public_url, "ts": loot.ts,
+            }
+            disk = Path(loot.storage_path) if loot.storage_path else None
+            if disk and disk.exists():
+                zip_entry = f"loot/{loot.id}{Path(loot.filename or loot.value or 'loot.bin').suffix}"
+                zf.write(disk, zip_entry)
+                loot_entry["zip_entry"] = zip_entry
+            loots_meta.append(loot_entry)
+        zf.writestr("loots.json", json.dumps(loots_meta, ensure_ascii=False))
 
         zf.writestr("scopes.json", json.dumps([{
             "id": s.id, "value": s.value, "scope_type": s.scope_type,
@@ -355,11 +366,35 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
 
         for l in loots_data:
             old_hid = l.get("host_id")
+            new_lid = new_id("lt")
+            filename = l.get("filename", "")
+            content_type = l.get("content_type", "")
+            file_size = l.get("file_size", 0)
+            public_url = ""
+            storage_path = ""
+            source_path = l.get("source_path", "")
+
+            zip_entry = l.get("zip_entry")
+            if zip_entry and zip_entry in names:
+                safe_name = filename or Path(zip_entry).name
+                ext = Path(safe_name).suffix
+                loot_dir = UPLOAD_ROOT / new_pid / "loot"
+                loot_dir.mkdir(parents=True, exist_ok=True)
+                disk_name = f"{new_lid}{ext}"
+                disk_path = ensure_under_upload_root(loot_dir / disk_name)
+                disk_path.write_bytes(zf.read(zip_entry))
+                storage_path = str(disk_path)
+                public_url = f"/uploads/{new_pid}/loot/{disk_name}"
+                if not source_path:
+                    source_path = public_url
+
             db.add(models.Loot(
-                id=new_id("lt"), pid=new_pid,
+                id=new_lid, pid=new_pid,
                 host_id=host_id_map.get(old_hid) if old_hid else None,
                 loot_type=l.get("loot_type", "file"), value=l.get("value", ""),
-                description=l.get("description", ""), source_path=l.get("source_path", ""),
+                description=l.get("description", ""), source_path=source_path,
+                filename=filename, content_type=content_type, file_size=file_size,
+                storage_path=storage_path, public_url=public_url,
                 ts=l.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
             ))
 

@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
 import { PHASES, PHASE_COLORS, CHECKLIST_DEFAULTS } from '../constants.js';
 import { api } from '../api.js';
 
 export default function ChecklistView({ selectedProject, accent }) {
   const [phase, setPhase] = useState('recon');
-  const [items, setItems] = useState([]);
+  const [allItems, setAllItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [newText, setNewText] = useState('');
 
@@ -13,13 +13,28 @@ export default function ChecklistView({ selectedProject, accent }) {
     if (!selectedProject) return;
     setLoading(true);
     try {
-      const data = await api.getChecklist(selectedProject, phase);
-      setItems(data);
+      const data = await api.getChecklist(selectedProject);
+      setAllItems(data);
     } catch {}
     setLoading(false);
-  }, [selectedProject, phase]);
+  }, [selectedProject]);
 
   useEffect(() => { load(); }, [load]);
+
+  const items = useMemo(
+    () => allItems.filter(item => item.phase === phase).sort((a, b) => a.order_idx - b.order_idx),
+    [allItems, phase],
+  );
+
+  const phaseStats = useMemo(() => Object.fromEntries(
+    PHASES.map(ph => {
+      const phaseItems = allItems.filter(item => item.phase === ph);
+      const total = phaseItems.length;
+      const done = phaseItems.filter(item => item.done).length;
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      return [ph, { total, done, pct }];
+    }),
+  ), [allItems]);
 
   const loadDefaults = async () => {
     const defaults = CHECKLIST_DEFAULTS[phase] || [];
@@ -28,29 +43,29 @@ export default function ChecklistView({ selectedProject, accent }) {
     if (!toAdd.length) return;
     const payload = toAdd.map((text, i) => ({ pid: selectedProject, phase, text, done: false, order_idx: items.length + i }));
     const created = await api.bulkCreateChecklist(payload);
-    setItems(prev => [...prev, ...created]);
+    setAllItems(prev => [...prev, ...created]);
   };
 
   const toggle = async (item) => {
     const updated = await api.updateChecklistItem(item.id, { done: !item.done });
-    setItems(prev => prev.map(i => i.id === item.id ? updated : i));
+    setAllItems(prev => prev.map(i => i.id === item.id ? updated : i));
   };
 
   const addItem = async () => {
     if (!newText.trim()) return;
     const [created] = await api.bulkCreateChecklist([{ pid: selectedProject, phase, text: newText.trim(), done: false, order_idx: items.length }]);
-    setItems(prev => [...prev, created]);
+    setAllItems(prev => [...prev, created]);
     setNewText('');
   };
 
   const deleteItem = async (id) => {
     await api.deleteChecklistItem(id);
-    setItems(prev => prev.filter(i => i.id !== id));
+    setAllItems(prev => prev.filter(i => i.id !== id));
   };
 
-  const done = items.filter(i => i.done).length;
-  const total = items.length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+   const done = phaseStats[phase]?.done || 0;
+   const total = phaseStats[phase]?.total || 0;
+   const pct = phaseStats[phase]?.pct || 0;
 
   const phaseColor = PHASE_COLORS[phase] || accent;
 
@@ -141,13 +156,15 @@ export default function ChecklistView({ selectedProject, accent }) {
           <div style={{ fontSize: 9, color: '#353840', textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 12 }}>Progress</div>
           {PHASES.map(ph => {
             const c = PHASE_COLORS[ph];
+            const stat = phaseStats[ph] || { total: 0, done: 0, pct: 0 };
             return (
               <div key={ph} onClick={() => setPhase(ph)} style={{ marginBottom: 12, cursor: 'pointer', padding: '6px 8px', borderRadius: 5, background: ph === phase ? `${c}12` : 'transparent', border: `1px solid ${ph === phase ? c + '44' : 'transparent'}` }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                   <span style={{ fontSize: 9, fontFamily: 'JetBrains Mono', fontWeight: 600, color: c, textTransform: 'uppercase' }}>{ph}</span>
+                  <span style={{ fontSize: 9, color: stat.pct === 100 && stat.total > 0 ? '#39d353' : '#505560', fontFamily: 'JetBrains Mono' }}>{stat.done}/{stat.total}</span>
                 </div>
                 <div style={{ height: 3, background: '#1a1c22', borderRadius: 2 }}>
-                  <div style={{ height: '100%', width: '0%', background: c, borderRadius: 2 }} id={`ph-bar-${ph}`} />
+                  <div style={{ height: '100%', width: `${stat.pct}%`, background: stat.pct === 100 && stat.total > 0 ? '#39d353' : c, borderRadius: 2, transition: 'width .2s ease' }} />
                 </div>
               </div>
             );
