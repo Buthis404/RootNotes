@@ -120,9 +120,11 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
   const [showSecrets, setShowSecrets] = useState({});
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
+  const [showBulkEdit, setShowBulkEdit] = useState(false);
   const [newCred, setNewCred] = useState({ username: '', secret: '', type: 'plain', service: '', host: '', domain: '', cracked: false, notes: '', tags: [], is_domain: false, host_ids: [] });
   const [bulkDelimiter, setBulkDelimiter] = useState(';');
   const [bulkText, setBulkText] = useState('');
+  const [bulkEditFields, setBulkEditFields] = useState({ type: '', service: '', domain: '', is_domain: '', cracked: '', addTags: '', removeTags: '' });
   const [copied, setCopied] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [checkedIds, setCheckedIds] = useState([]);
@@ -178,6 +180,31 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
     setShowBulk(false);
   };
 
+  const applyBulkEdit = async () => {
+    const f = bulkEditFields;
+    const basePatch = {};
+    if (f.type) basePatch.type = f.type;
+    if (f.service !== '') basePatch.service = f.service;
+    if (f.domain !== '') basePatch.domain = f.domain;
+    if (f.is_domain !== '') basePatch.is_domain = f.is_domain === 'true';
+    if (f.cracked !== '') basePatch.cracked = f.cracked === 'true';
+    const addTags = f.addTags.split(',').map(t => t.trim()).filter(Boolean);
+    const removeTags = f.removeTags.split(',').map(t => t.trim()).filter(Boolean);
+    for (const id of checkedIds) {
+      const cred = creds.find(c => c.id === id);
+      if (!cred) continue;
+      const patch = { ...basePatch };
+      if (addTags.length || removeTags.length) {
+        const current = cred.tags || [];
+        patch.tags = [...new Set([...current.filter(t => !removeTags.includes(t)), ...addTags])];
+      }
+      if (Object.keys(patch).length) await onUpdate(id, patch);
+    }
+    setBulkEditFields({ type: '', service: '', domain: '', is_domain: '', cracked: '', addTags: '', removeTags: '' });
+    setShowBulkEdit(false);
+    setCheckedIds([]);
+  };
+
   const inp = (label, val, onChange, opts = {}) => (
     <div>
       {label && <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>{label}</div>}
@@ -223,17 +250,25 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
         </button>
         {checkedIds.length > 0 && (
           <>
+            <button onClick={() => { setShowBulkEdit(v => !v); setShowAdd(false); setShowBulk(false); }}
+              style={{ background: showBulkEdit ? `${accent}22` : 'transparent', border: `1px solid ${showBulkEdit ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: showBulkEdit ? accent : '#808590', fontSize: Math.max(10, fs - 3), fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Icon name="edit" size={10} color="currentColor" /> Edit {checkedIds.length}
+            </button>
             <button onClick={() => {
               const text = filtered.filter(c => checkedIds.includes(c.id)).map(c => `${c.username};${c.secret};${c.type};${c.service};${c.host}`).join('\n');
               navigator.clipboard?.writeText(text).catch(() => {});
             }} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#808590', fontSize: Math.max(10, fs - 3), fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 4 }}>
               <Icon name="copy" size={10} color="currentColor" /> Copy
             </button>
-            <button onClick={async () => { for (const id of checkedIds) await onDelete(id); setCheckedIds([]); }}
-              style={{ background: '#cc233322', border: '1px solid #cc233344', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#cc2233', fontSize: Math.max(10, fs - 3), fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <button onClick={async () => {
+              if (!window.confirm(`Delete ${checkedIds.length} credential(s)?`)) return;
+              for (const id of checkedIds) await onDelete(id);
+              setCheckedIds([]);
+              setShowBulkEdit(false);
+            }} style={{ background: '#cc233322', border: '1px solid #cc233344', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#cc2233', fontSize: Math.max(10, fs - 3), fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 4 }}>
               <Icon name="trash" size={10} color="currentColor" /> Delete {checkedIds.length}
             </button>
-            <button onClick={() => setCheckedIds([])} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: '#505560', fontSize: Math.max(9, fs - 4), fontFamily: 'JetBrains Mono' }}>✗</button>
+            <button onClick={() => { setCheckedIds([]); setShowBulkEdit(false); }} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: '#505560', fontSize: Math.max(9, fs - 4), fontFamily: 'JetBrains Mono' }}>✗</button>
           </>
         )}
         <button onClick={() => setShowBulk(v => !v)}
@@ -276,6 +311,89 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
             <button onClick={importBulkCreds} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>Import</button>
             <button onClick={() => setShowBulk(false)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
           </div>
+        </div>
+      )}
+
+      {/* Bulk edit panel */}
+      {showBulkEdit && checkedIds.length > 0 && (
+        <div style={{ padding: '12px 18px', borderBottom: '1px solid #1a1c22', background: '#0c0e13', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ fontSize: 9, color: accent, fontFamily: 'JetBrains Mono', fontWeight: 600, alignSelf: 'center', whiteSpace: 'nowrap' }}>{checkedIds.length} selected</div>
+
+          {/* Type */}
+          <div style={{ width: 110 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Type</div>
+            <select value={bulkEditFields.type} onChange={e => setBulkEditFields(f => ({ ...f, type: e.target.value }))}
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono' }}>
+              <option value="">No change</option>
+              {Object.entries(CRED_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </div>
+
+          {/* Service */}
+          <div style={{ width: 120 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Service</div>
+            <select value={COMMON_SERVICES.includes(bulkEditFields.service) ? bulkEditFields.service : (bulkEditFields.service ? '__custom' : '')}
+              onChange={e => setBulkEditFields(f => ({ ...f, service: e.target.value === '__custom' ? '' : e.target.value }))}
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono' }}>
+              <option value="">No change</option>
+              {COMMON_SERVICES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+
+          {/* Domain */}
+          <div style={{ width: 140 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Domain</div>
+            <input value={bulkEditFields.domain} onChange={e => setBulkEditFields(f => ({ ...f, domain: e.target.value }))}
+              placeholder="No change"
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
+          </div>
+
+          {/* Domain flag */}
+          <div style={{ width: 130 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Domain flag</div>
+            <select value={bulkEditFields.is_domain} onChange={e => setBulkEditFields(f => ({ ...f, is_domain: e.target.value }))}
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono' }}>
+              <option value="">No change</option>
+              <option value="true">Mark as Domain</option>
+              <option value="false">Remove Domain flag</option>
+            </select>
+          </div>
+
+          {/* Cracked */}
+          <div style={{ width: 130 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Cracked</div>
+            <select value={bulkEditFields.cracked} onChange={e => setBulkEditFields(f => ({ ...f, cracked: e.target.value }))}
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono' }}>
+              <option value="">No change</option>
+              <option value="true">✓ Mark cracked</option>
+              <option value="false">Unmark cracked</option>
+            </select>
+          </div>
+
+          {/* Add tags */}
+          <div style={{ width: 150 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Add tags</div>
+            <input value={bulkEditFields.addTags} onChange={e => setBulkEditFields(f => ({ ...f, addTags: e.target.value }))}
+              placeholder="domain-admin, kerberoastable"
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
+          </div>
+
+          {/* Remove tags */}
+          <div style={{ width: 130 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Remove tags</div>
+            <input value={bulkEditFields.removeTags} onChange={e => setBulkEditFields(f => ({ ...f, removeTags: e.target.value }))}
+              placeholder="old-tag, stale"
+              style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
+          </div>
+
+          <button onClick={applyBulkEdit}
+            style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 16px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>
+            Apply to {checkedIds.length}
+          </button>
+          <button onClick={() => { setShowBulkEdit(false); setBulkEditFields({ type: '', service: '', domain: '', is_domain: '', cracked: '', addTags: '', removeTags: '' }); }}
+            style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+            Cancel
+          </button>
         </div>
       )}
 

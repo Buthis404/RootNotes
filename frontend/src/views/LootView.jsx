@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { api } from '../api.js';
 import Icon from '../components/Icon.jsx';
 import { SearchBar } from '../components/UI.jsx';
 
@@ -32,6 +33,9 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
   const [selectedId, setSelectedId] = useState(null);
   const [showValues, setShowValues] = useState({});
   const [copied, setCopied] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const addFileRef = useRef(null);
+  const editFileRef = useRef(null);
 
   const projectLoots = loots.filter(l => l.pid === selectedProject);
   const projectHosts = (hosts || []).filter(h => h.pid === selectedProject);
@@ -58,6 +62,30 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
     onAdd({ pid: selectedProject, ...newLoot });
     setNewLoot(EMPTY);
     setShowAdd(false);
+  };
+
+  const uploadFileForLoot = async (lootId, file) => {
+    if (!file) return;
+    setUploading(true);
+    try {
+      const updated = await api.uploadLootFile(lootId, file);
+      await onUpdate(lootId, updated);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const createLootWithFile = async (file) => {
+    if (!file) return;
+    setUploading(true);
+    try {
+      const loot = await onAdd({ pid: selectedProject, ...newLoot, loot_type: 'file', value: file.name || newLoot.value || 'uploaded file' });
+      await uploadFileForLoot(loot.id, file);
+      setNewLoot(EMPTY);
+      setShowAdd(false);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const hostLabel = (host_id) => {
@@ -127,9 +155,14 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
               {projectHosts.map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip}</option>)}
             </select>
           </div>
+          <input ref={addFileRef} type="file" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && createLootWithFile(e.target.files[0])} />
           <button onClick={addLoot}
             style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>
             Save
+          </button>
+          <button onClick={() => addFileRef.current?.click()}
+            style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 12px', cursor: 'pointer', color: '#9098a8', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+            {uploading ? 'Uploading…' : 'Upload file'}
           </button>
           <button onClick={() => setShowAdd(false)}
             style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
@@ -171,8 +204,8 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                 <div style={{ width: 200, flexShrink: 0, fontSize: Math.max(10, fs - 3), color: '#808590', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {loot.description || '—'}
                 </div>
-                <div style={{ width: 160, flexShrink: 0, fontSize: Math.max(9, fs - 4), color: '#505560', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {loot.source_path || '—'}
+                 <div style={{ width: 160, flexShrink: 0, fontSize: Math.max(9, fs - 4), color: '#505560', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                   {loot.filename || loot.source_path || '—'}
                 </div>
                 <div style={{ width: 120, flexShrink: 0, fontSize: Math.max(9, fs - 4), color: '#5b8af5', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {hl || '—'}
@@ -188,6 +221,10 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: isCopied ? '#39d353' : '#404550', display: 'flex', padding: 2 }}>
                     <Icon name={isCopied ? 'check' : 'copy'} size={12} color="currentColor" />
                   </button>
+                  {loot.public_url && <a href={loot.public_url} download={loot.filename || true} title="Download"
+                    style={{ color: '#404550', display: 'flex', padding: 2, textDecoration: 'none' }}>
+                    <Icon name="export" size={12} color="currentColor" />
+                  </a>}
                   <button onClick={() => { onDelete(loot.id); if (selectedId === loot.id) setSelectedId(null); }}
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#303540', display: 'flex', padding: 2 }}
                     onMouseEnter={e => e.currentTarget.style.color = '#cc2233'}
@@ -244,6 +281,15 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                   <option value="">— not linked —</option>
                   {projectHosts.map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip}</option>)}
                 </select>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#505560', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '.1em' }}>Attached file</div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input ref={editFileRef} type="file" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && uploadFileForLoot(selLoot.id, e.target.files[0])} />
+                  <button onClick={() => editFileRef.current?.click()} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{uploading ? 'Uploading…' : 'Upload / replace'}</button>
+                  {selLoot.public_url && <a href={selLoot.public_url} download={selLoot.filename || true} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', color: '#5b8af5', fontSize: 10, fontFamily: 'JetBrains Mono', textDecoration: 'none' }}>Download</a>}
+                </div>
+                <div style={{ fontSize: 10, color: '#606570', marginTop: 6, fontFamily: 'JetBrains Mono' }}>{selLoot.filename ? `${selLoot.filename}${selLoot.file_size ? ` · ${selLoot.file_size} bytes` : ''}` : 'No file attached'}</div>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={() => { navigator.clipboard?.writeText(selLoot.value).catch(() => {}); setCopied('panel'); setTimeout(() => setCopied(null), 1500); }}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Icon from './components/Icon.jsx';
 import { TABS, ADMIN_TAB } from './constants.js';
 import { api } from './api.js';
@@ -22,8 +22,9 @@ import CheatsheetView from './views/CheatsheetView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
 import { hasAutoRoleSignals, inferNodeType, isAttackerHost } from './utils/hostMeta.js';
+import { useProjectPermissions } from './context/ProjectPermissions.jsx';
 
-const TWEAK_DEFAULTS = { accent: '#15bbb1', accentGreen: '#39d353', fontSize: 14 };
+const TWEAK_DEFAULTS = { accent: '#15bbb1', accentGreen: '#39d353', fontSize: 14, networkMapAnimations: true };
 const TWEAKS_KEY = 'rt_tweaks_v2'; // v2 to avoid stale key reset
 const statusColor = { active: '#39d353', paused: '#f09a3a', done: '#555' };
 
@@ -56,9 +57,9 @@ const ProjectPicker = ({ projects, notes, hosts, creds, selected, onSelect, acce
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: sc, boxShadow: `0 0 6px ${sc}`, flexShrink: 0 }} />
             <span style={{ fontSize: 13, color: act ? '#f0f2f6' : '#9098a8', fontWeight: act ? 600 : 400, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
           </div>
-          <div style={{ display: 'flex', gap: 10, paddingLeft: 17 }}>
-            <span style={{ fontSize: 11, color: '#404550', fontFamily: 'JetBrains Mono' }}>{p.ip}</span>
-            {pwned > 0 && <span style={{ fontSize: 11, color: '#cc2233', fontFamily: 'JetBrains Mono', fontWeight: 600 }}>⚠ {pwned} pwned</span>}
+          <div style={{ display: 'flex', gap: 8, paddingLeft: 17, alignItems: 'center', minWidth: 0 }}>
+            <span style={{ fontSize: 11, color: '#404550', fontFamily: 'JetBrains Mono', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.ip}</span>
+            {pwned > 0 && <span style={{ fontSize: 11, color: '#cc2233', fontFamily: 'JetBrains Mono', fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap' }}>⚠ {pwned} pwned</span>}
           </div>
         </div>
       );
@@ -120,6 +121,14 @@ const TweaksPanel = ({ tweaks, updateTweak, onClose, left }) => {
         </div>
       </div>
 
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 9, color: '#505560', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Network map animation</div>
+        <button onClick={() => updateTweak('networkMapAnimations', !tweaks.networkMapAnimations)}
+          style={{ width: '100%', background: tweaks.networkMapAnimations ? `${acc}22` : '#1a1c22', border: `1px solid ${tweaks.networkMapAnimations ? acc + '66' : '#2a2d35'}`, borderRadius: 4, padding: '7px 10px', cursor: 'pointer', color: tweaks.networkMapAnimations ? acc : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono', textAlign: 'left' }}>
+          {tweaks.networkMapAnimations ? 'Enabled: dashed and animated' : 'Disabled: solid lines'}
+        </button>
+      </div>
+
       <button onClick={() => { updateTweak('accent', TWEAK_DEFAULTS.accent); updateTweak('accentGreen', TWEAK_DEFAULTS.accentGreen); updateTweak('fontSize', TWEAK_DEFAULTS.fontSize); }}
         style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 12px', cursor: 'pointer', color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono', width: '100%', marginTop: 4 }}>
         Reset to defaults
@@ -134,6 +143,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [isFirstRun, setIsFirstRun] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const { loadPermissions } = useProjectPermissions();
 
   useEffect(() => {
     const doCheck = async () => {
@@ -146,10 +156,10 @@ export default function App() {
       setAuthReady(true);
     };
     doCheck();
-    const onLogout = () => { setCurrentUser(null); setIsFirstRun(false); };
+    const onLogout = () => { setCurrentUser(null); setIsFirstRun(false); loadPermissions(null); };
     window.addEventListener('rt:logout', onLogout);
     return () => window.removeEventListener('rt:logout', onLogout);
-  }, []);
+  }, [loadPermissions]);
 
   const handleAuth = (user) => {
     setError(null);
@@ -195,6 +205,9 @@ export default function App() {
 
   // Track which request IDs originated locally — ignore own WS echoes
   const localOps = useRef(new Set());
+  const markLocalOp = useCallback((id) => {
+    if (id) localOps.current.add(id);
+  }, []);
 
   // ── Initial load ────────────────────────────────────────────────────
   useEffect(() => {
@@ -261,6 +274,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   useEffect(() => { if (selectedProject) localStorage.setItem('rt_project', selectedProject); }, [selectedProject]);
+  useEffect(() => { loadPermissions(selectedProject || null); }, [selectedProject, loadPermissions]);
 
   // BloodHound import full refresh
   useEffect(() => {
@@ -278,6 +292,10 @@ export default function App() {
   // We connect to the selected project's room.
   // When the backend broadcasts an event, we apply it to state.
   // Local mutations go through REST first, then WS echo arrives — we skip our own.
+  const updateOneNetwork = useCallback((networkId, updater) => {
+    setNetworks(prev => prev.map(net => net.id === networkId ? updater(net) : net));
+  }, []);
+
   const handleSyncEvent = useCallback((msg) => {
     const { entity, action, data } = msg;
 
@@ -307,6 +325,94 @@ export default function App() {
       if (action === 'create') setNetworks(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
       if (action === 'update') setNetworks(prev => prev.map(x => x.id === data.id ? data : x));
       if (action === 'delete') setNetworks(prev => prev.filter(x => x.id !== data.id));
+      if (action === 'node_created') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          nodes: net.nodes?.some(node => node.id === data.node.id) ? net.nodes : [...(net.nodes || []), data.node],
+        }));
+      }
+      if (action === 'node_updated') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          nodes: (net.nodes || []).map(node => {
+            if (node.id !== data.node.id) return node;
+            if ((node.version || 0) > (data.node.version || 0)) return node;
+            return { ...node, ...data.node };
+          }),
+        }));
+      }
+      if (action === 'node_position_updated') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          nodes: (net.nodes || []).map(node => {
+            if (node.id !== data.node_id) return node;
+            if ((node.version || 0) > (data.version || 0)) return node;
+            return {
+              ...node,
+              x: data.position.x,
+              y: data.position.y,
+              manually_positioned: data.manually_positioned,
+              auto_positioned: !data.manually_positioned,
+              updated_at: data.updated_at,
+              version: data.version,
+            };
+          }),
+        }));
+      }
+      if (action === 'node_deleted') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          nodes: (net.nodes || []).filter(node => node.id !== data.node_id),
+          edges: (net.edges || []).filter(edge => edge.from !== data.node_id && edge.to !== data.node_id && !(data.deleted_edge_ids || []).includes(edge.id)),
+        }));
+      }
+      if (action === 'link_created') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          edges: net.edges?.some(edge => edge.id === data.link.id) ? net.edges : [...(net.edges || []), data.link],
+        }));
+      }
+      if (action === 'link_updated') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          edges: (net.edges || []).map(edge => {
+            if (edge.id !== data.link.id) return edge;
+            if ((edge.version || 0) > (data.link.version || 0)) return edge;
+            return { ...edge, ...data.link };
+          }),
+        }));
+      }
+      if (action === 'link_deleted') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          edges: (net.edges || []).filter(edge => edge.id !== data.link_id),
+        }));
+      }
+      if (action === 'region_created') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          regions: net.regions?.some(region => region.id === data.region.id) ? net.regions : [...(net.regions || []), data.region],
+        }));
+      }
+      if (action === 'region_updated') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          regions: (net.regions || []).map(region => {
+            if (region.id !== data.region.id) return region;
+            if ((region.version || 0) > (data.region.version || 0)) return region;
+            return { ...region, ...data.region };
+          }),
+        }));
+      }
+      if (action === 'region_deleted') {
+        updateOneNetwork(data.network_id, (net) => ({
+          ...net,
+          regions: (net.regions || []).filter(region => region.id !== data.region_id),
+        }));
+      }
+      if (action === 'layout_applied' || action === 'topology_rebuilt' || action === 'layout_reset') {
+        if (data.network) setNetworks(prev => prev.map(net => net.id === data.network.id ? data.network : net));
+      }
     }
     if (entity === 'finding') {
       if (action === 'create') setFindings(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
@@ -354,7 +460,7 @@ export default function App() {
         setHostActivities(prev => prev.filter(x => x.pid !== data.id));
       }
     }
-  }, []);
+  }, [updateOneNetwork]);
 
   const { send: sendWs } = useSync(selectedProject, currentUser?.username, handleSyncEvent, setPresence);
   const sendFocus = useCallback((noteId) => sendWs(noteId ? { type: 'focus', note_id: noteId } : { type: 'blur' }), [sendWs]);
@@ -367,6 +473,7 @@ export default function App() {
     const p = await api.createProject(data);
     setProjects(prev => [...prev, p]);
     setSelectedProject(p.id);
+    return p;
   };
 
   const deleteProject = async (id) => {
@@ -387,10 +494,16 @@ export default function App() {
   const addLoot = async (data) => {
     const l = await api.createLoot(data);
     setLoots(prev => prev.some(x => x.id === l.id) ? prev : [l, ...prev]);
+    return l;
   };
   const updateLoot = async (id, patch) => {
+    if (patch?.id && patch.id === id && patch.pid) {
+      setLoots(prev => prev.map(x => x.id === id ? patch : x));
+      return patch;
+    }
     const l = await api.updateLoot(id, patch);
     setLoots(prev => prev.map(x => x.id === id ? l : x));
+    return l;
   };
   const deleteLoot = async (id) => {
     await api.deleteLoot(id);
@@ -585,6 +698,13 @@ export default function App() {
     }, 600);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      Object.values(netSaveTimers.current).forEach(clearTimeout);
+      netSaveTimers.current = {};
+    };
+  }, []);
+
   const deleteNetwork = async (id) => {
     await api.deleteNetwork(id);
     setNetworks(prev => prev.filter(n => n.id !== id));
@@ -635,6 +755,17 @@ export default function App() {
     scope:      scopes.filter(s => s.pid === selectedProject).length,
     network: 0, projects: 0, report: 0, checklist: 0, timeline: 0, cheatsheet: 0,
   };
+
+  const selectedProjectHosts = useMemo(
+    () => hosts.filter(h => h.pid === selectedProject),
+    [hosts, selectedProject],
+  );
+  const selectedProjectNetworks = useMemo(
+    () => networks.filter(n => n.pid === selectedProject),
+    [networks, selectedProject],
+  );
+  const refreshHosts = useCallback(() => api.getHosts().then(h => setHosts(h)), []);
+  const refreshNetworks = useCallback(() => api.getNetworks().then(nets => setNetworks(nets)), []);
 
   if (!authReady) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', color: '#404550', flexDirection: 'column', gap: 12 }}>
@@ -764,9 +895,10 @@ export default function App() {
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
         {tab === 'projects' && (
           <ProjectsView projects={projects} notes={notes} hosts={hosts} creds={creds}
+            scopes={scopes}
             selectedProject={selectedProject}
             onSelect={p => { setSelectedProject(p); setTab('notes'); }}
-            accent={acc} onAdd={addProject}
+            accent={acc} onAdd={addProject} onAddScope={addScope}
             onUpdate={async (id, patch) => { const p = await api.updateProject(id, patch); setProjects(prev => prev.map(x => x.id === id ? p : x)); }}
             onDelete={deleteProject}
             onImport={pid => setImportProjectId(pid)}
@@ -798,15 +930,21 @@ export default function App() {
             projectId={selectedProject}
             accent={acc}
             accentGreen={green}
-            networks={networks.filter(n => n.pid === selectedProject)}
+            animateLinks={!!tweaks.networkMapAnimations}
+            networks={selectedProjectNetworks}
             onCreateNetwork={createNetwork}
             onUpdateNetwork={updateNetwork}
             onDeleteNetwork={deleteNetwork}
             onCreateHost={addHost}
             onUpdateHost={updateHost}
             onSyncHostByIp={syncHostByIp}
-            hosts={hosts}
-            creds={creds}
+            hosts={selectedProjectHosts}
+            onAddActivity={addHostActivity}
+            onUpdateActivity={updateHostActivity}
+            onDeleteActivity={deleteHostActivity}
+            onRefreshHosts={refreshHosts}
+            onRefreshNetworks={refreshNetworks}
+            markLocalOp={markLocalOp}
           />
         )}
         {tab === 'findings' && (

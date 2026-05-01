@@ -180,6 +180,11 @@ class Loot(Base):
     value = Column(Text, nullable=False, default="")
     description = Column(Text, nullable=False, default="")
     source_path = Column(String, nullable=False, default="")
+    filename = Column(String, nullable=False, default="")
+    content_type = Column(String, nullable=False, default="")
+    file_size = Column(Integer, nullable=False, default=0)
+    storage_path = Column(Text, nullable=False, default="")
+    public_url = Column(Text, nullable=False, default="")
     ts = Column(String, nullable=False)
 
 
@@ -261,3 +266,15 @@ class CustomSnippet(Base):
     tags = Column(ARRAY(String), nullable=False, default=[])
     opsec = Column(Text, nullable=False, default="")
     created_at = Column(String, nullable=False)
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+
+    id = Column(String, primary_key=True)
+    project_id = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String, nullable=False, default="viewer")  # owner|admin|editor|operator|viewer|auditor
+    created_at = Column(String, nullable=False)
+    created_by = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)

@@ -145,12 +145,15 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
   const colBorder = '1px solid #14161b';
 
   const projectHosts = hosts.filter(h => h.pid === selectedProject);
-  const getHostCredCount = (host) => (creds || []).filter(c => c.pid === selectedProject && (
-    c.host === host.ip ||
-    (host.hostname && c.host === host.hostname) ||
-    (c.host_ids || []).includes(host.id) ||
-    c.is_domain
-  )).length;
+  const getHostCredCount = (host) => {
+    const hostDomain = normalizeDomain(host.domain || '');
+    return (creds || []).filter(c => c.pid === selectedProject && (
+      c.host === host.ip ||
+      (host.hostname && c.host === host.hostname) ||
+      (c.host_ids || []).includes(host.id) ||
+      (c.is_domain && hostDomain && normalizeDomain(c.domain || '') === hostDomain)
+    )).length;
+  };
   const getSortValue = (host) => {
     if (sortBy === 'credCount') return getHostCredCount(host);
     if (sortBy === 'tagText') return (host.tags || []).join(' ');
@@ -562,12 +565,12 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
                   {(activityTypeFilter || activityStatusFilter) && <button onClick={() => { setActivityTypeFilter(null); setActivityStatusFilter(null); }} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 3, padding: '2px 7px', cursor: 'pointer', color: '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>Clear</button>}
                 </div>
                 {(showActivityComposer || editingActivityId) && <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: 10, marginBottom: 10 }}>
+                  <input value={newActivity.title} onChange={e => setNewActivity(a => ({ ...a, title: e.target.value }))} placeholder="Title: SMB enum, nmap, exploit run..." style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box', marginBottom: 6 }} />
                   <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                    <input value={newActivity.title} onChange={e => setNewActivity(a => ({ ...a, title: e.target.value }))} placeholder="Title: SMB enum, nmap, exploit run..." style={{ flex: 1, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono' }} />
-                    <select value={newActivity.activity_type} onChange={e => setNewActivity(a => ({ ...a, activity_type: e.target.value }))} style={{ width: 100, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono' }}>
+                    <select value={newActivity.activity_type} onChange={e => setNewActivity(a => ({ ...a, activity_type: e.target.value }))} style={{ flex: 1, minWidth: 0, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono' }}>
                       {['recon','scan','exploit','privesc','lateral','postex','note'].map(v => <option key={v} value={v}>{v}</option>)}
                     </select>
-                    <select value={newActivity.status} onChange={e => setNewActivity(a => ({ ...a, status: e.target.value }))} style={{ width: 92, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono' }}>
+                    <select value={newActivity.status} onChange={e => setNewActivity(a => ({ ...a, status: e.target.value }))} style={{ flex: 1, minWidth: 0, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono' }}>
                       {['planned','running','done','failed'].map(v => <option key={v} value={v}>{v}</option>)}
                     </select>
                   </div>

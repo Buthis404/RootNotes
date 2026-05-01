@@ -217,7 +217,119 @@ class Network(BaseModel):
 
     @classmethod
     def from_orm_obj(cls, obj):
-        return cls(id=obj.id, pid=obj.pid, name=obj.name, background=getattr(obj, 'background', '#07080b'), regions=getattr(obj, 'regions_json', []) or [], nodes=obj.nodes_json or [], edges=obj.edges_json or [])
+        import json as _json
+
+        def _parse(val):
+            if isinstance(val, str):
+                try:
+                    return _json.loads(val)
+                except Exception:
+                    return []
+            return val or []
+
+        return cls(
+            id=obj.id, pid=obj.pid, name=obj.name,
+            background=getattr(obj, 'background', '#07080b'),
+            regions=_parse(getattr(obj, 'regions_json', [])),
+            nodes=_parse(obj.nodes_json),
+            edges=_parse(obj.edges_json),
+        )
+
+
+class NetworkNodeCreate(BaseModel):
+    network_id: str
+    host_id: Optional[str] = None
+    x: float
+    y: float
+    label: str = ""
+    ip: str = ""
+    ips: List[str] = []
+    type: str = "server"
+    status: str = "unknown"
+    ports: List[str] = []
+    notes: str = ""
+    role: Optional[str] = None
+    os: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_attacker: Optional[bool] = None
+    manually_positioned: bool = True
+    auto_positioned: bool = False
+    client_mutation_id: Optional[str] = None
+
+
+class NetworkNodeUpdate(BaseModel):
+    label: Optional[str] = None
+    ip: Optional[str] = None
+    ips: Optional[List[str]] = None
+    x: Optional[float] = None
+    y: Optional[float] = None
+    type: Optional[str] = None
+    status: Optional[str] = None
+    ports: Optional[List[str]] = None
+    notes: Optional[str] = None
+    role: Optional[str] = None
+    os: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_attacker: Optional[bool] = None
+    host_id: Optional[str] = None
+    manually_positioned: Optional[bool] = None
+    auto_positioned: Optional[bool] = None
+    client_mutation_id: Optional[str] = None
+
+
+class NetworkNodePositionUpdate(BaseModel):
+    x: float
+    y: float
+    manually_positioned: bool = True
+    client_mutation_id: Optional[str] = None
+
+
+class NetworkLinkCreate(BaseModel):
+    network_id: str
+    from_node_id: str
+    to_node_id: str
+    style: str = "normal"
+    type: Optional[str] = None
+    label: str = ""
+    confidence: Optional[float] = None
+    source: Optional[str] = None
+    client_mutation_id: Optional[str] = None
+
+
+class NetworkLinkUpdate(BaseModel):
+    style: Optional[str] = None
+    type: Optional[str] = None
+    label: Optional[str] = None
+    confidence: Optional[float] = None
+    source: Optional[str] = None
+    from_node_id: Optional[str] = None
+    to_node_id: Optional[str] = None
+    client_mutation_id: Optional[str] = None
+
+
+class NetworkRegionCreate(BaseModel):
+    network_id: str
+    x: float
+    y: float
+    w: float
+    h: float
+    label: str = ""
+    note: str = ""
+    fill: Optional[str] = None
+    stroke: Optional[str] = None
+    client_mutation_id: Optional[str] = None
+
+
+class NetworkRegionUpdate(BaseModel):
+    x: Optional[float] = None
+    y: Optional[float] = None
+    w: Optional[float] = None
+    h: Optional[float] = None
+    label: Optional[str] = None
+    note: Optional[str] = None
+    fill: Optional[str] = None
+    stroke: Optional[str] = None
+    client_mutation_id: Optional[str] = None
 
 
 # ── Findings ──────────────────────────────────────────────────────────
@@ -342,6 +454,10 @@ class LootBase(BaseModel):
     value: str = ""
     description: str = ""
     source_path: str = ""
+    filename: str = ""
+    content_type: str = ""
+    file_size: int = 0
+    public_url: str = ""
 
 class LootCreate(LootBase):
     pass
@@ -352,6 +468,10 @@ class LootUpdate(BaseModel):
     value: Optional[str] = None
     description: Optional[str] = None
     source_path: Optional[str] = None
+    filename: Optional[str] = None
+    content_type: Optional[str] = None
+    file_size: Optional[int] = None
+    public_url: Optional[str] = None
 
 class Loot(LootBase):
     id: str

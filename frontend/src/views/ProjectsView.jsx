@@ -4,6 +4,24 @@ import { FieldInput } from '../components/UI.jsx';
 import { OS_ICONS } from '../constants.js';
 import { api } from '../api.js';
 import { isAttackerHost } from '../utils/hostMeta.js';
+import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
+
+const SCOPE_TYPE_COLORS = {
+  cidr:     '#5b8af5',
+  hostname: '#c07af0',
+  domain:   '#f09a3a',
+  url:      '#6fc8f0',
+};
+
+function detectScopeType(value) {
+  const v = (value || '').trim();
+  if (!v) return 'cidr';
+  if (v.includes('/')) return 'cidr';
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return 'cidr';
+  if (/^https?:\/\//i.test(v)) return 'url';
+  if (v.includes('.') && !v.includes(' ')) return 'domain';
+  return 'hostname';
+}
 
 const sEl = (val, opts, onChange, style = {}) => (
   <select value={val} onChange={e => onChange(e.target.value)}
@@ -12,7 +30,7 @@ const sEl = (val, opts, onChange, style = {}) => (
   </select>
 );
 
-export default function ProjectsView({ projects, notes, hosts, creds, selectedProject, onSelect, accent, onAdd, onUpdate, onDelete, onImport, onProjectImported }) {
+export default function ProjectsView({ projects, notes, hosts, creds, scopes, selectedProject, onSelect, accent, onAdd, onAddScope, onUpdate, onDelete, onImport, onProjectImported }) {
   const nonAttackerHosts = (pid) => hosts.filter(h => h.pid === pid && !isAttackerHost(h));
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: '', ip: '', os: 'Linux', status: 'active', description: '' });
@@ -22,6 +40,8 @@ export default function ProjectsView({ projects, notes, hosts, creds, selectedPr
   const [exportingId, setExportingId] = useState(null);
   const [importing, setImporting] = useState(false);
   const importFileRef = useRef();
+  const { can, projectId: permsPid, isSuperAdmin } = useProjectPermissions();
+  const canFor = (pid, perm) => (isSuperAdmin) ? true : (pid === permsPid ? can(perm) : true);
 
   const handleExport = async (e, pid, pname) => {
     e.stopPropagation();
@@ -64,19 +84,26 @@ export default function ProjectsView({ projects, notes, hosts, creds, selectedPr
   });
   const statusColor = { active: '#39d353', paused: '#f09a3a', done: '#555' };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!form.name.trim()) return;
-    onAdd({ ...form, added: new Date().toISOString().slice(0, 10) });
+    const p = await onAdd({ ...form, added: new Date().toISOString().slice(0, 10) });
+    if (p?.id && form.ip.trim() && onAddScope) {
+      onAddScope({ pid: p.id, value: form.ip.trim(), scope_type: detectScopeType(form.ip), in_scope: true, description: 'Project target' });
+    }
     setForm({ name: '', ip: '', os: 'Linux', status: 'active', description: '' });
     setShowAdd(false);
   };
 
   const startEdit = (p) => {
     setEditId(p.id);
-    setEditForm({ name: p.name, ip: p.ip, os: p.os, status: p.status, description: p.description });
+    setEditForm({ name: p.name, ip: p.ip || '', os: p.os, status: p.status, description: p.description });
   };
   const saveEdit = () => {
+    const originalIp = projects.find(p => p.id === editId)?.ip || '';
     onUpdate(editId, editForm);
+    if (editForm.ip?.trim() && editForm.ip.trim() !== originalIp.trim() && onAddScope) {
+      onAddScope({ pid: editId, value: editForm.ip.trim(), scope_type: detectScopeType(editForm.ip), in_scope: true, description: 'Project target' });
+    }
     setEditId(null);
   };
 
@@ -226,53 +253,40 @@ export default function ProjectsView({ projects, notes, hosts, creds, selectedPr
                   <div onClick={() => onSelect(p.id)} style={{ cursor: 'pointer' }}
                     onMouseEnter={e => { if (!isActive) { e.currentTarget.parentElement.style.borderColor = '#2a2d35'; e.currentTarget.parentElement.style.background = '#0f1116'; } }}
                     onMouseLeave={e => { if (!isActive) { e.currentTarget.parentElement.style.borderColor = '#1e2029'; e.currentTarget.parentElement.style.background = '#0d0f14'; } }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 10 }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: sc, background: `${sc}18`, border: `1px solid ${sc}44`, borderRadius: 3, padding: '1px 7px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>
-                            <span style={{ width: 5, height: 5, borderRadius: '50%', background: sc, boxShadow: `0 0 4px ${sc}` }} />
-                            {p.status === 'active' ? 'Active' : p.status === 'paused' ? 'Paused' : 'Done'}
-                          </span>
-                          <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>{OS_ICONS[p.os] || '?'} {p.os}</span>
-                        </div>
-                      </div>
-                      {/* Action buttons */}
-                      <div style={{ display: 'flex', gap: 3, marginLeft: 8, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
-                        <button onClick={() => onImport(p.id)} title="Import scan"
-                          style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 7px', cursor: 'pointer', color: '#404550', display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontFamily: 'JetBrains Mono', transition: 'all .12s' }}
-                          onMouseEnter={e => { e.currentTarget.style.borderColor = accent; e.currentTarget.style.color = accent; }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#404550'; }}>
-                          <Icon name="export" size={10} color="currentColor" /> Import
-                        </button>
-                        <button onClick={e => handleExport(e, p.id, p.name)} title="Export project to ZIP"
-                          disabled={exportingId === p.id}
-                          style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 7px', cursor: exportingId === p.id ? 'wait' : 'pointer', color: '#404550', display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, fontFamily: 'JetBrains Mono', transition: 'all .12s', opacity: exportingId === p.id ? 0.5 : 1 }}
-                          onMouseEnter={e => { if (exportingId !== p.id) { e.currentTarget.style.borderColor = '#39d353'; e.currentTarget.style.color = '#39d353'; } }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#404550'; }}>
-                          <Icon name="export" size={10} color="currentColor" /> {exportingId === p.id ? '...' : 'ZIP'}
-                        </button>
-                        <button onClick={() => startEdit(p)} title="Edit"
-                          style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', color: '#404550', display: 'flex', transition: 'all .12s' }}
-                          onMouseEnter={e => { e.currentTarget.style.borderColor = '#5b8af5'; e.currentTarget.style.color = '#5b8af5'; }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#404550'; }}>
-                          <Icon name="edit" size={11} color="currentColor" />
-                        </button>
-                        <button onClick={() => setConfirmDelete(p.id)} title="Delete"
-                          style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 6px', cursor: 'pointer', color: '#404550', display: 'flex', transition: 'all .12s' }}
-                          onMouseEnter={e => { e.currentTarget.style.borderColor = '#cc2233'; e.currentTarget.style.color = '#cc2233'; }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#404550'; }}>
-                          <Icon name="trash" size={11} color="currentColor" />
-                        </button>
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: sc, background: `${sc}18`, border: `1px solid ${sc}44`, borderRadius: 3, padding: '1px 7px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>
+                          <span style={{ width: 5, height: 5, borderRadius: '50%', background: sc, boxShadow: `0 0 4px ${sc}` }} />
+                          {p.status === 'active' ? 'Active' : p.status === 'paused' ? 'Paused' : 'Done'}
+                        </span>
+                        <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>{OS_ICONS[p.os] || '?'} {p.os}</span>
                       </div>
                     </div>
                     <div style={{ fontSize: 10, color: '#606570', marginBottom: 12, lineHeight: 1.5 }}>{p.description}</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                       <Icon name="target" size={10} color="#404550" />
                       <span style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono' }}>{p.ip || '—'}</span>
                       <span style={{ fontSize: 9, color: '#303540', marginLeft: 'auto', fontFamily: 'JetBrains Mono' }}>{p.added}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 8, borderTop: '1px solid #1e2029', paddingTop: 12 }}>
+                    {(() => {
+                      const validScopes = (scopes || []).filter(s => s.pid === p.id && s.in_scope);
+                      if (!validScopes.length) return null;
+                      return (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
+                          {validScopes.slice(0, 4).map(s => {
+                            const c = SCOPE_TYPE_COLORS[s.scope_type] || '#5b8af5';
+                            return (
+                              <span key={s.id} title={s.value} style={{ fontSize: 9, color: c, background: c + '18', border: `1px solid ${c}44`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' }}>
+                                {s.value}
+                              </span>
+                            );
+                          })}
+                          {validScopes.length > 4 && <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>+{validScopes.length - 4}</span>}
+                        </div>
+                      );
+                    })()}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 8, borderTop: '1px solid #1e2029', paddingTop: 12, marginBottom: 12 }}>
                       {[['notes', 'Notes', s.notes, '#6fc8f0'], ['hosts', 'Hosts', s.hosts, '#c07af0'], ['creds', 'Creds', s.creds, '#39d353'], ['target', 'Pwned', s.pwned, '#cc2233']].map(([icon, label, val, c]) => (
                         <div key={label} style={{ textAlign: 'center' }}>
                           <div style={{ fontSize: 18, fontWeight: 700, color: val > 0 ? c : '#303540', fontFamily: 'Space Grotesk' }}>{val}</div>
@@ -280,6 +294,44 @@ export default function ProjectsView({ projects, notes, hosts, creds, selectedPr
                         </div>
                       ))}
                     </div>
+                    {/* Action buttons */}
+                    {(canFor(p.id, 'project.import') || canFor(p.id, 'project.export') || canFor(p.id, 'project.update') || canFor(p.id, 'project.delete')) && (
+                    <div style={{ display: 'flex', gap: 6, borderTop: '1px solid #1e2029', paddingTop: 10 }} onClick={e => e.stopPropagation()}>
+                      {canFor(p.id, 'project.import') && (
+                      <button onClick={() => onImport(p.id)} title="Import scan"
+                        style={{ flex: 1, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = accent; e.currentTarget.style.color = accent; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
+                        <Icon name="export" size={10} color="currentColor" /> Import
+                      </button>
+                      )}
+                      {canFor(p.id, 'project.export') && (
+                      <button onClick={e => handleExport(e, p.id, p.name)} title="Export project to ZIP"
+                        disabled={exportingId === p.id}
+                        style={{ flex: 1, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: exportingId === p.id ? 'wait' : 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s', opacity: exportingId === p.id ? 0.5 : 1 }}
+                        onMouseEnter={e => { if (exportingId !== p.id) { e.currentTarget.style.borderColor = '#39d353'; e.currentTarget.style.color = '#39d353'; } }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
+                        <Icon name="export" size={10} color="currentColor" /> {exportingId === p.id ? 'Exporting...' : 'Export ZIP'}
+                      </button>
+                      )}
+                      {canFor(p.id, 'project.update') && (
+                      <button onClick={() => startEdit(p)} title="Edit project"
+                        style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', transition: 'all .12s' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = '#5b8af5'; e.currentTarget.style.color = '#5b8af5'; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
+                        <Icon name="edit" size={12} color="currentColor" />
+                      </button>
+                      )}
+                      {canFor(p.id, 'project.delete') && (
+                      <button onClick={() => setConfirmDelete(p.id)} title="Delete project"
+                        style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', transition: 'all .12s' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = '#cc2233'; e.currentTarget.style.color = '#cc2233'; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
+                        <Icon name="trash" size={12} color="currentColor" />
+                      </button>
+                      )}
+                    </div>
+                    )}
                   </div>
                 )}
               </div>
