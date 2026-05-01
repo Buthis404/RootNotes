@@ -11,6 +11,7 @@ import pkgutil
 from pathlib import Path
 
 from .registry import registry
+from .state import apply_saved_state
 from .types import BackendModule
 
 
@@ -22,8 +23,10 @@ def _register_builtin_modules():
     topology_module = BackendModule(
         name="topology",
         version="1.0.0",
+        title="Topology Builder",
         description="Automatic network topology builder from scan imports",
         enabled=True,
+        source="builtin",
     )
     registry.register(topology_module)
 
@@ -31,11 +34,23 @@ def _register_builtin_modules():
     nmap_module = BackendModule(
         name="nmap_parser",
         version="1.0.0",
+        title="Nmap Parser",
         description="Nmap XML topology parser",
         enabled=True,
+        source="builtin",
         scan_parsers={"nmap": _nmap_parser_placeholder},
     )
     registry.register(nmap_module)
+
+    attacker_ssh_module = BackendModule(
+        name="attacker_ssh",
+        version="1.0.0",
+        title="Attacker SSH",
+        description="Execute snippets remotely on the configured attacker machine over SSH",
+        enabled=True,
+        source="builtin",
+    )
+    registry.register(attacker_ssh_module)
 
 
 def _nmap_parser_placeholder(xml_content: str) -> list[dict]:
@@ -63,10 +78,27 @@ def load_plugin_modules():
     return loaded
 
 
+def load_plugin_module(name: str) -> BackendModule:
+    """Load a single plugin module by filename stem."""
+    mod = importlib.import_module(f".modules.{name}", package=__package__)
+    if not hasattr(mod, "MODULE") or not isinstance(mod.MODULE, BackendModule):
+        raise ValueError("Plugin file must define MODULE = BackendModule(...)")
+
+    module = mod.MODULE
+    if not module.title:
+        module.title = module.name
+    if module.source == "builtin":
+        module.source = "uploaded"
+    module.editable = True
+    registry.register(module)
+    return module
+
+
 def initialize(app=None):
     """Call on startup to register all modules."""
     _register_builtin_modules()
     loaded = load_plugin_modules()
+    apply_saved_state()
     if loaded:
         print(f"[plugins] Loaded modules: {', '.join(loaded)}")
 

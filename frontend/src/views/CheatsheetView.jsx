@@ -86,12 +86,19 @@ function scoreCredForSnippet(cred, snippet, selectedHost, vars) {
   return score;
 }
 
-function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
+function VarModal({ snippet, accent, onClose, hosts = [], creds = [], selectedProject }) {
   const vars = useMemo(() => extractVars(snippet.command), [snippet.command]);
   const [vals, setVals] = useState({});
   const [copied, setCopied] = useState(false);
   const [selectedHostId, setSelectedHostId] = useState('');
   const [selectedCredId, setSelectedCredId] = useState('');
+  const [moduleEnabled, setModuleEnabled] = useState(false);
+  const [availableTargets, setAvailableTargets] = useState({ project_hosts: [], global_targets: [] });
+  const [execMode, setExecMode] = useState('auto');
+  const [attackerHostId, setAttackerHostId] = useState('');
+  const [attackerCredId, setAttackerCredId] = useState('');
+  const [globalTargetId, setGlobalTargetId] = useState('');
+  const [execState, setExecState] = useState({ running: false, error: '', result: null });
   const result = fillVars(snippet.command, vals);
 
   const hasHostVars = vars.some(v => varHint(v) === 'host');
@@ -106,6 +113,32 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
 
   const sel = { background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 8px', color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none', width: '100%', cursor: 'pointer' };
 
+  const attackerHosts = useMemo(
+    () => hosts.filter(h => h.is_attacker || String(h.role || '').toLowerCase() === 'attacker'),
+    [hosts],
+  );
+
+  const projectAttackerOptions = useMemo(
+    () => availableTargets.project_hosts || [],
+    [availableTargets],
+  );
+
+  const globalAttackerOptions = useMemo(
+    () => availableTargets.global_targets || [],
+    [availableTargets],
+  );
+
+  const attackerCreds = useMemo(() => {
+    const selectedAttacker = attackerHosts.find(h => h.id === attackerHostId) || attackerHosts[0];
+    if (!selectedAttacker) return [];
+    return creds.filter(c => {
+      const matchesHost = (c.host_ids || []).includes(selectedAttacker.id) || c.host === selectedAttacker.ip || c.host === selectedAttacker.hostname;
+      const supportedType = ['plain', 'key'].includes(c.type);
+      const looksSsh = !c.service || String(c.service).toLowerCase() === 'ssh' || c.type === 'key';
+      return matchesHost && supportedType && looksSsh && !!c.secret;
+    });
+  }, [creds, attackerHosts, attackerHostId]);
+
   useEffect(() => {
     const bestHost = hosts.length ? [...hosts].sort((a, b) => scoreHostForSnippet(b, snippet, vars) - scoreHostForSnippet(a, snippet, vars))[0] : null;
     if (bestHost && scoreHostForSnippet(bestHost, snippet, vars) > 0) {
@@ -119,6 +152,50 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
       applyCredToVars(bestCred, vars, setVals);
     }
   }, [snippet, hosts, creds, vars]);
+
+  useEffect(() => {
+    api.listModules().then(({ modules }) => {
+      const mod = (modules || []).find(m => m.name === 'attacker_ssh');
+      setModuleEnabled(!!mod?.enabled);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    api.listAttackerExecutionTargets(selectedProject).then(setAvailableTargets).catch(() => {});
+  }, [selectedProject]);
+
+  useEffect(() => {
+    if (!attackerHostId && projectAttackerOptions[0]) setAttackerHostId(projectAttackerOptions[0].id);
+  }, [projectAttackerOptions, attackerHostId]);
+
+  useEffect(() => {
+    if (!globalTargetId && globalAttackerOptions[0]) setGlobalTargetId(globalAttackerOptions[0].id);
+  }, [globalAttackerOptions, globalTargetId]);
+
+  useEffect(() => {
+    if (!attackerCredId && attackerCreds[0]) setAttackerCredId(attackerCreds[0].id);
+    if (attackerCredId && !attackerCreds.some(c => c.id === attackerCredId)) setAttackerCredId('');
+  }, [attackerCreds, attackerCredId]);
+
+  const execute = async () => {
+    setExecState({ running: true, error: '', result: null });
+    try {
+      const data = await api.executeAttackerCommand(selectedProject, {
+        command: result,
+        snippet_title: snippet.title,
+        host_id: attackerHostId || null,
+        cred_id: attackerCredId || null,
+        target_id: globalTargetId || null,
+        execution_mode: execMode,
+        timeout_seconds: 45,
+        activity_type: 'postex',
+      });
+      setExecState({ running: false, error: '', result: data });
+    } catch (e) {
+      setExecState({ running: false, error: e.message || 'Execution failed', result: null });
+    }
+  };
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#000000bb', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}>
@@ -203,6 +280,47 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
             )}
           </pre>
         </div>
+
+        {moduleEnabled && selectedProject && (
+          <div style={{ marginBottom: 16, padding: '12px 14px', background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8 }}>
+            <div style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 10 }}>Exec via attacker</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <select style={sel} value={execMode} onChange={e => setExecMode(e.target.value)}>
+                <option value="auto">auto</option>
+                <option value="project">project</option>
+                <option value="global">global</option>
+              </select>
+              <select style={sel} value={attackerHostId} onChange={e => setAttackerHostId(e.target.value)} disabled={execMode === 'global'}>
+                <option value="">Attacker host...</option>
+                {projectAttackerOptions.map(h => <option key={h.id} value={h.id}>{h.name || h.host || h.id}</option>)}
+              </select>
+              {execMode === 'global'
+                ? <select style={sel} value={globalTargetId} onChange={e => setGlobalTargetId(e.target.value)}>
+                    <option value="">Global target...</option>
+                    {globalAttackerOptions.map(t => <option key={t.id} value={t.id}>{t.name} ({t.host})</option>)}
+                  </select>
+                : <select style={sel} value={attackerCredId} onChange={e => setAttackerCredId(e.target.value)} disabled={execMode !== 'project'}>
+                    <option value="">SSH credential...</option>
+                    {attackerCreds.map(c => <option key={c.id} value={c.id}>{c.username} [{c.type}]</option>)}
+                  </select>}
+            </div>
+            {!projectAttackerOptions.length && execMode !== 'global' && <div style={{ fontSize: 10, color: '#f09a3a', marginBottom: 8 }}>No attacker host is linked to this project. Global mode is still available.</div>}
+            {!globalAttackerOptions.length && execMode === 'global' && <div style={{ fontSize: 10, color: '#f09a3a', marginBottom: 8 }}>No global attacker target is assigned to this project.</div>}
+            {execState.error && <div style={{ fontSize: 10, color: '#cc2233', whiteSpace: 'pre-wrap', marginBottom: 8 }}>{execState.error}</div>}
+            {execState.result && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 10, color: execState.result.ok ? '#39d353' : '#f09a3a', fontFamily: 'JetBrains Mono', marginBottom: 6 }}>
+                  exit={execState.result.exit_code} · {execState.result.used_global_fallback ? 'global fallback' : 'project credential'}
+                </div>
+                <pre style={{ background: '#07080b', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px', fontFamily: 'JetBrains Mono', fontSize: 11, color: '#c8cdd6', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0 }}>{`STDOUT:\n${execState.result.stdout || ''}\n\nSTDERR:\n${execState.result.stderr || ''}`}</pre>
+              </div>
+            )}
+            <button onClick={execute} disabled={execState.running || (execMode !== 'global' && !attackerHostId) || (execMode === 'global' && !globalTargetId)}
+              style={{ background: execState.running ? '#1a1c22' : accent, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: execState.running ? 'wait' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+              {execState.running ? 'Executing...' : 'Exec'}
+            </button>
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button onClick={onClose} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Close</button>
@@ -345,7 +463,8 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
       {modalSnippet && <VarModal snippet={modalSnippet} accent={accent} onClose={() => setModalSnippet(null)}
         hosts={(hosts || []).filter(h => h.pid === selectedProject)}
-        creds={(creds || []).filter(c => c.pid === selectedProject)} />}
+        creds={(creds || []).filter(c => c.pid === selectedProject)}
+        selectedProject={selectedProject} />}
       {showAddCustom && <AddCustomModal accent={accent} onAdd={addCustom} onClose={() => setShowAddCustom(false)} />}
       {editingCustom && <AddCustomModal accent={accent} item={editingCustom} onAdd={updateCustom} onClose={() => setEditingCustom(null)} />}
 

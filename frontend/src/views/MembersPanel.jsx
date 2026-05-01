@@ -1,7 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { api } from '../api.js';
 import Icon from '../components/Icon.jsx';
-import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
 
 const ROLE_ORDER = ['owner', 'admin', 'editor', 'operator', 'viewer', 'auditor'];
 const ROLE_COLOR = {
@@ -18,29 +17,51 @@ export default function MembersPanel({ pid, accent, onClose }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
   const [addUserId, setAddUserId] = useState('');
   const [addRole, setAddRole] = useState('viewer');
   const [adding, setAdding] = useState(false);
+  const [bulkRole, setBulkRole] = useState('viewer');
+  const [selectedUserIds, setSelectedUserIds] = useState([]);
+  const [bulkAdding, setBulkAdding] = useState(false);
   const [transferTo, setTransferTo] = useState('');
   const [showTransfer, setShowTransfer] = useState(false);
-  const { can, isSuperAdmin } = useProjectPermissions();
-  const canManage = can('project.manage_members');
-  const canTransfer = can('project.transfer_ownership') || isSuperAdmin;
+  const [permissionState, setPermissionState] = useState({ canManage: false, canTransfer: false });
+
+  const canManage = permissionState.canManage;
+  const canTransfer = permissionState.canTransfer;
 
   const load = async () => {
     setLoading(true);
     try {
-      const [m, u] = await Promise.all([api.getProjectMembers(pid), api.adminListUsers()]);
+      const [m, u, perms] = await Promise.all([
+        api.getProjectMembers(pid),
+        api.getProjectAvailableUsers(pid),
+        api.getMyProjectPermissions(pid),
+      ]);
       setMembers(m);
       setUsers(u);
+      setPermissionState({
+        canManage: !!perms.is_super_admin || (perms.permissions || []).includes('project.manage_members'),
+        canTransfer: !!perms.is_super_admin || (perms.permissions || []).includes('project.transfer_ownership'),
+      });
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); }, [pid]);
+  useEffect(() => {
+    setSelectedUserIds([]);
+    setSearch('');
+    load();
+  }, [pid]);
 
   const memberUserIds = new Set(members.map(m => m.user_id));
   const nonMembers = users.filter(u => !memberUserIds.has(u.id));
+  const filteredUsers = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return nonMembers;
+    return nonMembers.filter(u => u.username.toLowerCase().includes(q));
+  }, [nonMembers, search]);
 
   const handleAdd = async () => {
     if (!addUserId) return;
@@ -49,8 +70,20 @@ export default function MembersPanel({ pid, accent, onClose }) {
       await api.addProjectMember(pid, { user_id: addUserId, role: addRole });
       await load();
       setAddUserId('');
+      setSelectedUserIds(ids => ids.filter(id => id !== addUserId));
     } catch (e) { setError(e.message); }
     finally { setAdding(false); }
+  };
+
+  const handleBulkAdd = async () => {
+    if (!selectedUserIds.length) return;
+    setBulkAdding(true);
+    try {
+      await api.bulkAddProjectMembers(pid, { user_ids: selectedUserIds, role: bulkRole });
+      setSelectedUserIds([]);
+      await load();
+    } catch (e) { setError(e.message); }
+    finally { setBulkAdding(false); }
   };
 
   const handleRoleChange = async (uid, newRole) => {
@@ -132,6 +165,43 @@ export default function MembersPanel({ pid, accent, onClose }) {
                   style={{ background: addUserId ? accent : '#1a1c22', border: 'none', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>
                   {adding ? '...' : 'Add'}
                 </button>
+              </div>
+            )}
+
+            {canManage && nonMembers.length > 1 && (
+              <div style={{ borderTop: '1px solid #1e2029', paddingTop: 14, marginBottom: 16 }}>
+                <div style={{ fontSize: 10, color: '#808590', fontFamily: 'Space Grotesk', fontWeight: 700, marginBottom: 10 }}>Bulk Invite</div>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search users..." style={{ ...inp, flex: 1 }} />
+                  <select value={bulkRole} onChange={e => setBulkRole(e.target.value)} style={sel}>
+                    {ROLE_ORDER.filter(r => r !== 'owner').map(r => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+                  </select>
+                </div>
+                <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid #1e2029', borderRadius: 6, background: '#0a0c10', marginBottom: 10 }}>
+                  {filteredUsers.length === 0 ? (
+                    <div style={{ padding: '12px 10px', fontSize: 11, color: '#505560' }}>No matching users</div>
+                  ) : filteredUsers.map(u => {
+                    const checked = selectedUserIds.includes(u.id);
+                    return (
+                      <label key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderBottom: '1px solid #14161b', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={checked} onChange={e => setSelectedUserIds(prev => e.target.checked ? [...prev, u.id] : prev.filter(id => id !== u.id))} />
+                        <span style={{ flex: 1, fontSize: 12, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>{u.username}</span>
+                        <span style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase' }}>{u.role}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <button onClick={() => setSelectedUserIds(filteredUsers.map(u => u.id))}
+                    style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#808590', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+                    Select visible
+                  </button>
+                  <div style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono', flex: 1, textAlign: 'center' }}>{selectedUserIds.length} selected</div>
+                  <button onClick={handleBulkAdd} disabled={!selectedUserIds.length || bulkAdding}
+                    style={{ background: selectedUserIds.length ? accent : '#1a1c22', border: 'none', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>
+                    {bulkAdding ? 'Inviting...' : 'Invite selected'}
+                  </button>
+                </div>
               </div>
             )}
 

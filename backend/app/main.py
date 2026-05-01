@@ -26,11 +26,14 @@ from .core.deps import decode_ws_token
 from .core.utils import new_id
 from .plugins.registry import registry
 from .plugins.loader import initialize as init_plugins
+from .plugins.state import list_modules as list_module_state
 
 # ── Schema migrations (lightweight, idempotent) ───────────────────────
 models.Base.metadata.create_all(bind=engine)
 
 with engine.begin() as conn:
+    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("CREATE TABLE IF NOT EXISTS global_settings (key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}')"))
     conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '#07080b'"))
     conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS regions_json JSONB NOT NULL DEFAULT '[]'"))
     conn.execute(text("ALTER TABLE networks ALTER COLUMN name SET DEFAULT 'Network'"))
@@ -92,6 +95,7 @@ async def lifespan(app: FastAPI):
             admin = models.User(
                 id=new_id("u"),
                 username=env_username,
+                display_name=env_username,
                 password_hash=hash_password(password),
                 role="admin",
                 created_at=datetime.utcnow().isoformat()[:16],
@@ -228,7 +232,7 @@ def get_global_presence():
 # ── Modules endpoint ──────────────────────────────────────────────────
 @app.get("/api/modules")
 def list_modules():
-    return {"modules": [m.to_dict() for m in registry.get_all()]}
+    return {"modules": list_module_state()}
 
 
 # ── Include all domain routers ────────────────────────────────────────
@@ -236,11 +240,12 @@ from .routers import (
     auth, admin, projects, hosts, creds, notes,
     networks, network_map, findings, checklist, timeline, objectives,
     activities, attack_paths, loots, scopes,
-    cred_host_notes, search, templates, import_export, topology, members,
+    cred_host_notes, search, templates, import_export, topology, members, system_modules, attacker_exec,
 )
 
 app.include_router(auth.router)
 app.include_router(admin.router)
+app.include_router(system_modules.router)
 app.include_router(projects.router)
 app.include_router(members.router)
 app.include_router(hosts.router)
@@ -261,3 +266,4 @@ app.include_router(search.router)
 app.include_router(templates.router)
 app.include_router(import_export.router)
 app.include_router(topology.router)
+app.include_router(attacker_exec.router)

@@ -30,6 +30,7 @@ def admin_create_user(
     user = models.User(
         id=new_id("u"),
         username=body.username.strip(),
+        display_name=(body.display_name or body.username).strip(),
         password_hash=hash_password(body.password),
         role=body.role,
         created_at=datetime.utcnow().isoformat()[:16],
@@ -55,6 +56,8 @@ def admin_update_user(
         if uid == admin.id and body.role != "admin":
             raise HTTPException(400, "Нельзя снять с себя роль администратора")
         user.role = body.role
+    if body.display_name is not None:
+        user.display_name = body.display_name.strip()
     if body.active is not None:
         if uid == admin.id and not body.active:
             raise HTTPException(400, "Нельзя деактивировать себя")

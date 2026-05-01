@@ -10,12 +10,29 @@ export const api = {
   authSetup:   (data)     => req('POST', '/auth/setup',   data, false),
   authLogin:   (data)     => req('POST', '/auth/login',   data, false),
   authMe:      ()         => req('GET',  '/auth/me'),
+  authUpdateMe:(data)     => req('PATCH','/auth/me',      data),
+  authChangePassword: (data) => req('POST', '/auth/change-password', data),
 
   // Admin
   adminListUsers:   ()          => req('GET',    '/admin/users'),
   adminCreateUser:  (data)      => req('POST',   '/admin/users',       data),
   adminUpdateUser:  (id, data)  => req('PATCH',  `/admin/users/${id}`, data),
   adminDeleteUser:  (id)        => req('DELETE', `/admin/users/${id}`),
+  adminListModules:   ()          => req('GET',    '/admin/modules'),
+  adminCreateModule:  (data)      => req('POST',   '/admin/modules',       data),
+  adminUpdateModule:  (name, data)=> req('PATCH',  `/admin/modules/${encodeURIComponent(name)}`, data),
+  adminDeleteModule:  (name)      => req('DELETE', `/admin/modules/${encodeURIComponent(name)}`),
+  adminDownloadModuleTemplate: () => download('/admin/modules/template'),
+  adminDownloadFrontendModuleTemplate: () => download('/admin/modules/template/frontend'),
+  adminValidateModule: (data)     => req('POST',   '/admin/modules/validate', data),
+  adminUploadModule:    (file)    => upload('/admin/modules/upload', file),
+  adminGetAttackerSSHConfig: ()   => req('GET', '/admin/modules/attacker-ssh/config'),
+  adminCreateAttackerTarget: (data) => req('POST', '/admin/modules/attacker-ssh/targets', data),
+  adminUpdateAttackerTarget: (id, data) => req('PATCH', `/admin/modules/attacker-ssh/targets/${encodeURIComponent(id)}`, data),
+  adminDeleteAttackerTarget: (id) => req('DELETE', `/admin/modules/attacker-ssh/targets/${encodeURIComponent(id)}`),
+  adminTestAttackerTarget: (id)   => req('POST', `/admin/modules/attacker-ssh/targets/${encodeURIComponent(id)}/test`),
+  adminTestAttackerSSH: (data)    => req('POST', '/admin/modules/attacker-ssh/test', data),
+  adminExecuteAttackerSSH: (data) => req('POST', '/admin/modules/attacker-ssh/execute', data),
 
   // Projects
   getProjects:   ()         => req('GET',    '/projects'),
@@ -111,6 +128,8 @@ export const api = {
   createHostActivity: (data)        => req('POST',   '/host-activities',          data),
   updateHostActivity: (id, data)    => req('PATCH',  `/host-activities/${id}`,    data),
   deleteHostActivity: (id)          => req('DELETE', `/host-activities/${id}`),
+  executeAttackerCommand: (pid, data) => req('POST', `/projects/${pid}/attacker-exec`, data),
+  listAttackerExecutionTargets: (pid) => req('GET', `/projects/${pid}/attacker-exec/targets`),
 
   // Cred-host notes
   getCredHostNotes:   (params)      => { const qs = new URLSearchParams(params).toString(); return req('GET', `/cred-host-notes${qs ? '?' + qs : ''}`); },
@@ -164,7 +183,9 @@ export const api = {
 
   // Project members
   getProjectMembers:       (pid)             => req('GET',    `/projects/${pid}/members`),
+  getProjectAvailableUsers:(pid)             => req('GET',    `/projects/${pid}/available-users`),
   addProjectMember:        (pid, data)       => req('POST',   `/projects/${pid}/members`,            data),
+  bulkAddProjectMembers:   (pid, data)       => req('POST',   `/projects/${pid}/members/bulk`,       data),
   updateProjectMember:     (pid, uid, data)  => req('PATCH',  `/projects/${pid}/members/${uid}`,     data),
   removeProjectMember:     (pid, uid)        => req('DELETE', `/projects/${pid}/members/${uid}`),
   transferOwnership:       (pid, data)       => req('POST',   `/projects/${pid}/transfer-ownership`, data),

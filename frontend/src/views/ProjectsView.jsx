@@ -5,6 +5,7 @@ import { OS_ICONS } from '../constants.js';
 import { api } from '../api.js';
 import { isAttackerHost } from '../utils/hostMeta.js';
 import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
+import MembersPanel from './MembersPanel.jsx';
 
 const SCOPE_TYPE_COLORS = {
   cidr:     '#5b8af5',
@@ -39,6 +40,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
   const [editForm, setEditForm] = useState({});
   const [exportingId, setExportingId] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [membersPid, setMembersPid] = useState(null);
   const importFileRef = useRef();
   const { can, projectId: permsPid, isSuperAdmin } = useProjectPermissions();
   const canFor = (pid, perm) => (isSuperAdmin) ? true : (pid === permsPid ? can(perm) : true);
@@ -120,6 +122,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
 
   return (
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      {membersPid && <MembersPanel pid={membersPid} accent={accent} onClose={() => setMembersPid(null)} />}
       {/* Left: project grid */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
 
@@ -215,7 +218,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(460px,1fr))', gap: 14 }}>
           {projects.map(p => {
             const s = stats(p.id);
             const isActive = p.id === selectedProject;
@@ -223,7 +226,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
             const sc = statusColor[p.status] || '#555';
             return (
               <div key={p.id}
-                style={{ background: isActive ? '#12141a' : '#0d0f14', border: `1px solid ${isEdit ? accent + '88' : isActive ? accent + '44' : '#1e2029'}`, borderRadius: 8, padding: 18, transition: 'all .15s', position: 'relative', overflow: 'hidden' }}>
+                style={{ background: isActive ? '#12141a' : '#0d0f14', border: `1px solid ${isEdit ? accent + '88' : isActive ? accent + '44' : '#1e2029'}`, borderRadius: 8, padding: 16, transition: 'all .15s', position: 'relative', overflow: 'hidden' }}>
                 {isActive && !isEdit && <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,${accent},${accent}00)` }} />}
 
                 {isEdit ? (
@@ -253,7 +256,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                   <div onClick={() => onSelect(p.id)} style={{ cursor: 'pointer' }}
                     onMouseEnter={e => { if (!isActive) { e.currentTarget.parentElement.style.borderColor = '#2a2d35'; e.currentTarget.parentElement.style.background = '#0f1116'; } }}
                     onMouseLeave={e => { if (!isActive) { e.currentTarget.parentElement.style.borderColor = '#1e2029'; e.currentTarget.parentElement.style.background = '#0d0f14'; } }}>
-                    <div style={{ marginBottom: 10 }}>
+                    <div style={{ marginBottom: 8 }}>
                       <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: sc, background: `${sc}18`, border: `1px solid ${sc}44`, borderRadius: 3, padding: '1px 7px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>
@@ -263,8 +266,8 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                         <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>{OS_ICONS[p.os] || '?'} {p.os}</span>
                       </div>
                     </div>
-                    <div style={{ fontSize: 10, color: '#606570', marginBottom: 12, lineHeight: 1.5 }}>{p.description}</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                    <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, lineHeight: 1.4 }}>{p.description}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
                       <Icon name="target" size={10} color="#404550" />
                       <span style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono' }}>{p.ip || '—'}</span>
                       <span style={{ fontSize: 9, color: '#303540', marginLeft: 'auto', fontFamily: 'JetBrains Mono' }}>{p.added}</span>
@@ -273,7 +276,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                       const validScopes = (scopes || []).filter(s => s.pid === p.id && s.in_scope);
                       if (!validScopes.length) return null;
                       return (
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
                           {validScopes.slice(0, 4).map(s => {
                             const c = SCOPE_TYPE_COLORS[s.scope_type] || '#5b8af5';
                             return (
@@ -286,7 +289,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                         </div>
                       );
                     })()}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 8, borderTop: '1px solid #1e2029', paddingTop: 12, marginBottom: 12 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 8, borderTop: '1px solid #1e2029', paddingTop: 10, marginBottom: 10 }}>
                       {[['notes', 'Notes', s.notes, '#6fc8f0'], ['hosts', 'Hosts', s.hosts, '#c07af0'], ['creds', 'Creds', s.creds, '#39d353'], ['target', 'Pwned', s.pwned, '#cc2233']].map(([icon, label, val, c]) => (
                         <div key={label} style={{ textAlign: 'center' }}>
                           <div style={{ fontSize: 18, fontWeight: 700, color: val > 0 ? c : '#303540', fontFamily: 'Space Grotesk' }}>{val}</div>
@@ -295,11 +298,20 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                       ))}
                     </div>
                     {/* Action buttons */}
-                    {(canFor(p.id, 'project.import') || canFor(p.id, 'project.export') || canFor(p.id, 'project.update') || canFor(p.id, 'project.delete')) && (
-                    <div style={{ display: 'flex', gap: 6, borderTop: '1px solid #1e2029', paddingTop: 10 }} onClick={e => e.stopPropagation()}>
+                    {(canFor(p.id, 'project.import') || canFor(p.id, 'project.export') || canFor(p.id, 'project.update') || canFor(p.id, 'project.delete') || canFor(p.id, 'project.manage_members')) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, borderTop: '1px solid #1e2029', paddingTop: 10 }} onClick={e => e.stopPropagation()}>
+                      <div style={{ display: 'flex', gap: 6, justifyContent: canFor(p.id, 'project.manage_members') ? 'flex-start' : 'flex-end', flex: 1, minWidth: 0 }}>
+                      {canFor(p.id, 'project.manage_members') && (
+                      <button onClick={() => setMembersPid(p.id)} title="Manage project members"
+                        style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s', whiteSpace: 'nowrap' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = '#6fc8f0'; e.currentTarget.style.color = '#6fc8f0'; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
+                        <Icon name="person" size={10} color="currentColor" /> Members
+                      </button>
+                      )}
                       {canFor(p.id, 'project.import') && (
                       <button onClick={() => onImport(p.id)} title="Import scan"
-                        style={{ flex: 1, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s' }}
+                        style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s', whiteSpace: 'nowrap' }}
                         onMouseEnter={e => { e.currentTarget.style.borderColor = accent; e.currentTarget.style.color = accent; }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
                         <Icon name="export" size={10} color="currentColor" /> Import
@@ -308,12 +320,14 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                       {canFor(p.id, 'project.export') && (
                       <button onClick={e => handleExport(e, p.id, p.name)} title="Export project to ZIP"
                         disabled={exportingId === p.id}
-                        style={{ flex: 1, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: exportingId === p.id ? 'wait' : 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s', opacity: exportingId === p.id ? 0.5 : 1 }}
+                        style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: exportingId === p.id ? 'wait' : 'pointer', color: '#505560', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'all .12s', opacity: exportingId === p.id ? 0.5 : 1, whiteSpace: 'nowrap' }}
                         onMouseEnter={e => { if (exportingId !== p.id) { e.currentTarget.style.borderColor = '#39d353'; e.currentTarget.style.color = '#39d353'; } }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a2d35'; e.currentTarget.style.color = '#505560'; }}>
                         <Icon name="export" size={10} color="currentColor" /> {exportingId === p.id ? 'Exporting...' : 'Export ZIP'}
                       </button>
                       )}
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, flexShrink: 0 }}>
                       {canFor(p.id, 'project.update') && (
                       <button onClick={() => startEdit(p)} title="Edit project"
                         style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#505560', display: 'flex', alignItems: 'center', transition: 'all .12s' }}
@@ -330,6 +344,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
                         <Icon name="trash" size={12} color="currentColor" />
                       </button>
                       )}
+                      </div>
                     </div>
                     )}
                   </div>

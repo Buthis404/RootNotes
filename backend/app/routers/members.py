@@ -33,12 +33,24 @@ class AddMemberBody(BaseModel):
     role: str = "viewer"
 
 
+class BulkAddMembersBody(BaseModel):
+    user_ids: list[str]
+    role: str = "viewer"
+
+
 class UpdateRoleBody(BaseModel):
     role: str
 
 
 class TransferOwnershipBody(BaseModel):
     user_id: str
+
+
+class AvailableUserOut(BaseModel):
+    id: str
+    username: str
+    role: str
+    active: bool
 
 
 def _get_project_or_404(pid: str, db: Session) -> models.Project:
@@ -53,6 +65,30 @@ def _require_manage_members(pid: str, user: models.User, db: Session):
         return
     if not user_has_permission(db, pid, user, "project.manage_members"):
         raise HTTPException(403, "Insufficient permissions to manage members")
+
+
+def _upsert_member(pid: str, user_id: str, role: str, actor_id: str, db: Session) -> models.ProjectMember:
+    existing = db.query(models.ProjectMember).filter(
+        models.ProjectMember.project_id == pid,
+        models.ProjectMember.user_id == user_id,
+    ).first()
+    if existing:
+        existing.role = role
+        existing.is_active = True
+        existing.created_by = actor_id
+        return existing
+
+    member = models.ProjectMember(
+        id=new_id("pm"),
+        project_id=pid,
+        user_id=user_id,
+        role=role,
+        created_at=datetime.utcnow().isoformat(),
+        created_by=actor_id,
+        is_active=True,
+    )
+    db.add(member)
+    return member
 
 
 @router.get("/{pid}/members", response_model=list[MemberOut])
@@ -108,34 +144,82 @@ def add_member(
     if not target_user:
         raise HTTPException(404, "User not found")
 
-    existing = db.query(models.ProjectMember).filter(
-        models.ProjectMember.project_id == pid,
-        models.ProjectMember.user_id == body.user_id,
-    ).first()
-
-    if existing:
-        existing.role = body.role
-        existing.is_active = True
-        existing.created_by = user.id
-        db.commit()
-        db.refresh(existing)
-        return MemberOut(user_id=existing.user_id, username=target_user.username, role=existing.role,
-                         created_at=existing.created_at, created_by=existing.created_by, is_active=existing.is_active)
-
-    member = models.ProjectMember(
-        id=new_id("pm"),
-        project_id=pid,
-        user_id=body.user_id,
-        role=body.role,
-        created_at=datetime.utcnow().isoformat(),
-        created_by=user.id,
-        is_active=True,
-    )
-    db.add(member)
+    member = _upsert_member(pid, body.user_id, body.role, user.id, db)
     db.commit()
     db.refresh(member)
     return MemberOut(user_id=member.user_id, username=target_user.username, role=member.role,
                      created_at=member.created_at, created_by=member.created_by, is_active=member.is_active)
+
+
+@router.post("/{pid}/members/bulk", status_code=201, response_model=list[MemberOut])
+def bulk_add_members(
+    pid: str,
+    body: BulkAddMembersBody,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _get_project_or_404(pid, db)
+    _require_manage_members(pid, user, db)
+
+    if body.role not in PROJECT_ROLES:
+        raise HTTPException(400, f"Invalid role. Valid roles: {PROJECT_ROLES}")
+    if not body.user_ids:
+        raise HTTPException(400, "No users provided")
+    if body.role == "owner" and user.role != "admin":
+        caller_membership = get_membership(db, pid, user.id)
+        if not caller_membership or caller_membership.role != "owner":
+            raise HTTPException(403, "Only owners can assign the owner role")
+
+    user_ids = list(dict.fromkeys(uid for uid in body.user_ids if uid))
+    target_users = db.query(models.User).filter(models.User.id.in_(user_ids), models.User.active == True).all()
+    target_map = {u.id: u for u in target_users}
+    missing_ids = [uid for uid in user_ids if uid not in target_map]
+    if missing_ids:
+        raise HTTPException(404, f"Users not found: {', '.join(missing_ids[:5])}")
+
+    members = []
+    for uid in user_ids:
+        member = _upsert_member(pid, uid, body.role, user.id, db)
+        members.append(member)
+
+    db.commit()
+    for member in members:
+        db.refresh(member)
+
+    return [
+        MemberOut(
+            user_id=member.user_id,
+            username=target_map[member.user_id].username,
+            role=member.role,
+            created_at=member.created_at,
+            created_by=member.created_by,
+            is_active=member.is_active,
+        )
+        for member in members
+    ]
+
+
+@router.get("/{pid}/available-users", response_model=list[AvailableUserOut])
+def list_available_users(
+    pid: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _get_project_or_404(pid, db)
+    _require_manage_members(pid, user, db)
+
+    active_member_ids = db.query(models.ProjectMember.user_id).filter(
+        models.ProjectMember.project_id == pid,
+        models.ProjectMember.is_active == True,
+    ).all()
+    member_ids = [uid for (uid,) in active_member_ids]
+
+    query = db.query(models.User).filter(models.User.active == True)
+    if member_ids:
+        query = query.filter(~models.User.id.in_(member_ids))
+
+    users = query.order_by(models.User.username).all()
+    return [AvailableUserOut(id=u.id, username=u.username, role=u.role, active=u.active) for u in users]
 
 
 @router.patch("/{pid}/members/{target_uid}", response_model=MemberOut)

@@ -24,21 +24,31 @@ from ..core.utils import new_id, normalize_domain
 from ..core.layout import compute_layout
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
+from ..plugins.registry import registry
 
 router = APIRouter(prefix="/api/projects/{pid}/topology", tags=["topology"])
 
 
+def _require_topology_module_enabled():
+    module = registry.get("topology")
+    if not module or not module.enabled:
+        raise HTTPException(404, "Topology module is disabled")
+
+
 def require_topo_read(pid: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> models.User:
+    _require_topology_module_enabled()
     check_pid_access(db, pid, user, "topology.read")
     return user
 
 
 def require_topo_preview(pid: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> models.User:
+    _require_topology_module_enabled()
     check_pid_access(db, pid, user, "topology.preview")
     return user
 
 
 def require_topo_apply(pid: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> models.User:
+    _require_topology_module_enabled()
     check_pid_access(db, pid, user, "topology.apply")
     return user
 

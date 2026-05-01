@@ -8,6 +8,7 @@ class User(Base):
 
     id = Column(String, primary_key=True)
     username = Column(String, nullable=False, unique=True)
+    display_name = Column(String, nullable=False, default="")
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="user")   # "admin" | "user"
     created_at = Column(String, nullable=False)
@@ -278,3 +279,10 @@ class ProjectMember(Base):
     created_at = Column(String, nullable=False)
     created_by = Column(String, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+
+
+class GlobalSetting(Base):
+    __tablename__ = "global_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(JSONB, nullable=False, default=dict)

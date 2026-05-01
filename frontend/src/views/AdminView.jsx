@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
+import SystemModulesView from './SystemModulesView.jsx';
 
 const GLOBAL_ROLE_COLOR = { admin: '#cc2233', user: '#5b8af5', viewer: '#808590' };
 
@@ -341,6 +342,7 @@ function ProjectAccessSection({ accent, allUsers }) {
 // ── Main AdminView ────────────────────────────────────────────────────
 export default function AdminView({ currentUser, accent, onlineUsers = [] }) {
   const tableColumns = 'minmax(220px, 1fr) 120px 100px 110px 220px';
+  const [section, setSection] = useState('users');
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -382,6 +384,22 @@ export default function AdminView({ currentUser, accent, onlineUsers = [] }) {
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px', maxWidth: 960 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 22 }}>
+        {[['users', 'User Management'], ['system', 'System Modules']].map(([id, label]) => {
+          const active = section === id;
+          return (
+            <button key={id} onClick={() => setSection(id)}
+              style={{ background: active ? `${accent}22` : 'transparent', border: `1px solid ${active ? accent + '88' : '#2a2d35'}`, borderRadius: 6, padding: '7px 14px', cursor: 'pointer', color: active ? accent : '#606570', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
+      {section === 'system' && <SystemModulesView accent={accent} />}
+
+      {section === 'users' && (
+      <>
       {showCreate && <CreateUserModal accent={accent} onClose={() => setShowCreate(false)} onCreated={u => setUsers(prev => [...prev, u])} />}
       {resetUser && <ResetPasswordModal user={resetUser} accent={accent} onClose={() => setResetUser(null)} />}
       {confirmDelete && (
@@ -493,6 +511,8 @@ export default function AdminView({ currentUser, accent, onlineUsers = [] }) {
 
       {/* ── Project Access section ── */}
       <ProjectAccessSection accent={accent} allUsers={users} />
+      </>
+      )}
     </div>
   );
 }

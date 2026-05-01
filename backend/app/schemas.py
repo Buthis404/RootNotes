@@ -6,6 +6,7 @@ from typing import List, Optional, Any
 class UserOut(BaseModel):
     id: str
     username: str
+    display_name: str = ""
     role: str
     created_at: str
     active: bool
@@ -22,13 +23,24 @@ class SetupRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class UpdateProfileRequest(BaseModel):
+    display_name: str
+
+
 class CreateUserRequest(BaseModel):
     username: str
     password: str
+    display_name: Optional[str] = None
     role: str = "user"
 
 
 class UpdateUserRequest(BaseModel):
+    display_name: Optional[str] = None
     role: Optional[str] = None
     active: Optional[bool] = None
     password: Optional[str] = None

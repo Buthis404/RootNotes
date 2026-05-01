@@ -21,6 +21,7 @@ import TimelineView from './views/TimelineView.jsx';
 import CheatsheetView from './views/CheatsheetView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
+import UserSettingsView from './views/UserSettingsView.jsx';
 import { hasAutoRoleSignals, inferNodeType, isAttackerHost } from './utils/hostMeta.js';
 import { useProjectPermissions } from './context/ProjectPermissions.jsx';
 
@@ -838,10 +839,16 @@ export default function App() {
           </button>
           {/* Current user + logout */}
           <div style={{ padding: navExpanded ? '10px 12px 6px' : '10px 0 6px', display: 'flex', flexDirection: navExpanded ? 'row' : 'column', alignItems: 'center', gap: 8 }}>
-            <div style={{ width: 28, height: 28, borderRadius: '50%', background: `${acc}22`, border: `1px solid ${acc}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: acc, fontFamily: 'JetBrains Mono' }}>
-              {currentUser?.username?.slice(0, 2).toUpperCase()}
-            </div>
-            {navExpanded && <span style={{ flex: 1, minWidth: 0, fontSize: 10, color: '#808590', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentUser?.username}</span>}
+            <button onClick={() => setTab('user-settings')} title="User settings"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, width: navExpanded ? '100%' : 'auto', padding: 0, textAlign: 'left' }}>
+              <div style={{ width: 28, height: 28, borderRadius: '50%', background: `${acc}22`, border: `1px solid ${acc}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: acc, fontFamily: 'JetBrains Mono', flexShrink: 0 }}>
+                {(currentUser?.display_name || currentUser?.username || '').slice(0, 2).toUpperCase()}
+              </div>
+              {navExpanded && <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 10, color: '#c8cdd6', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentUser?.display_name || currentUser?.username}</div>
+                <div style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{currentUser?.username}</div>
+              </div>}
+            </button>
             <button onClick={handleLogout} title="Sign out"
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#303540', fontSize: 9, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 3 }}
               onMouseEnter={e => e.currentTarget.style.color = '#cc2233'}
@@ -867,7 +874,7 @@ export default function App() {
       </div>
 
       {/* Context sidebar */}
-      {tab !== 'projects' && (
+      {tab !== 'projects' && tab !== 'user-settings' && (
         <div style={{ width: 200, background: '#0c0e13', borderRight: '1px solid #1a1c22', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
           <div style={{ padding: '14px 14px 10px', borderBottom: '1px solid #151720' }}>
             <div style={{ fontSize: 10, color: '#353840', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 7 }}>RootNotes</div>
@@ -951,6 +958,9 @@ export default function App() {
               setHostActivities(acts);
               setSelectedProject(result.project_id);
             }} />
+        )}
+        {tab === 'user-settings' && (
+          <UserSettingsView accent={acc} currentUser={currentUser} onUserUpdated={setCurrentUser} />
         )}
         {tab === 'notes' && (
           <NotesView notes={notes} onAdd={addNote} onUpdate={updateNote} onDelete={deleteNote}

@@ -1387,6 +1387,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [nameVal, setNameVal] = useState('');
   const [showTopologyBuilder, setShowTopologyBuilder] = useState(false);
   const [autoBuilding, setAutoBuilding] = useState(false);
+  const [topologyEnabled, setTopologyEnabled] = useState(true);
 
   useEffect(() => {
     if (networks.length > 0) {
@@ -1395,6 +1396,18 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       setActiveNetId(null);
     }
   }, [projectId, networks, activeNetId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listModules().then(({ modules }) => {
+      if (cancelled) return;
+      const topology = (modules || []).find(mod => mod.name === 'topology');
+      setTopologyEnabled(topology ? topology.enabled !== false : true);
+    }).catch(() => {
+      if (!cancelled) setTopologyEnabled(true);
+    });
+    return () => { cancelled = true; };
+  }, [projectId]);
 
   const activeNet = networks.find(n => n.id === activeNetId);
   const projectHosts = hosts;
@@ -1433,7 +1446,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
         <button onClick={() => onCreateNetwork({ pid: projectId, name: `Network ${networks.length + 1}`, background: NETWORK_BACKGROUNDS[networks.length % NETWORK_BACKGROUNDS.length] })} style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="plus" size={11} color="currentColor" /> Network</button>
 
         {/* Auto-layout button — amber when unmapped hosts exist */}
-        {projectHosts.length > 0 && (
+        {topologyEnabled && projectHosts.length > 0 && (
           <button
             onClick={handleAutoBuild}
             disabled={autoBuilding}
@@ -1452,10 +1465,10 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           </button>
         )}
 
-        <button onClick={() => setShowTopologyBuilder(true)} title="Build topology from scan" style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#5b8af5', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="target" size={11} color="currentColor" /> Topology</button>
+        {topologyEnabled && <button onClick={() => setShowTopologyBuilder(true)} title="Build topology from scan" style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#5b8af5', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="target" size={11} color="currentColor" /> Topology</button>}
       </div>
 
-      {showTopologyBuilder && (
+      {topologyEnabled && showTopologyBuilder && (
         <TopologyBuilderModal
           projectId={projectId}
           accent={accent}
@@ -1465,7 +1478,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       )}
 
       {/* Banner: network exists but has zero nodes and project has hosts */}
-      {activeNet && (activeNet.nodes || []).length === 0 && projectHosts.length > 0 && (
+      {topologyEnabled && activeNet && (activeNet.nodes || []).length === 0 && projectHosts.length > 0 && (
         <div style={{ padding: '10px 16px', background: '#0c0e13', borderBottom: '1px solid #1a1c22', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f09a3a', flexShrink: 0 }} />
           <span style={{ fontSize: 10, color: '#707580', fontFamily: 'JetBrains Mono', flex: 1 }}>
@@ -1492,7 +1505,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
               <button onClick={() => onCreateNetwork({ pid: projectId, name: 'Main network', background: '#07080b' })} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 6, padding: '8px 18px', cursor: 'pointer', color: '#9098a8', fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7 }}>
                 <Icon name="plus" size={12} color="currentColor" /> Create empty map
               </button>
-              {projectHosts.length > 0 && (
+              {topologyEnabled && projectHosts.length > 0 && (
                 <button onClick={handleAutoBuild} disabled={autoBuilding} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 18px', cursor: autoBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, opacity: autoBuilding ? 0.7 : 1 }}>
                   <Icon name="reset" size={12} color="#fff" />
                   {autoBuilding ? 'Building…' : `Auto-build from ${projectHosts.length} hosts`}
