@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import SessionLocal
+from ..core.crypto import encrypt_str, decrypt_str
 from .registry import registry
 from .types import BackendModule
 
@@ -100,15 +101,32 @@ def save_attacker_ssh_config(config: dict, db: Session | None = None) -> dict:
             db.close()
 
 
+def _decrypt_target(target: dict) -> dict:
+    """Return a copy of target with password/private_key decrypted."""
+    t = dict(target)
+    t["password"] = decrypt_str(t.get("password", ""))
+    t["private_key"] = decrypt_str(t.get("private_key", ""))
+    return t
+
+
+def _encrypt_target(target: dict) -> dict:
+    """Return a copy of target with password/private_key encrypted."""
+    t = dict(target)
+    t["password"] = encrypt_str(t.get("password", ""))
+    t["private_key"] = encrypt_str(t.get("private_key", ""))
+    return t
+
+
 def list_attacker_targets(db: Session | None = None) -> list[dict]:
     config = load_attacker_ssh_config(db)
-    return config.get("targets", [])
+    return [_decrypt_target(t) for t in config.get("targets", [])]
 
 
 def save_attacker_targets(targets: list[dict], db: Session | None = None) -> list[dict]:
     config = load_attacker_ssh_config(db)
-    config["targets"] = targets
-    return save_attacker_ssh_config(config, db).get("targets", [])
+    config["targets"] = [_encrypt_target(t) for t in targets]
+    saved = save_attacker_ssh_config(config, db).get("targets", [])
+    return [_decrypt_target(t) for t in saved]
 
 
 def apply_saved_state():

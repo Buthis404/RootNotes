@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
 from ..core.security import hash_password, verify_password, token_response
 from ..core.deps import get_current_user
+from ..core.limiter import limiter
 from ..core.utils import new_id
 from datetime import datetime
 
@@ -36,7 +37,8 @@ def auth_setup(body: schemas.SetupRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login")
-def auth_login(body: schemas.LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def auth_login(request: Request, body: schemas.LoginRequest, db: Session = Depends(get_db)):
     user = (
         db.query(models.User)
         .filter(models.User.username == body.username.strip(), models.User.active == True)

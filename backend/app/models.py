@@ -25,6 +25,7 @@ class Project(Base):
     os = Column(String, nullable=False, default="Linux")
     added = Column(String, nullable=False)
     description = Column(Text, nullable=False, default="")
+    webhook_token = Column(String, nullable=False, default="")
 
 
 class Note(Base):

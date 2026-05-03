@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import traceback
 from datetime import datetime
@@ -101,6 +102,10 @@ def _require_attacker_module_enabled():
         raise HTTPException(404, "Attacker SSH module is disabled")
 
 
+_DANGEROUS_IMPORTS = {"subprocess", "socket", "ctypes", "multiprocessing"}
+_DANGEROUS_CALLS = {"eval", "exec", "__import__", "compile", "open"}
+
+
 def _validate_module_source(filename: str, content: str) -> tuple[str, list[str]]:
     if not filename.endswith('.py'):
         raise HTTPException(400, 'Only .py module files are supported')
@@ -111,7 +116,32 @@ def _validate_module_source(filename: str, content: str) -> tuple[str, list[str]
     if not content.strip():
         raise HTTPException(400, 'Uploaded module is empty')
 
+    # Syntax check via AST
+    try:
+        tree = ast.parse(content, filename=filename)
+    except SyntaxError as e:
+        raise HTTPException(400, f"Syntax error in module (line {e.lineno}): {e.msg}")
+
     warnings = []
+
+    # Scan AST for dangerous patterns
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            for name in names:
+                base = name.split(".")[0]
+                if base in _DANGEROUS_IMPORTS:
+                    warnings.append(f"Import of potentially sensitive module: {name!r}")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            call_name = ""
+            if isinstance(func, ast.Name):
+                call_name = func.id
+            elif isinstance(func, ast.Attribute):
+                call_name = f"{getattr(func.value, 'id', '')}.{func.attr}"
+            if call_name in _DANGEROUS_CALLS or any(call_name.endswith(f".{d}") for d in _DANGEROUS_CALLS):
+                warnings.append(f"Potentially dangerous call: {call_name!r}")
+
     if 'MODULE = BackendModule(' not in content:
         warnings.append('Template marker `MODULE = BackendModule(...)` was not found')
     if 'from ..types import BackendModule' not in content:

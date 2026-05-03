@@ -1,5 +1,9 @@
+import ipaddress
+
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from typing import List, Optional
 
 from ..database import get_db
 from .. import models, schemas
@@ -87,3 +91,85 @@ def delete_host(hid: str, request: Request, db: Session = Depends(get_db), user:
     db.delete(host)
     db.commit()
     bcast(pid, "host", "delete", {"id": hid})
+
+
+class BulkHostImportBody(BaseModel):
+    pid: str
+    text: str
+    tags: List[str] = []
+    os: str = "Linux"
+    status: str = "unknown"
+
+
+def _expand_ips(text: str) -> list[str]:
+    ips = []
+    seen = set()
+    for token in re.split(r"[\s,;]+", text):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            net = ipaddress.ip_network(token, strict=False)
+            for addr in net.hosts():
+                s = str(addr)
+                if s not in seen:
+                    seen.add(s)
+                    ips.append(s)
+        except ValueError:
+            # Try plain IP
+            try:
+                ipaddress.ip_address(token)
+                if token not in seen:
+                    seen.add(token)
+                    ips.append(token)
+            except ValueError:
+                pass
+    return ips
+
+
+import re as re  # noqa: E402
+
+
+@router.post("/bulk", status_code=201)
+def bulk_import_hosts(body: BulkHostImportBody, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    check_pid_access(db, body.pid, user, "hosts.create")
+    ips = _expand_ips(body.text)
+    if not ips:
+        raise HTTPException(400, "No valid IPs or CIDR ranges found in input")
+
+    existing_ips = {h.ip for h in db.query(models.Host).filter(models.Host.pid == body.pid).all()}
+    username = getattr(request.state, "username", None)
+    created = []
+    skipped = 0
+
+    from datetime import datetime
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+    for ip in ips:
+        if ip in existing_ips:
+            skipped += 1
+            continue
+        host = models.Host(
+            id=new_id("hst"),
+            pid=body.pid,
+            ip=ip,
+            os=body.os,
+            status=body.status,
+            tags=body.tags,
+        )
+        db.add(host)
+        existing_ips.add(ip)
+        created.append(host)
+
+    if created:
+        log_event(db, body.pid, username, "host", "bulk_import", f"Bulk import: {len(created)} hosts added", {"count": len(created)})
+    db.commit()
+
+    result = []
+    for host in created:
+        db.refresh(host)
+        h = schemas.Host.model_validate(host)
+        bcast(body.pid, "host", "create", h.model_dump())
+        result.append(h.model_dump())
+
+    return {"created": len(created), "skipped": skipped, "hosts": result}

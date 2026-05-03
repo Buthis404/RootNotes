@@ -190,4 +190,34 @@ export const api = {
   removeProjectMember:     (pid, uid)        => req('DELETE', `/projects/${pid}/members/${uid}`),
   transferOwnership:       (pid, data)       => req('POST',   `/projects/${pid}/transfer-ownership`, data),
   getMyProjectPermissions: (pid)             => req('GET',    `/projects/${pid}/permissions/me`),
+
+  // CSV exports
+  exportHostsCsv:    (pid) => download(`/projects/${pid}/export/hosts.csv`),
+  exportFindingsCsv: (pid) => download(`/projects/${pid}/export/findings.csv`),
+  exportCredsCsv:    (pid) => download(`/projects/${pid}/export/creds.csv`),
+
+  // Project templates
+  listProjectTemplates:  ()           => req('GET',  '/project-templates'),
+  applyProjectTemplate:  (templateId) => req('POST', `/project-templates/${templateId}/apply`),
+
+  // Bulk host import
+  bulkImportHosts: (data) => req('POST', '/hosts/bulk', data),
+
+  // Scans (nmap/nuclei/cme via attacker SSH)
+  runNmapScan:    (pid, data) => req('POST', `/projects/${pid}/scans/nmap`,   data),
+  runNucleiScan:  (pid, data) => req('POST', `/projects/${pid}/scans/nuclei`, data),
+  runCmeScan:     (pid, data) => req('POST', `/projects/${pid}/scans/cme`,    data),
+
+  // Webhooks (C2)
+  getProjectWebhook:        (pid)  => req('GET',  `/projects/${pid}/webhook`),
+  regenerateProjectWebhook: (pid)  => req('POST', `/projects/${pid}/webhook/regenerate`),
+
+  // C2 integrations
+  listC2Integrations:    ()              => req('GET',    '/admin/c2'),
+  createC2Integration:   (data)          => req('POST',   '/admin/c2',            data),
+  updateC2Integration:   (id, data)      => req('PATCH',  `/admin/c2/${id}`,      data),
+  deleteC2Integration:   (id)            => req('DELETE', `/admin/c2/${id}`),
+  testC2Integration:     (id)            => req('POST',   `/admin/c2/${id}/test`),
+  syncC2ToProject:       (id, pid)       => req('POST',   `/admin/c2/${id}/sync/${pid}`),
+  listC2ForProject:      (pid)           => req('GET',    `/admin/c2/for-project/${pid}`),
 };

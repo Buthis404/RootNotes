@@ -42,3 +42,6 @@ logs/
 # Misc
 *.zip
 *.tar.gz
+
+# Internal module docs (not for public repo)
+docs/modules/

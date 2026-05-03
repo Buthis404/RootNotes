@@ -12,49 +12,40 @@ function AttackerSSHPanel({ accent, enabled }) {
   const [isEditing, setIsEditing] = useState(false);
   const [configState, setConfigState] = useState({ loading: true, saving: false, message: '', error: '' });
   const [testState, setTestState] = useState({ running: false, result: null, error: '' });
-  const [snippets, setSnippets] = useState([]);
-  const [selectedSnippetId, setSelectedSnippetId] = useState('');
-  const [command, setCommand] = useState('');
-  const [execState, setExecState] = useState({ running: false, result: null, error: '' });
   const inp = { width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 5, padding: '8px 10px', color: '#c8cdd6', fontSize: 12, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' };
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.adminGetAttackerSSHConfig(), api.listSnippets(), api.getProjects()])
-      .then(([cfg, list, prj]) => {
-        if (cancelled) return;
-        const loadedTargets = cfg.targets || [];
-        setTargets(loadedTargets);
-        setProjects(prj || []);
-        setSnippets(list || []);
-        if (loadedTargets[0]) {
-          setSelectedTargetId(loadedTargets[0].id);
-          setForm({ ...loadedTargets[0] });
-          setIsEditing(true);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setConfigState(s => ({ ...s, error: e.message || 'Failed to load attacker SSH config' }));
-      })
-      .finally(() => {
-        if (!cancelled) setConfigState(s => ({ ...s, loading: false }));
-      });
+    Promise.all([
+      api.adminGetAttackerSSHConfig(),
+      api.getProjects(),
+    ]).then(([cfg, projs]) => {
+      if (cancelled) return;
+      const loadedTargets = cfg.targets || [];
+      setTargets(loadedTargets);
+      setProjects(projs || []);
+      if (loadedTargets[0]) {
+        setSelectedTargetId(loadedTargets[0].id);
+        setForm({ ...loadedTargets[0] });
+        setIsEditing(true);
+      }
+    })
+      .catch((e) => { if (!cancelled) setConfigState(s => ({ ...s, error: e.message || 'Failed to load config' })); })
+      .finally(() => { if (!cancelled) setConfigState(s => ({ ...s, loading: false })); });
     return () => { cancelled = true; };
   }, []);
 
-  const selectedSnippet = snippets.find(s => s.id === selectedSnippetId);
-
-  useEffect(() => {
-    if (selectedSnippet) setCommand(selectedSnippet.command || '');
-  }, [selectedSnippetId]);
-
   useEffect(() => {
     const selected = targets.find(t => t.id === selectedTargetId);
-    if (selected) {
-      setForm({ ...selected });
-      setIsEditing(true);
-    }
+    if (selected) { setForm({ ...selected }); setIsEditing(true); }
   }, [selectedTargetId, targets]);
+
+  const toggleProjectId = (pid) => {
+    setForm(prev => {
+      const ids = prev.project_ids || [];
+      return { ...prev, project_ids: ids.includes(pid) ? ids.filter(x => x !== pid) : [...ids, pid] };
+    });
+  };
 
   const saveConfig = async () => {
     setConfigState({ loading: false, saving: true, message: '', error: '' });
@@ -68,29 +59,21 @@ function AttackerSSHPanel({ accent, enabled }) {
         setSelectedTargetId(created.id);
         setIsEditing(true);
       }
-      setConfigState({ loading: false, saving: false, message: 'Config saved', error: '' });
+      setConfigState({ loading: false, saving: false, message: 'Saved', error: '' });
     } catch (e) {
-      setConfigState({ loading: false, saving: false, message: '', error: e.message || 'Failed to save config' });
+      setConfigState({ loading: false, saving: false, message: '', error: e.message || 'Failed to save' });
     }
   };
 
   const testConnection = async () => {
     setTestState({ running: true, result: null, error: '' });
     try {
-      const result = isEditing && selectedTargetId ? await api.adminTestAttackerTarget(selectedTargetId) : await api.adminTestAttackerSSH(form);
+      const result = isEditing && selectedTargetId
+        ? await api.adminTestAttackerTarget(selectedTargetId)
+        : await api.adminTestAttackerSSH(form);
       setTestState({ running: false, result, error: '' });
     } catch (e) {
       setTestState({ running: false, result: null, error: e.message || 'SSH test failed' });
-    }
-  };
-
-  const executeCommand = async () => {
-    setExecState({ running: true, result: null, error: '' });
-    try {
-      const result = await api.adminExecuteAttackerSSH({ command, timeout_seconds: 45 });
-      setExecState({ running: false, result, error: '' });
-    } catch (e) {
-      setExecState({ running: false, result: null, error: e.message || 'Execution failed' });
     }
   };
 
@@ -104,22 +87,8 @@ function AttackerSSHPanel({ accent, enabled }) {
       setForm(next[0] ? { ...next[0] } : emptyTarget);
       setIsEditing(!!next[0]);
     } catch (e) {
-      setConfigState(s => ({ ...s, error: e.message || 'Failed to delete target' }));
+      setConfigState(s => ({ ...s, error: e.message || 'Failed to delete' }));
     }
-  };
-
-  const startNewTarget = () => {
-    setSelectedTargetId('');
-    setForm(emptyTarget);
-    setIsEditing(false);
-    setConfigState(s => ({ ...s, message: '', error: '' }));
-  };
-
-  const toggleProject = (pid) => {
-    setForm(prev => ({
-      ...prev,
-      project_ids: prev.project_ids.includes(pid) ? prev.project_ids.filter(id => id !== pid) : [...prev.project_ids, pid],
-    }));
   };
 
   return (
@@ -127,75 +96,114 @@ function AttackerSSHPanel({ accent, enabled }) {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk' }}>Attacker SSH</div>
-          <div style={{ fontSize: 10, color: '#606570' }}>Global SSH target for executing snippets from the attacker machine.</div>
+          <div style={{ fontSize: 10, color: '#606570' }}>SSH connection to the attacker machine.</div>
         </div>
         {!enabled && <span style={{ fontSize: 10, color: '#f09a3a', fontFamily: 'JetBrains Mono' }}>Module disabled</span>}
       </div>
 
       {configState.loading ? <div style={{ color: '#505560', fontSize: 12 }}>Loading...</div> : (
         <>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center' }}>
             <select style={{ ...inp, maxWidth: 260 }} value={selectedTargetId} onChange={e => setSelectedTargetId(e.target.value)} disabled={!enabled || !targets.length}>
-              <option value="">Select attacker target...</option>
-              {targets.map(t => <option key={t.id} value={t.id}>{t.name} ({t.host})</option>)}
-            </select>
-            <button onClick={startNewTarget} disabled={!enabled} style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 12px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled ? 0.7 : 1 }}>New target</button>
-            {isEditing && selectedTargetId && <button onClick={deleteTarget} disabled={!enabled} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 12px', cursor: 'pointer', color: '#cc2233', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled ? 0.7 : 1 }}>Delete</button>}
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr 100px 1fr 1fr', gap: 10, marginBottom: 10 }}>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Name</div><input style={inp} value={form.name} onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))} disabled={!enabled} /></div>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Host</div><input style={inp} value={form.host} onChange={e => setForm(prev => ({ ...prev, host: e.target.value }))} disabled={!enabled} /></div>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Port</div><input style={inp} type="number" value={form.port} onChange={e => setForm(prev => ({ ...prev, port: Number(e.target.value) || 22 }))} disabled={!enabled} /></div>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Username</div><input style={inp} value={form.username} onChange={e => setForm(prev => ({ ...prev, username: e.target.value }))} disabled={!enabled} /></div>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Host key policy</div><select style={inp} value={form.known_hosts_policy} onChange={e => setForm(prev => ({ ...prev, known_hosts_policy: e.target.value }))} disabled={!enabled}><option value="accept_new">accept_new</option><option value="strict">strict</option></select></div>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Password</div><input style={inp} type="password" value={form.password} onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))} disabled={!enabled} /></div>
-            <div><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Private key</div><textarea style={{ ...inp, resize: 'vertical', minHeight: 84 }} value={form.private_key} onChange={e => setForm(prev => ({ ...prev, private_key: e.target.value }))} disabled={!enabled} placeholder="Optional PEM key instead of password" /></div>
-          </div>
-
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Assigned projects</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {projects.map(project => {
-                const active = form.project_ids.includes(project.id);
-                return (
-                  <button key={project.id} onClick={() => toggleProject(project.id)} disabled={!enabled}
-                    style={{ background: active ? `${accent}22` : '#0a0c10', border: `1px solid ${active ? accent + '66' : '#2a2d35'}`, borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: active ? accent : '#808590', fontSize: 10, fontFamily: 'JetBrains Mono', opacity: !enabled ? 0.7 : 1 }}>
-                    {project.name}
-                  </button>
-                );
+              <option value="">Select target...</option>
+              {targets.map(t => {
+                const scope = (t.project_ids || []).length === 0 ? 'global' : `${(t.project_ids || []).length} project(s)`;
+                return <option key={t.id} value={t.id}>{t.name} ({t.host}) — {scope}</option>;
               })}
-            </div>
-            <div style={{ fontSize: 10, color: '#505560', marginTop: 6 }}>If no project is selected, the target is available globally.</div>
+            </select>
+            <button onClick={() => { setSelectedTargetId(''); setForm(emptyTarget); setIsEditing(false); setConfigState(s => ({ ...s, message: '', error: '' })); }} disabled={!enabled}
+              style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 12px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled ? 0.7 : 1 }}>
+              New
+            </button>
+            {isEditing && selectedTargetId && (
+              <button onClick={deleteTarget} disabled={!enabled}
+                style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 12px', cursor: 'pointer', color: '#cc2233', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+                Delete
+              </button>
+            )}
           </div>
 
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            <button onClick={saveConfig} disabled={!enabled || configState.saving} style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled || configState.saving ? 0.7 : 1 }}>{configState.saving ? 'Saving...' : 'Save config'}</button>
-            <button onClick={testConnection} disabled={!enabled || testState.running} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 14px', cursor: 'pointer', color: '#808590', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled || testState.running ? 0.7 : 1 }}>{testState.running ? 'Testing...' : 'Test SSH'}</button>
-          </div>
-
-          {configState.message && <div style={{ marginBottom: 10, fontSize: 11, color: '#39d353' }}>{configState.message}</div>}
-          {configState.error && <div style={{ marginBottom: 10, fontSize: 11, color: '#cc2233', whiteSpace: 'pre-wrap' }}>{configState.error}</div>}
-          {testState.error && <div style={{ marginBottom: 10, fontSize: 11, color: '#cc2233', whiteSpace: 'pre-wrap', fontFamily: 'JetBrains Mono' }}>{testState.error}</div>}
-          {testState.result && <pre style={{ background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 6, padding: '10px 12px', color: testState.result.ok ? '#39d353' : '#f09a3a', fontSize: 11, fontFamily: 'JetBrains Mono', whiteSpace: 'pre-wrap', margin: '0 0 12px 0' }}>{[testState.result.stdout, testState.result.stderr].filter(Boolean).join('\n')}</pre>}
-
-          <div style={{ borderTop: '1px solid #1e2029', paddingTop: 12 }}>
-            <div style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 700, fontFamily: 'Space Grotesk', marginBottom: 10 }}>Run snippets</div>
-            <div style={{ fontSize: 10, color: '#505560', marginBottom: 8 }}>Runs against the first enabled global attacker target. Project-aware execution is available from Cheatsheet.</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 10, marginBottom: 10 }}>
-              <select style={inp} value={selectedSnippetId} onChange={e => setSelectedSnippetId(e.target.value)} disabled={!enabled}>
-                <option value="">Pick a snippet...</option>
-                {snippets.map(s => <option key={s.id} value={s.id}>{s.category} / {s.title}</option>)}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr 90px 1fr 1fr', gap: 10, marginBottom: 10 }}>
+            {[['Name', 'name', 'text'], ['Host', 'host', 'text'], ['Port', 'port', 'number'], ['Username', 'username', 'text']].map(([label, key, type]) => (
+              <div key={key}>
+                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</div>
+                <input style={inp} type={type} value={form[key]} disabled={!enabled}
+                  onChange={e => setForm(prev => ({ ...prev, [key]: type === 'number' ? (Number(e.target.value) || 22) : e.target.value }))} />
+              </div>
+            ))}
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Host key policy</div>
+              <select style={inp} value={form.known_hosts_policy} onChange={e => setForm(prev => ({ ...prev, known_hosts_policy: e.target.value }))} disabled={!enabled}>
+                <option value="accept_new">accept_new</option>
+                <option value="strict">strict</option>
               </select>
-              <button onClick={executeCommand} disabled={!enabled || execState.running || !command.trim()} style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled || execState.running || !command.trim() ? 0.7 : 1 }}>{execState.running ? 'Running...' : 'Execute'}</button>
             </div>
-            <textarea style={{ ...inp, resize: 'vertical', minHeight: 140, marginBottom: 10 }} value={command} onChange={e => setCommand(e.target.value)} disabled={!enabled} placeholder="Snippet command to execute remotely via SSH" />
-            {execState.error && <div style={{ marginBottom: 10, fontSize: 11, color: '#cc2233', whiteSpace: 'pre-wrap', fontFamily: 'JetBrains Mono' }}>{execState.error}</div>}
-            {execState.result && <pre style={{ background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 6, padding: '10px 12px', color: execState.result.ok ? '#c8cdd6' : '#f09a3a', fontSize: 11, fontFamily: 'JetBrains Mono', whiteSpace: 'pre-wrap', margin: 0 }}>{`exit_code=${execState.result.exit_code}\n\nSTDOUT:\n${execState.result.stdout || ''}\n\nSTDERR:\n${execState.result.stderr || ''}`}</pre>}
           </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Password</div>
+              <input style={inp} type="password" value={form.password} onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))} disabled={!enabled} />
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Private key (PEM)</div>
+              <textarea style={{ ...inp, resize: 'vertical', minHeight: 80 }} value={form.private_key} onChange={e => setForm(prev => ({ ...prev, private_key: e.target.value }))} disabled={!enabled} placeholder="Optional — paste PEM key instead of password" />
+            </div>
+          </div>
+
+          {/* Project scope */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Project scope</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              <button onClick={() => setForm(prev => ({ ...prev, project_ids: [] }))} disabled={!enabled}
+                style={{ background: (form.project_ids || []).length === 0 ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids || []).length === 0 ? accent : '#2a2d35'}`, borderRadius: 4, padding: '4px 12px', cursor: 'pointer', color: (form.project_ids || []).length === 0 ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                Global (all projects)
+              </button>
+              <button onClick={() => { if ((form.project_ids || []).length === 0 && projects.length > 0) setForm(prev => ({ ...prev, project_ids: [projects[0].id] })); }} disabled={!enabled || projects.length === 0}
+                style={{ background: (form.project_ids || []).length > 0 ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids || []).length > 0 ? accent : '#2a2d35'}`, borderRadius: 4, padding: '4px 12px', cursor: 'pointer', color: (form.project_ids || []).length > 0 ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                Specific projects
+              </button>
+            </div>
+            {(form.project_ids || []).length > 0 && projects.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {projects.map(p => {
+                  const selected = (form.project_ids || []).includes(p.id);
+                  return (
+                    <button key={p.id} onClick={() => toggleProjectId(p.id)} disabled={!enabled}
+                      style={{ background: selected ? `${accent}22` : '#13151a', border: `1px solid ${selected ? accent : '#2a2d35'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', color: selected ? accent : '#505560', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+                      {selected && <span style={{ fontSize: 9 }}>✓</span>}
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {(form.project_ids || []).length === 0 && (
+              <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>
+                This target will be available to all projects
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <button onClick={saveConfig} disabled={!enabled || configState.saving}
+              style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled || configState.saving ? 0.7 : 1 }}>
+              {configState.saving ? 'Saving...' : 'Save'}
+            </button>
+            <button onClick={testConnection} disabled={!enabled || testState.running}
+              style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#808590', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono', opacity: !enabled || testState.running ? 0.7 : 1 }}>
+              {testState.running ? 'Testing...' : 'Test connection'}
+            </button>
+          </div>
+
+          {configState.message && <div style={{ fontSize: 11, color: '#39d353', marginBottom: 8 }}>{configState.message}</div>}
+          {configState.error  && <div style={{ fontSize: 11, color: '#cc2233', marginBottom: 8, whiteSpace: 'pre-wrap' }}>{configState.error}</div>}
+          {testState.error    && <div style={{ fontSize: 11, color: '#cc2233', marginBottom: 8, whiteSpace: 'pre-wrap', fontFamily: 'JetBrains Mono' }}>{testState.error}</div>}
+          {testState.result   && (
+            <pre style={{ background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 6, padding: '10px 12px', color: testState.result.ok ? '#39d353' : '#f09a3a', fontSize: 11, fontFamily: 'JetBrains Mono', whiteSpace: 'pre-wrap', margin: 0 }}>
+              {testState.result.ok ? 'Connection OK' : 'Connection failed'}{[testState.result.stdout, testState.result.stderr].filter(Boolean).length ? '\n\n' + [testState.result.stdout, testState.result.stderr].filter(Boolean).join('\n') : ''}
+            </pre>
+          )}
         </>
       )}
     </div>

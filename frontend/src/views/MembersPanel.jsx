@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { api } from '../api.js';
 import Icon from '../components/Icon.jsx';
 
@@ -112,6 +113,14 @@ export default function MembersPanel({ pid, accent, onClose }) {
   const inp = { background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono' };
   const sel = { ...inp, cursor: 'pointer' };
 
+  const userListParentRef = useRef(null);
+  const userVirtualizer = useVirtualizer({
+    count: filteredUsers.length,
+    getScrollElement: () => userListParentRef.current,
+    estimateSize: () => 37,
+    overscan: 5,
+  });
+
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#000000bb', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 500, backdropFilter: 'blur(4px)' }}
       onClick={e => e.target === e.currentTarget && onClose()}>
@@ -177,19 +186,24 @@ export default function MembersPanel({ pid, accent, onClose }) {
                     {ROLE_ORDER.filter(r => r !== 'owner').map(r => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
                   </select>
                 </div>
-                <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid #1e2029', borderRadius: 6, background: '#0a0c10', marginBottom: 10 }}>
+                <div ref={userListParentRef} style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid #1e2029', borderRadius: 6, background: '#0a0c10', marginBottom: 10 }}>
                   {filteredUsers.length === 0 ? (
                     <div style={{ padding: '12px 10px', fontSize: 11, color: '#505560' }}>No matching users</div>
-                  ) : filteredUsers.map(u => {
-                    const checked = selectedUserIds.includes(u.id);
-                    return (
-                      <label key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderBottom: '1px solid #14161b', cursor: 'pointer' }}>
-                        <input type="checkbox" checked={checked} onChange={e => setSelectedUserIds(prev => e.target.checked ? [...prev, u.id] : prev.filter(id => id !== u.id))} />
-                        <span style={{ flex: 1, fontSize: 12, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>{u.username}</span>
-                        <span style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase' }}>{u.role}</span>
-                      </label>
-                    );
-                  })}
+                  ) : (
+                    <div style={{ height: `${userVirtualizer.getTotalSize()}px`, position: 'relative' }}>
+                      {userVirtualizer.getVirtualItems().map(virtualRow => {
+                        const u = filteredUsers[virtualRow.index];
+                        const checked = selectedUserIds.includes(u.id);
+                        return (
+                          <label key={u.id} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start}px)`, display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderBottom: '1px solid #14161b', cursor: 'pointer', boxSizing: 'border-box' }}>
+                            <input type="checkbox" checked={checked} onChange={e => setSelectedUserIds(prev => e.target.checked ? [...prev, u.id] : prev.filter(id => id !== u.id))} />
+                            <span style={{ flex: 1, fontSize: 12, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>{u.username}</span>
+                            <span style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase' }}>{u.role}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <button onClick={() => setSelectedUserIds(filteredUsers.map(u => u.id))}

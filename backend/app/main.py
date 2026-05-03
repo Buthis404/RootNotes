@@ -14,13 +14,22 @@ from fastapi import FastAPI, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+
+from .core.logging_setup import configure_logging, get_logger
+
+configure_logging()
+logger = get_logger(__name__)
 
 from . import models
 from .database import get_db, engine, SessionLocal
 from .ws import manager
 from .core.config import JWT_SECRET, JWT_ALGO, UPLOAD_ROOT
+from .core.limiter import limiter
 from .core.security import decode_token, gen_password, hash_password
 from .core.deps import decode_ws_token
 from .core.utils import new_id
@@ -81,6 +90,8 @@ with engine.begin() as conn:
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pm_project_id ON project_members(project_id)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pm_user_id ON project_members(user_id)"))
     conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_pm_project_user ON project_members(project_id, user_id)"))
+    conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_token TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_projects_webhook_token ON projects(webhook_token) WHERE webhook_token <> ''"))
 
 
 # ── Lifespan: auto-create admin on first run ──────────────────────────
@@ -104,15 +115,15 @@ async def lifespan(app: FastAPI):
             db.add(admin)
             db.commit()
             border = "=" * 54
-            print(f"\n{border}", flush=True)
-            print("  RootNotes — first run", flush=True)
-            print("  Admin account created:", flush=True)
-            print(f"  Username: {env_username}", flush=True)
+            logger.info(border)
+            logger.info("  RootNotes — first run")
+            logger.info("  Admin account created:")
+            logger.info("  Username: %s", env_username)
             if not env_password:
-                print(f"  Password: {password}  (set ADMIN_PASSWORD env var to choose)", flush=True)
+                logger.info("  Password: %s  (set ADMIN_PASSWORD env var to choose)", password)
             else:
-                print("  Password: (from ADMIN_PASSWORD env var)", flush=True)
-            print(f"{border}\n", flush=True)
+                logger.info("  Password: (from ADMIN_PASSWORD env var)")
+            logger.info(border)
 
         # Backfill: make admin user owner of all projects without owners
         admin_users = db.query(models.User).filter(models.User.role == "admin", models.User.active == True).all()
@@ -157,6 +168,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="RootNotes API", lifespan=lifespan)
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -165,7 +180,7 @@ app.add_middleware(
 )
 
 # ── Auth middleware ───────────────────────────────────────────────────
-_PUBLIC_PATHS = ("/api/auth/login", "/api/auth/setup", "/api/auth/status")
+_PUBLIC_PATHS = ("/api/auth/login", "/api/auth/setup", "/api/auth/status", "/api/webhooks/")
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -240,7 +255,9 @@ from .routers import (
     auth, admin, projects, hosts, creds, notes,
     networks, network_map, findings, checklist, timeline, objectives,
     activities, attack_paths, loots, scopes,
-    cred_host_notes, search, templates, import_export, topology, members, system_modules, attacker_exec,
+    cred_host_notes, search, templates, import_export, topology, members,
+    system_modules, attacker_exec, export, project_templates,
+    scans, webhooks, c2,
 )
 
 app.include_router(auth.router)
@@ -267,3 +284,8 @@ app.include_router(templates.router)
 app.include_router(import_export.router)
 app.include_router(topology.router)
 app.include_router(attacker_exec.router)
+app.include_router(export.router)
+app.include_router(project_templates.router)
+app.include_router(scans.router)
+app.include_router(webhooks.router)
+app.include_router(c2.router)

@@ -1,4 +1,7 @@
-from pydantic import BaseModel
+import ipaddress
+import re
+
+from pydantic import BaseModel, field_validator, model_validator
 from typing import List, Optional, Any
 
 
@@ -491,6 +494,11 @@ class Loot(LootBase):
     model_config = {"from_attributes": True}
 
 
+_HOSTNAME_RE = re.compile(
+    r"^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
+)
+
+
 # ── Scope ──────────────────────────────────────────────────────────────
 class ScopeBase(BaseModel):
     pid: str
@@ -499,8 +507,27 @@ class ScopeBase(BaseModel):
     in_scope: bool = True
     description: str = ""
 
+
 class ScopeCreate(ScopeBase):
-    pass
+    @model_validator(mode="after")
+    def validate_scope_value(self) -> "ScopeCreate":
+        v = self.value.strip()
+        if not v:
+            raise ValueError("Scope value cannot be empty")
+        st = self.scope_type
+        if st in ("cidr", "ip"):
+            try:
+                ipaddress.ip_network(v, strict=False)
+            except ValueError:
+                try:
+                    ipaddress.ip_address(v)
+                except ValueError:
+                    raise ValueError(f"Invalid CIDR or IP address: {v}")
+        elif st == "domain":
+            if not _HOSTNAME_RE.match(v):
+                raise ValueError(f"Invalid domain or hostname: {v}")
+        self.value = v
+        return self
 
 class ScopeUpdate(BaseModel):
     value: Optional[str] = None

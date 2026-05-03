@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -140,7 +141,7 @@ def list_execution_targets(
 
 
 @router.post("")
-def execute_attacker_command(
+async def execute_attacker_command(
     pid: str,
     body: AttackerExecBody,
     request: Request,
@@ -185,13 +186,10 @@ def execute_attacker_command(
         if not attacker_host:
             raise HTTPException(400, "No host is available in the project to attach execution output")
 
-    try:
-        result = run_ssh_command(ssh_config, body.command, body.timeout_seconds)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     title = body.snippet_title.strip() or (body.command.strip().splitlines()[0][:80] if body.command.strip() else "Remote command")
+
+    # Create activity record with status "running" before the SSH call
     activity = models.HostActivity(
         id=new_id("ha"),
         pid=pid,
@@ -199,17 +197,39 @@ def execute_attacker_command(
         title=title,
         activity_type=body.activity_type or "postex",
         command=body.command,
-        summary=f"Executed via attacker SSH ({'project cred' if resolved_cred else 'global config'})",
-        output=(result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else ""),
-        status="done" if result.get("ok") else "failed",
+        summary=f"Executing via attacker SSH ({'project cred' if resolved_cred else 'global config'})...",
+        output="",
+        status="running",
         ts=ts,
     )
     db.add(activity)
     log_event(db, pid, getattr(request.state, "username", None), "host_activity", "create", f"Attacker exec: {title}", {"host_id": attacker_host.id, "type": activity.activity_type})
     db.commit()
     db.refresh(activity)
+    activity_id = activity.id
+
+    # Run SSH in thread pool to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    try:
+        _config = dict(ssh_config)
+        _cmd = body.command
+        _timeout = body.timeout_seconds
+        result = await loop.run_in_executor(None, lambda: run_ssh_command(_config, _cmd, _timeout))
+    except ValueError as e:
+        activity.status = "failed"
+        activity.output = str(e)
+        db.commit()
+        raise HTTPException(400, str(e))
+
+    # Update activity with result
+    activity.output = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
+    activity.status = "done" if result.get("ok") else "failed"
+    activity.summary = f"Executed via attacker SSH ({'project cred' if resolved_cred else 'global config'})"
+    db.commit()
+    db.refresh(activity)
+
     payload = schemas.HostActivity.model_validate(activity).model_dump()
-    bcast(pid, "host_activity", "create", payload)
+    bcast(pid, "host_activity", "update", payload)
 
     return {
         "ok": result.get("ok", False),

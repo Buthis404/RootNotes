@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Icon from './components/Icon.jsx';
 import { TABS, ADMIN_TAB } from './constants.js';
 import { api } from './api.js';
+import { useProjectStore } from './store/useProjectStore.js';
 import { useSync } from './hooks/useSync.js';
 import ProjectsView from './views/ProjectsView.jsx';
 import NotesView from './views/NotesView.jsx';
@@ -19,6 +20,7 @@ import SearchModal from './components/SearchModal.jsx';
 import ChecklistView from './views/ChecklistView.jsx';
 import TimelineView from './views/TimelineView.jsx';
 import CheatsheetView from './views/CheatsheetView.jsx';
+import ScansView from './views/ScansView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
 import UserSettingsView from './views/UserSettingsView.jsx';
@@ -185,22 +187,29 @@ export default function App() {
   const [tab, setTab] = useState(() => localStorage.getItem('rt_tab') || 'projects');
   const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('rt_project') || '');
 
-  const [projects, setProjects] = useState([]);
-  const [notes, setNotes] = useState([]);
-  const [hosts, setHosts] = useState([]);
-  const [creds, setCreds] = useState([]);
-  const [networks, setNetworks] = useState([]);
-  const [findings, setFindings] = useState([]);
-  const [objectives, setObjectives] = useState([]);
-  const [attackPaths, setAttackPaths] = useState([]);
-  const [attackSteps, setAttackSteps] = useState([]);
-  const [loots, setLoots] = useState([]);
-  const [scopes, setScopes] = useState([]);
-  const [hostActivities, setHostActivities] = useState([]);
-  const [showSearch, setShowSearch] = useState(false);
-  const [onlineUsers, setOnlineUsers] = useState([]);
+  // ── Project data via Zustand ────────────────────────────────────────
+  const {
+    projects, setProjects,
+    notes, setNotes,
+    hosts, setHosts,
+    creds, setCreds,
+    networks, setNetworks,
+    findings, setFindings,
+    objectives, setObjectives,
+    attackPaths, setAttackPaths,
+    attackSteps, setAttackSteps,
+    loots, setLoots,
+    scopes, setScopes,
+    hostActivities, setHostActivities,
+  } = useProjectStore();
+
+  // Keep loading/error as local state — they have UI-specific semantics
+  // (loading starts true, drives the initial spinner before data arrives)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const [showSearch, setShowSearch] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState([]);
   const [importProjectId, setImportProjectId] = useState(null);
   const [presence, setPresence] = useState([]);
 
@@ -275,7 +284,11 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   useEffect(() => { if (selectedProject) localStorage.setItem('rt_project', selectedProject); }, [selectedProject]);
-  useEffect(() => { loadPermissions(selectedProject || null); }, [selectedProject, loadPermissions]);
+  // Only fetch permissions when user is authenticated — prevents premature 401→rt:logout race
+  useEffect(() => {
+    if (!currentUser) return;
+    loadPermissions(selectedProject || null);
+  }, [selectedProject, loadPermissions, currentUser]);
 
   // BloodHound import full refresh
   useEffect(() => {
@@ -598,8 +611,13 @@ export default function App() {
     setFindings(prev => prev.map(x => x.id === id ? f : x));
   };
   const deleteFinding = async (id) => {
-    await api.deleteFinding(id);
-    setFindings(prev => prev.filter(x => x.id !== id));
+    const prevFindings = findings;
+    setFindings(prev => prev.filter(x => x.id !== id)); // optimistic
+    try {
+      await api.deleteFinding(id);
+    } catch (e) {
+      setFindings(prevFindings); // rollback
+    }
   };
 
   // ── Notes CRUD ──────────────────────────────────────────────────────
@@ -644,14 +662,20 @@ export default function App() {
     return h;
   };
   const deleteHost = async (id) => {
-    await api.deleteHost(id);
     const current = hosts.find(x => x.id === id);
+    const prevHosts = hosts;
+    // Optimistic: remove immediately
     setHosts(prev => prev.filter(x => x.id !== id));
     if (current?.ip) {
       setNetworks(prev => prev.map(net => ({ ...net, nodes: (net.nodes || []).filter(n => n.ip !== current.ip), edges: (net.edges || []).filter(e => {
         const ids = new Set((net.nodes || []).filter(n => n.ip === current.ip).map(n => n.id));
         return !ids.has(e.from) && !ids.has(e.to);
       }) })));
+    }
+    try {
+      await api.deleteHost(id);
+    } catch (e) {
+      setHosts(prevHosts); // rollback on error
     }
   };
 
@@ -673,8 +697,13 @@ export default function App() {
     setCreds(prev => prev.map(x => x.id === id ? c : x));
   };
   const deleteCred = async (id) => {
-    await api.deleteCred(id);
-    setCreds(prev => prev.filter(x => x.id !== id));
+    const prevCreds = creds;
+    setCreds(prev => prev.filter(x => x.id !== id)); // optimistic
+    try {
+      await api.deleteCred(id);
+    } catch (e) {
+      setCreds(prevCreds); // rollback
+    }
   };
 
   // ── Networks CRUD ───────────────────────────────────────────────────
@@ -774,7 +803,7 @@ export default function App() {
     attackpath: attackPaths.filter(p => p.pid === selectedProject).length,
     loot:       loots.filter(l => l.pid === selectedProject).length,
     scope:      scopes.filter(s => s.pid === selectedProject).length,
-    network: 0, projects: 0, report: 0, checklist: 0, timeline: 0, cheatsheet: 0,
+    network: 0, projects: 0, report: 0, checklist: 0, timeline: 0, cheatsheet: 0, scans: 0,
   };
 
   const selectedProjectHosts = useMemo(
@@ -1040,6 +1069,9 @@ export default function App() {
         )}
         {tab === 'cheatsheet' && (
           <CheatsheetView accent={acc} hosts={hosts} creds={creds} selectedProject={selectedProject} />
+        )}
+        {tab === 'scans' && (
+          <ScansView selectedProject={selectedProject} accent={acc} />
         )}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}

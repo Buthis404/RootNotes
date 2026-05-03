@@ -94,6 +94,7 @@ export const TABS = [
   {id:'network',    icon:'network',   label:'Network'},
   {id:'timeline',   icon:'clock',     label:'Timeline'},
   {id:'cheatsheet', icon:'terminal',  label:'Commands'},
+  {id:'scans',      icon:'target',    label:'Scans'},
   {id:'report',     icon:'report',    label:'Report'},
 ];
 
