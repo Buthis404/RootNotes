@@ -260,6 +260,7 @@ function EditModuleModal({ module, accent, onClose, onSave }) {
 
 export default function SystemModulesView({ accent }) {
   const [modules, setModules] = useState([]);
+  const [connectors, setConnectors] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showCreate, setShowCreate] = useState(false);
@@ -273,9 +274,13 @@ export default function SystemModulesView({ accent }) {
   const load = async () => {
     setLoading(true);
     try {
-      const data = await api.adminListModules();
+      const [data, connectorData] = await Promise.all([
+        api.adminListModules(),
+        api.listConnectors().catch(() => ({ connectors: [] })),
+      ]);
       const items = data.modules || [];
       setModules(items);
+      setConnectors(connectorData.connectors || []);
       for (const mod of items) {
         if (moduleRegistry.get(mod.name)) {
           if (mod.enabled) moduleRegistry.enable(mod.name);
@@ -296,6 +301,12 @@ export default function SystemModulesView({ accent }) {
     enabled: modules.filter(m => m.enabled).length,
     custom: modules.filter(m => m.source === 'custom').length,
   }), [modules]);
+
+  const connectorStats = useMemo(() => ({
+    total: connectors.length,
+    enabled: connectors.filter(c => c.enabled !== false).length,
+    categories: [...new Set(connectors.map(c => c.category).filter(Boolean))].length,
+  }), [connectors]);
 
   const toggleModule = async (mod) => {
     const updated = await api.adminUpdateModule(mod.name, { enabled: !mod.enabled });
@@ -411,6 +422,15 @@ export default function SystemModulesView({ accent }) {
         ))}
       </div>
 
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {[[connectorStats.total, 'Connectors', '#6fc8f0'], [connectorStats.enabled, 'Active connectors', '#39d353'], [connectorStats.categories, 'Categories', '#c07af0']].map(([value, label, color]) => (
+          <div key={label} style={{ minWidth: 140, background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ fontSize: 20, fontWeight: 700, color, fontFamily: 'Space Grotesk' }}>{value}</div>
+            <div style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
       {showCreate && (
         <div style={{ background: '#0d0f14', border: `1px solid ${accent}44`, borderRadius: 10, padding: 18, display: 'grid', gridTemplateColumns: '1fr 1fr 120px', gap: 10 }}>
           <div>
@@ -474,6 +494,34 @@ export default function SystemModulesView({ accent }) {
               <button onClick={() => toggleModule(mod)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: mod.enabled ? '#f09a3a' : '#39d353', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{mod.enabled ? 'Disable' : 'Enable'}</button>
               {mod.editable && <button onClick={() => setEditing(mod)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#5b8af5', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Edit</button>}
               {mod.source === 'custom' && <button onClick={() => removeModule(mod)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Delete</button>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 10, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 18px', borderBottom: '1px solid #1e2029', background: '#090b0f', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 600, fontFamily: 'Space Grotesk' }}>Connector Inventory</div>
+            <div style={{ fontSize: 10, color: '#505560' }}>Normalized orchestration contract aggregated from enabled backend modules</div>
+          </div>
+        </div>
+        {!connectors.length ? (
+          <div style={{ padding: 18, color: '#505560', fontSize: 11 }}>No connectors discovered.</div>
+        ) : connectors.map((connector, i) => (
+          <div key={`${connector.module}:${connector.key}`} style={{ padding: '12px 18px', borderBottom: i < connectors.length - 1 ? '1px solid #14161b' : 'none' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+              <span style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 600 }}>{connector.title}</span>
+              <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 4, padding: '1px 7px' }}>{connector.key}</span>
+              <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 4, padding: '1px 7px', textTransform: 'uppercase' }}>{connector.category}</span>
+              <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#808590' }}>module: {connector.module}</span>
+            </div>
+            {connector.description && <div style={{ fontSize: 10, color: '#606570', marginBottom: 6, lineHeight: 1.5 }}>{connector.description}</div>}
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 10, color: '#707580', fontFamily: 'JetBrains Mono' }}>
+              <span>ops: {(connector.supported_operations || []).join(', ') || '—'}</span>
+              <span>sources: {(connector.supported_sources || []).join(', ') || '—'}</span>
+              <span>creates: {(connector.creates_entities || []).join(', ') || '—'}</span>
+              <span>mode: {connector.execution_mode || 'sync'}</span>
             </div>
           </div>
         ))}

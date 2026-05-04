@@ -13,13 +13,14 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
+from ..core.job_tracker import start_job, finish_job
 from ..core.utils import new_id, normalize_domain
 from ..core.layout import compute_layout
 from ..core.deps import get_current_user
@@ -500,12 +501,19 @@ async def topology_preview(
 
 
 @router.post("/apply", dependencies=[Depends(require_topo_apply)])
-def topology_apply(pid: str, body: ApplyRequest, request=None, db: Session = Depends(get_db)):
+def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session = Depends(get_db)):
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
 
-    username = getattr(getattr(request, "state", None), "username", None) if request else None
+    username = getattr(request.state, "username", None)
+    job = start_job(
+        db, pid, "topology", "Topology apply",
+        created_by=username or "",
+        connector_key="topology", operation="apply",
+        related_entity_type="network", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
 
     hosts_created = 0
     hosts_updated = 0
@@ -602,6 +610,7 @@ def topology_apply(pid: str, body: ApplyRequest, request=None, db: Session = Dep
                 "ips": [],
                 "ports": node_data.get("ports", []),
                 "services": node_data.get("services", []),
+                "subnet": node_data.get("subnet") or _get_subnet(node_data.get("ip", "")),
                 "status": h_status,
                 "role": role,
                 "type": "server",
@@ -635,8 +644,11 @@ def topology_apply(pid: str, body: ApplyRequest, request=None, db: Session = Dep
                     "to": dst_node,
                     "type": link.link_type,
                     "label": link.label,
+                    "reason": link.reason,
                     "confidence": link.confidence,
                     "source": link.source,
+                    "state": "inferred",
+                    "verified": False,
                 })
 
         network.nodes_json = existing_nodes
@@ -645,8 +657,7 @@ def topology_apply(pid: str, body: ApplyRequest, request=None, db: Session = Dep
     db.commit()
 
     # Log and broadcast
-    username_val = getattr(getattr(request, "state", None), "username", None) if request else None
-    log_event(db, pid, username_val, "topology", "apply",
+    log_event(db, pid, username, "topology", "apply",
               f"Topology applied: {hosts_created} hosts created, {hosts_updated} updated",
               {"created": hosts_created, "updated": hosts_updated})
     db.commit()
@@ -660,8 +671,19 @@ def topology_apply(pid: str, body: ApplyRequest, request=None, db: Session = Dep
         result = schemas.Network.from_orm_obj(network)
         bcast(pid, "network", "topology_rebuilt", {"network": result.model_dump(), "updated_at": datetime.utcnow().isoformat()})
 
+    finish_job(
+        db, job,
+        status="done",
+        result={
+            "hosts_created": hosts_created,
+            "hosts_updated": hosts_updated,
+            "links_added": len(body.preview.new_links),
+        },
+    )
+
     return {
         "ok": True,
+        "job_id": job.id,
         "hosts_created": hosts_created,
         "hosts_updated": hosts_updated,
         "links_added": len(body.preview.new_links),
@@ -672,6 +694,7 @@ def topology_apply(pid: str, body: ApplyRequest, request=None, db: Session = Dep
 def topology_rebuild_layout(
     pid: str,
     body: RebuildLayoutRequest = RebuildLayoutRequest(),
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
     project = db.query(models.Project).filter(models.Project.id == pid).first()
@@ -681,6 +704,15 @@ def topology_rebuild_layout(
     network = db.query(models.Network).filter(models.Network.pid == pid).first()
     if not network:
         raise HTTPException(404, "No network map found")
+
+    username = getattr(getattr(request, "state", None), "username", None) if request else None
+    job = start_job(
+        db, pid, "topology", "Topology rebuild layout",
+        created_by=username or "",
+        connector_key="topology", operation="rebuild_layout",
+        related_entity_type="network", related_entity_id=network.id,
+        request_json=body.model_dump(),
+    )
 
     all_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
     hosts_for_layout = [{
@@ -720,7 +752,13 @@ def topology_rebuild_layout(
     result = schemas.Network.from_orm_obj(network)
     bcast(pid, "network", "layout_applied", {"network": result.model_dump(), "updated_at": datetime.utcnow().isoformat()})
 
-    return {"ok": True, "nodes_repositioned": len(positioned)}
+    finish_job(
+        db, job,
+        status="done",
+        result={"nodes_repositioned": len(positioned), "network_id": network.id},
+    )
+
+    return {"ok": True, "job_id": job.id, "nodes_repositioned": len(positioned)}
 
 
 # ── Helpers shared by auto-build ──────────────────────────────────────
@@ -829,6 +867,7 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
                 "id": new_id("nd"), "host_id": h_id,
                 "label": p.get("hostname") or h_ip, "ip": h_ip, "ips": [],
                 "ports": p.get("ports", []), "services": p.get("services", []),
+                "subnet": p.get("subnet") or _get_subnet(h_ip),
                 "status": p.get("status", "unknown"),
                 "role": "attacker" if p.get("is_attacker") else p.get("role", "unknown"),
                 "type": _node_type_for(p), "notes": "",
@@ -865,6 +904,7 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
         new_auto_edges.append({
             "id": new_id("edg"), "from": src_nid, "to": dst_nid,
             "type": link.link_type, "confidence": link.confidence, "source": link.source,
+            "reason": link.reason, "state": "inferred", "verified": False,
         })
         links_added += 1
 
@@ -883,12 +923,24 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
 def topology_auto_build(
     pid: str,
     body: AutoBuildRequest = AutoBuildRequest(),
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
     """Build or update the network map from all existing project hosts."""
+    username = getattr(getattr(request, "state", None), "username", None) if request else None
+    job = start_job(
+        db, pid, "topology", "Topology auto-build",
+        created_by=username or "",
+        connector_key="topology", operation="auto_build",
+        related_entity_type="network", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
     result = _run_auto_build(pid, db, body.keep_manual_positions, body.create_missing_networks)
     if not result.get("ok") and result.get("error") == "Project not found":
+        finish_job(db, job, status="failed", error_output="Project not found")
         raise HTTPException(404, "Project not found")
     if not result.get("ok") and result.get("error") == "No network map found":
+        finish_job(db, job, status="failed", error_output="No network map found")
         raise HTTPException(404, "No network map found")
-    return result
+    finish_job(db, job, status="done", result=result)
+    return {**result, "job_id": job.id}

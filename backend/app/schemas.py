@@ -309,6 +309,9 @@ class NetworkLinkCreate(BaseModel):
     label: str = ""
     confidence: Optional[float] = None
     source: Optional[str] = None
+    reason: Optional[str] = None
+    state: Optional[str] = None
+    verified: Optional[bool] = None
     client_mutation_id: Optional[str] = None
 
 
@@ -318,6 +321,9 @@ class NetworkLinkUpdate(BaseModel):
     label: Optional[str] = None
     confidence: Optional[float] = None
     source: Optional[str] = None
+    reason: Optional[str] = None
+    state: Optional[str] = None
+    verified: Optional[bool] = None
     from_node_id: Optional[str] = None
     to_node_id: Optional[str] = None
     client_mutation_id: Optional[str] = None

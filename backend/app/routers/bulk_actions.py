@@ -195,7 +195,10 @@ async def bulk_exec(
         bcast(pid, "host_activity", "create", HASchema.model_validate(activity).model_dump())
 
         job = start_job(db, pid, body.scan_type or "exec", title,
-                        target=target_ip, command=command, created_by=exec_username or "")
+                        target=target_ip, command=command, created_by=exec_username or "",
+                        connector_key="attacker_ssh", operation="bulk_exec",
+                        related_entity_type="host", related_entity_id=host.id,
+                        request_json={**body.model_dump(), "resolved_host_id": host.id, "resolved_target": target_ip})
 
         try:
             cfg = dict(ssh_config)

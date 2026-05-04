@@ -96,6 +96,7 @@ export const TABS = [
   {id:'cheatsheet', icon:'terminal',  label:'Commands'},
   {id:'scans',      icon:'target',    label:'Scans'},
   {id:'jobs',       icon:'clock',     label:'Jobs'},
+  {id:'playbooks',  icon:'package',   label:'Playbooks'},
   {id:'report',     icon:'report',    label:'Report'},
 ];
 

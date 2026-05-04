@@ -212,7 +212,10 @@ async def execute_attacker_command(
 
     job = start_job(db, pid, "exec", title,
                     target=attacker_host.ip or attacker_host.hostname or "",
-                    command=body.command, created_by=exec_username or "")
+                    command=body.command, created_by=exec_username or "",
+                    connector_key="attacker_ssh", operation="exec",
+                    related_entity_type="host", related_entity_id=attacker_host.id,
+                    request_json=body.model_dump())
 
     # Run SSH in thread pool to avoid blocking the event loop
     loop = asyncio.get_event_loop()

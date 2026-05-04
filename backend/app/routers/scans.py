@@ -151,7 +151,13 @@ async def run_nmap_scan(
 
     username = getattr(request.state, "username", None)
     cmd = f"nmap {body.flags} -oX - {target} 2>/dev/null"
-    job = start_job(db, pid, "nmap", f"Nmap: {target}", target=target, command=cmd, created_by=username or "")
+    job = start_job(
+        db, pid, "nmap", f"Nmap: {target}",
+        target=target, command=cmd, created_by=username or "",
+        connector_key="nmap", operation="scan",
+        related_entity_type="project", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -291,7 +297,13 @@ async def run_nuclei_scan(
     username = getattr(request.state, "username", None)
     tpl_flag = f"-t {body.templates}" if body.templates.strip() else ""
     cmd = f"nuclei -u {target} {tpl_flag} -severity {body.severity} -jsonl {body.extra_flags} 2>/dev/null"
-    job = start_job(db, pid, "nuclei", f"Nuclei: {target}", target=target, command=cmd, created_by=username or "")
+    job = start_job(
+        db, pid, "nuclei", f"Nuclei: {target}",
+        target=target, command=cmd, created_by=username or "",
+        connector_key="nuclei", operation="scan",
+        related_entity_type="project", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -440,7 +452,13 @@ async def run_cme_scan(
 
     domain = f"-d {body.domain}" if body.domain else ""
     cmd = f"nxc {body.protocol} {target} {auth} {domain} {body.extra_flags} 2>/dev/null"
-    job = start_job(db, pid, "cme", f"NetExec ({body.protocol}): {target}", target=target, command=cmd, created_by=username or "")
+    job = start_job(
+        db, pid, "cme", f"NetExec ({body.protocol}): {target}",
+        target=target, command=cmd, created_by=username or "",
+        connector_key="netexec", operation="scan",
+        related_entity_type="project", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(

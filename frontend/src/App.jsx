@@ -22,6 +22,7 @@ import TimelineView from './views/TimelineView.jsx';
 import CheatsheetView from './views/CheatsheetView.jsx';
 import ScansView from './views/ScansView.jsx';
 import JobsView from './views/JobsView.jsx';
+import PlaybooksView from './views/PlaybooksView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
 import UserSettingsView from './views/UserSettingsView.jsx';
@@ -1094,6 +1095,9 @@ export default function App() {
             onJobUpdate={j => setJobs(prev => prev.map(x => x.id === j.id ? j : x))}
             onJobDelete={id => setJobs(prev => prev.filter(x => x.id !== id))}
           />
+        )}
+        {tab === 'playbooks' && (
+          <PlaybooksView selectedProject={selectedProject} accent={acc} />
         )}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}

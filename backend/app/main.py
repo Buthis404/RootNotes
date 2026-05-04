@@ -105,13 +105,48 @@ with engine.begin() as conn:
             output TEXT NOT NULL DEFAULT '',
             error_output TEXT NOT NULL DEFAULT '',
             created_by TEXT NOT NULL DEFAULT '',
+            connector_key TEXT NOT NULL DEFAULT '',
+            operation TEXT NOT NULL DEFAULT '',
+            scope_type TEXT NOT NULL DEFAULT 'project',
+            scope_id TEXT NOT NULL DEFAULT '',
+            related_entity_type TEXT NOT NULL DEFAULT '',
+            related_entity_id TEXT NOT NULL DEFAULT '',
+            retry_of_job_id TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             started_at TEXT NOT NULL DEFAULT '',
             finished_at TEXT NOT NULL DEFAULT '',
+            request_json JSONB NOT NULL DEFAULT '{}',
             result_json JSONB NOT NULL DEFAULT '{}'
         )
     """))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_pid ON jobs(pid)"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS connector_key TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS operation TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scope_type TEXT NOT NULL DEFAULT 'project'"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scope_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS related_entity_type TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS related_entity_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_of_job_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS request_json JSONB NOT NULL DEFAULT '{}'"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS playbook_runs (
+            id TEXT PRIMARY KEY,
+            pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            playbook_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'queued',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            target TEXT NOT NULL DEFAULT '',
+            error_output TEXT NOT NULL DEFAULT '',
+            jobs_json JSONB NOT NULL DEFAULT '[]',
+            request_json JSONB NOT NULL DEFAULT '{}',
+            result_json JSONB NOT NULL DEFAULT '{}'
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_playbook_runs_pid ON playbook_runs(pid)"))
     conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS import_source TEXT NOT NULL DEFAULT ''"))
 
 
@@ -322,6 +357,11 @@ def list_modules():
     return {"modules": list_module_state()}
 
 
+@app.get("/api/connectors")
+def list_connectors():
+    return {"connectors": registry.list_connectors()}
+
+
 # ── Include all domain routers ────────────────────────────────────────
 from .routers import (
     auth, admin, projects, hosts, creds, notes,
@@ -329,7 +369,7 @@ from .routers import (
     activities, attack_paths, loots, scopes,
     cred_host_notes, search, templates, import_export, topology, members,
     system_modules, attacker_exec, export, project_templates,
-    scans, webhooks, c2, jobs, bulk_actions,
+    scans, webhooks, c2, jobs, bulk_actions, playbooks,
 )
 
 app.include_router(auth.router)
@@ -363,3 +403,4 @@ app.include_router(webhooks.router)
 app.include_router(c2.router)
 app.include_router(jobs.router)
 app.include_router(bulk_actions.router)
+app.include_router(playbooks.router)

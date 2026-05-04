@@ -2,254 +2,439 @@
 
 ## Overview
 
-RootNotes uses a modular architecture where each domain has its own files.
-Main files are assembly points, not business logic containers.
+RootNotes uses a domain-oriented architecture.
 
----
+- backend is split by API domain under `routers/`
+- shared runtime logic lives in `core/`
+- extensibility lives in `plugins/`
+- frontend is organized by feature views and shared components
+
+The current direction of the system is no longer just CRUD over pentest data.
+It is evolving into an orchestration-oriented workspace where jobs, connectors,
+topology, credentials, and evidence all participate in one operational model.
 
 ## Backend Structure
 
-```
+```text
 backend/app/
-  main.py              ← App assembly: routers, middleware, WS, lifespan
-  database.py          ← SQLAlchemy engine and session factory
-  models.py            ← SQLAlchemy ORM models
-  schemas.py           ← Pydantic request/response schemas
-  ws.py                ← WebSocket ConnectionManager
+  main.py                 ← app assembly, schema bootstrapping, middleware, WS, router wiring
+  database.py             ← SQLAlchemy engine and session factory
+  models.py               ← ORM models
+  schemas.py              ← Pydantic models
+  ws.py                   ← WebSocket connection manager
 
   core/
-    config.py          ← Environment variables (JWT_SECRET, UPLOAD_ROOT, etc.)
-    security.py        ← JWT encode/decode, password hashing
-    deps.py            ← FastAPI dependencies: get_current_user, require_admin
-    events.py          ← log_event(), bcast() — timeline and WebSocket helpers
-    utils.py           ← new_id(), normalize_domain(), scope sync helpers
+    config.py             ← environment and runtime settings
+    security.py           ← JWT and password hashing
+    deps.py               ← FastAPI dependencies
+    events.py             ← timeline + WebSocket broadcast helpers
+    utils.py              ← IDs, normalization, scope helpers
+    layout.py             ← topology layout engine
+    job_tracker.py        ← central job lifecycle helpers
+    connectors.py         ← normalized connector contract
+    ssh_exec.py           ← remote SSH execution helper
+    permissions.py        ← project RBAC model
+    access.py             ← access checks by project or object
 
-  routers/             ← One file per domain, each exports an APIRouter
-    auth.py            → /api/auth/*
-    admin.py           → /api/admin/*
-    projects.py        → /api/projects/*
-    hosts.py           → /api/hosts/*
-    creds.py           → /api/creds/*
-    notes.py           → /api/notes/*, /attachments/*
-    networks.py        → /api/networks/*
-    findings.py        → /api/findings/*
-    checklist.py       → /api/checklist/*
-    timeline.py        → /api/timeline
-    objectives.py      → /api/objectives/*
-    activities.py      → /api/host-activities/*
-    attack_paths.py    → /api/attack-paths/*, /api/attack-steps/*
-    loots.py           → /api/loots/*
-    scopes.py          → /api/scopes/*
-    cred_host_notes.py → /api/cred-host-notes/*
-    search.py          → /api/search
-    templates.py       → /api/finding-templates/*, /api/snippets/*
-    import_export.py   → /api/export/*, /api/import_project, /api/import/*
-    topology.py        → /api/projects/{pid}/topology/*
+  routers/
+    auth.py               ← auth and profile endpoints
+    admin.py              ← admin user management
+    projects.py           ← projects CRUD
+    members.py            ← project membership and role management
+    hosts.py              ← hosts CRUD and bulk host import
+    creds.py              ← credentials CRUD
+    notes.py              ← notes CRUD, attachments, version conflict handling
+    findings.py           ← findings CRUD
+    loots.py              ← loot CRUD and file uploads
+    scopes.py             ← scope tracking
+    checklist.py          ← project checklist
+    timeline.py           ← project timeline
+    objectives.py         ← objectives tracking
+    activities.py         ← host activity log
+    attack_paths.py       ← attack paths and steps
+    cred_host_notes.py    ← host-specific credential annotations
+    networks.py           ← network map CRUD
+    network_map.py        ← node, edge, region mutations
+    topology.py           ← topology preview, apply, rebuild-layout, auto-build
+    scans.py              ← Nmap, Nuclei, NetExec orchestration
+    attacker_exec.py      ← remote attacker-host execution
+    bulk_actions.py       ← bulk execution and credential validation workflows
+    jobs.py               ← job center API
+    webhooks.py           ← event ingestion into project state
+    c2.py                 ← C2 integration CRUD and sync
+    search.py             ← global search
+    templates.py          ← finding/snippet template APIs
+    project_templates.py  ← starter project blueprints
+    import_export.py      ← project import/export and parser-backed imports
+    export.py             ← CSV export endpoints
+    system_modules.py     ← module and attacker-SSH admin controls
+
+  services/
+    host_service.py       ← domain helper service
+    project_service.py    ← domain helper service
 
   plugins/
-    types.py           ← BackendModule dataclass (module contract)
-    registry.py        ← ModuleRegistry singleton
-    loader.py          ← Auto-discover and register modules on startup
-    modules/           ← Drop custom modules here (auto-loaded)
+    types.py              ← BackendModule contract
+    registry.py           ← module registry + connector discovery
+    loader.py             ← builtin registration + plugin auto-load
+    state.py              ← persisted module state and attacker target config
+    modules/              ← drop-in backend plugin files
 ```
-
-### Adding a new backend route domain
-
-1. Create `backend/app/routers/my_domain.py`
-2. Define `router = APIRouter(prefix="/api/my-domain", tags=["my-domain"])`
-3. Add your route handlers
-4. In `main.py`, add:
-   ```python
-   from .routers import my_domain
-   app.include_router(my_domain.router)
-   ```
-
----
 
 ## Frontend Structure
 
-```
+```text
 frontend/src/
-  api.js                   ← Backward-compat re-export from api/index.js
+  App.jsx                 ← top-level UI assembly and state reconciliation
+  main.jsx                ← frontend bootstrap
+  constants.js            ← tabs, enums, default data, snippets
+
   api/
-    client.js              ← Base req(), upload(), download() functions
-    index.js               ← All API methods (full api object)
+    client.js             ← req(), upload(), download()
+    index.js              ← full API surface
+  api.js                  ← backward-compatible re-export
+
+  components/
+    TopologyBuilderModal.jsx
+    SearchModal.jsx
+    ImportModal.jsx
+    MdEditor.jsx
+    MdPreview.jsx
+    NmapParser.jsx
+    NessusParser.jsx
+    BloodHoundParser.jsx
+    AttackVectorAnalyzer.jsx
+    ...shared UI components
+
+  views/
+    ProjectsView.jsx
+    NotesView.jsx
+    HostsView.jsx
+    CredsView.jsx
+    FindingsView.jsx
+    NetworkView.jsx
+    AttackPathView.jsx
+    LootView.jsx
+    ScopeView.jsx
+    ChecklistView.jsx
+    TimelineView.jsx
+    ObjectivesView.jsx
+    ScansView.jsx
+    JobsView.jsx
+    ReportView.jsx
+    AdminView.jsx
+    SystemModulesView.jsx
+    MembersPanel.jsx
+    UserSettingsView.jsx
+    CheatsheetView.jsx
+    LoginView.jsx
+
+  store/
+    useProjectStore.js    ← shared project-domain state
+    useAuthStore.js       ← auth-related local state helper
+
+  hooks/
+    useSync.js            ← WebSocket subscription logic
+    useColumnResize.js    ← table resizing behavior
+
+  context/
+    ProjectPermissions.jsx ← project permission context
 
   features/
     plugins/
-      registry.js          ← Frontend ModuleRegistry singleton
-      types.js             ← Module contract definition
+      registry.js         ← frontend module registry
+      types.js            ← extension point contract
 
-  components/
-    TopologyBuilderModal.jsx  ← Topology builder UI (preview/apply workflow)
-    ... (existing components)
-
-  views/                   ← One file per major feature view
-  hooks/                   ← useSync.js (WebSocket), useColumnResize.js
-  utils/                   ← hostMeta.js, parsers.js
-  constants.js
+  utils/
+    hostMeta.js           ← host type and role heuristics
+    parsers.js            ← parsing helpers
 ```
 
-### Importing API in new code
+## Current Architectural Themes
 
-```js
-// Preferred — direct import
-import { api } from '../api/index.js';
+## 1. Domain-first API layout
 
-// Legacy — still works
-import { api } from '../api.js';
-```
+Each main pentest entity or workflow has its own router.
 
----
+This keeps the backend easy to extend without concentrating all business logic
+in `main.py`.
 
-## Module Registry
+## 2. Jobs as orchestration backbone
 
-### Backend
+`core/job_tracker.py` and `routers/jobs.py` now form a shared orchestration base.
 
-The `ModuleRegistry` (singleton in `plugins/registry.py`) holds all registered `BackendModule` instances.
+Each job stores:
 
-```python
-from app.plugins.registry import registry
-from app.plugins.types import BackendModule
-from fastapi import APIRouter
+- type
+- status
+- title
+- target
+- command
+- output and error output
+- created_by
+- connector metadata
+- operation metadata
+- related entity metadata
+- structured result JSON
 
-my_router = APIRouter(prefix="/api/my-plugin")
+This makes jobs the current common lifecycle wrapper for:
 
-@my_router.get("/hello")
-def hello():
-    return {"hello": "world"}
+- scans
+- attacker execution
+- bulk actions
+- C2 sync
+- topology operations
 
-MODULE = BackendModule(
-    name="my_plugin",
-    version="1.0.0",
-    description="My custom plugin",
-    router=my_router,
-    scan_parsers={"my_format": parse_my_format},
-)
-```
+Current limitation:
 
-Place the file in `backend/app/plugins/modules/my_plugin.py` — it will be auto-loaded.
+- jobs are tracked centrally, but execution is still mostly immediate and synchronous from the request path
+- there is no true queue or dependency graph yet
 
-### Frontend
+## 3. Connectors as normalized tool contract
 
-The `moduleRegistry` (singleton in `features/plugins/registry.js`) aggregates UI extension points.
+`core/connectors.py` defines the normalized connector contract.
 
-```js
-import { moduleRegistry } from '../features/plugins/registry.js';
+Connectors are exposed through backend modules and aggregated by the plugin registry.
 
-moduleRegistry.register({
-  id: 'my-plugin',
-  title: 'My Plugin',
-  version: '1.0.0',
-  description: 'Adds a custom host tab',
-  enabled: true,
-  hostTabs: [{
-    id: 'my-tab',
-    label: 'My Tab',
-    component: MyTabComponent,
-  }],
-  menuItems: [{
-    id: 'my-menu',
-    label: 'My Plugin',
-    icon: 'target',
-    tab: 'my-plugin',
-  }],
-});
-```
+Current builtin connector categories:
 
-### /api/modules
+- `scan`
+- `execution`
+- `topology`
+- `c2`
 
-`GET /api/modules` returns the list of all registered backend modules with their status.
+The registry exposes:
+
+- module metadata
+- scan parsers
+- connector inventory
+
+This is the foundation for evolving from isolated tool endpoints to a unified orchestration layer.
+
+## 4. Plugins as extension boundary
+
+The plugin system currently supports:
+
+- backend module metadata
+- backend routers
+- scan parsers
+- connector definitions
+- frontend extension points
+
+This is the right architectural boundary for adding new tool families without contaminating core domains.
+
+## 5. Topology as operational graph
+
+Topology is no longer just a visual map.
+
+The backend topology subsystem now includes:
+
+- scan preview and apply
+- layout rebuild
+- auto-build from project hosts
+- smart gateway and subnet inference
+- inferred edge confidence and reason metadata
+- job tracking for topology operations
+
+The frontend network view already combines:
+
+- network map editing
+- topology builder entrypoints
+- overlays for findings, creds, objectives, and attack steps
+- host-centric interaction inside the map
+
+Current limitation:
+
+- topology is still mostly host-centric
+- subnet, route, trust-zone, and reachability concepts are not first-class entities yet
+
+## API Surface Summary
+
+Core discovery endpoints:
+
+- `GET /api/modules`
+- `GET /api/connectors`
+
+Job center:
+
+- `GET /api/projects/{pid}/jobs`
+- `GET /api/projects/{pid}/jobs/{job_id}`
+- `PATCH /api/projects/{pid}/jobs/{job_id}/cancel`
+- `DELETE /api/projects/{pid}/jobs/{job_id}`
+
+Topology:
+
+- `POST /api/projects/{pid}/topology/preview`
+- `POST /api/projects/{pid}/topology/apply`
+- `POST /api/projects/{pid}/topology/rebuild-layout`
+- `POST /api/projects/{pid}/topology/auto-build`
+- `GET /api/projects/{pid}/topology`
+- `GET /api/projects/{pid}/topology/sources`
+
+Execution and orchestration:
+
+- `POST /api/projects/{pid}/scans/nmap`
+- `POST /api/projects/{pid}/scans/nuclei`
+- `POST /api/projects/{pid}/scans/cme`
+- `POST /api/projects/{pid}/attacker-exec`
+- `POST /api/projects/{pid}/bulk-exec`
+- `POST /api/projects/{pid}/creds/{cred_id}/validate`
+
+C2 and ingestion:
+
+- `GET/POST/PATCH/DELETE /api/admin/c2/*`
+- `POST /api/webhooks/{token}`
+
+## Data Model Notes
+
+Schema is still managed via idempotent SQL statements in `main.py`.
+
+This keeps evolution simple for now, but it also means:
+
+- schema growth is easy
+- schema review is centralized in one file
+- migration history is not explicit
+
+For the current stage of the project this is workable, but future larger changes
+to jobs, topology, or connector provenance may eventually justify a more formal migration strategy.
+
+## WebSocket Model
+
+Project-scoped WebSocket rooms are still the main live-state synchronization mechanism.
+
+Message shape remains:
 
 ```json
-{
-  "modules": [
-    {
-      "name": "topology",
-      "version": "1.0.0",
-      "description": "...",
-      "enabled": true,
-      "has_router": false,
-      "scan_parsers": []
-    }
-  ]
-}
+{ "pid": "...", "entity": "...", "action": "...", "data": { ... } }
 ```
 
----
+The same broadcast path is used by CRUD entities and orchestration entities such as jobs.
 
-## Topology Builder
+## Architectural Risks and Constraints
 
-Automatically constructs network topology from scan files.
+## 1. `App.jsx` is still a heavy assembly point
 
-### API
+The backend is reasonably decomposed.
+The frontend top-level assembly is still dense.
 
-```
-POST /api/projects/{pid}/topology/preview        — analyse scan, return diff
-POST /api/projects/{pid}/topology/apply          — apply confirmed diff
-POST /api/projects/{pid}/topology/rebuild-layout — recompute node positions
-GET  /api/projects/{pid}/topology               — topology summary
-GET  /api/projects/{pid}/topology/sources       — supported source types
-```
+This is acceptable for now, but further orchestration growth should gradually move:
 
-### Preview request (multipart/form-data)
+- project bootstrap
+- job state handling
+- WebSocket reconciliation
+- feature-specific loading
 
-```
-file:                   <scan file>
-source_type:            nmap
-keep_manual_positions:  true
-create_links:           true
-update_existing_hosts:  true
-```
+out of `App.jsx` into smaller containers or dedicated state layers.
 
-### Preview response
+## 2. Orchestration is centralized conceptually, but not yet physically
 
-```json
-{
-  "new_hosts":      [{ "ip": "10.0.0.1", "hostname": "", "ports": [...], "is_new": true }],
-  "updated_hosts":  [{ "ip": "10.0.0.2", "existing_id": "hstXXX", "changes": {"ports_added": ["22/tcp"]} }],
-  "new_links":      [{ "source_ip": "10.0.0.1", "target_ip": "10.0.0.2", "link_type": "same_subnet" }],
-  "conflicts":      [],
-  "summary":        "Found 5 hosts: 3 new, 2 updates, 4 links"
-}
-```
+The code now has a shared jobs layer and a shared connector contract, but orchestration logic is still distributed across routers.
 
-### Supported scan formats
+That is fine for the current phase, but the next iteration should avoid re-embedding job lifecycle and tool semantics in every domain router.
 
-| Format     | Parser              | Notes                        |
-|------------|---------------------|------------------------------|
-| Nmap XML   | `parse_nmap_xml()`  | Use `-oX output.xml`         |
+## 3. Topology still needs richer graph semantics
 
-### Manual node positions
+The system already stores operationally useful edge metadata such as confidence and reason.
 
-Nodes with `manually_positioned: true` in `nodes_json` are never moved by the layout algorithm when `keep_manual_positions=true`.
+The next architectural step is not more layout work.
+It is stronger graph semantics:
 
----
+- segment identity
+- reachability
+- route state
+- verification state
+- attacker infrastructure modeling
 
-## Database
+## Recommended Implementation Stages
 
-Schema is managed via idempotent `ALTER TABLE ... IF NOT EXISTS` statements in `main.py` — no Alembic.
+## Stage 1. Keep architecture docs aligned with real code
 
-To add a new column:
-```python
-conn.execute(text("ALTER TABLE my_table ADD COLUMN IF NOT EXISTS my_col TEXT NOT NULL DEFAULT ''"))
-```
+Work:
 
----
+- update docs whenever routers or subsystems are added
+- treat `jobs`, `connectors`, and `topology` as first-class architecture topics
 
-## WebSocket
+Why:
 
-`/ws/{pid}?token=<jwt>` — real-time sync scoped to a project room.
+- the project has already outgrown the original simplified architecture document
 
-Messages follow `{ pid, entity, action, data }` pattern.
-The `bcast(pid, entity, action, data)` helper in `core/events.py` is used by all routers.
+## Stage 2. Promote jobs into full orchestration backbone
 
----
+Work:
 
-## Compatibility
+- route all long-running operations through jobs
+- add retry and rerun semantics
+- define terminal and non-terminal lifecycle transitions centrally
+- enrich job-to-entity linkage
 
-- All original API endpoints preserved at identical paths
-- Export/import ZIP format unchanged
-- Database schema extended non-destructively (IF NOT EXISTS)
-- Existing network map JSONB format unchanged
-- Frontend `api.js` re-exports from `api/index.js` — no breaking changes
+Why:
+
+- this builds on architecture already present in code
+
+## Stage 3. Promote connectors into a real orchestration catalog
+
+Work:
+
+- use connector metadata consistently across scans, execution, and ingestion
+- standardize what each connector declares:
+  - operations
+  - outputs
+  - created entities
+  - evidence behavior
+
+Why:
+
+- this makes tool growth modular instead of router-specific
+
+## Stage 4. Evolve topology into the operational graph
+
+Work:
+
+- ingest more sources into topology
+- persist richer edge and node semantics
+- connect jobs, attack path, creds, and findings into the graph
+- add route and reachability semantics
+
+Why:
+
+- topology is the natural visual center of the platform
+
+## Stage 5. Add playbooks and pipelines
+
+Work:
+
+- build a workflow layer on top of jobs and connectors
+- support simple linear playbooks first
+- add conditional branching later
+
+Why:
+
+- jobs and connectors should stabilize first
+
+## Stage 6. Decompose frontend assembly
+
+Work:
+
+- reduce orchestration-specific burden inside `App.jsx`
+- isolate job state, connector state, and topology orchestration flows
+
+Why:
+
+- keeps the frontend aligned with the modular backend architecture
+
+## Current Best Direction
+
+The most important architectural takeaway is this:
+
+RootNotes should now be developed as an orchestration-centric platform.
+
+That means the core long-term relationship is:
+
+`connectors -> jobs -> topology/graph -> evidence/findings/reporting`
+
+not just:
+
+`forms -> CRUD tables -> export`
+
+The current architecture is already close enough to support that direction.
+The next work should deepen and unify the pieces that now exist.

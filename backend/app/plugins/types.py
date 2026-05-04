@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Any
 from fastapi import APIRouter
 
+from ..core.connectors import ToolConnector
+
 
 @dataclass
 class BackendModule:
@@ -21,6 +23,7 @@ class BackendModule:
     search_providers: list[Callable] = field(default_factory=list)
     startup_hooks: list[Callable] = field(default_factory=list)
     shutdown_hooks: list[Callable] = field(default_factory=list)
+    connectors: list[ToolConnector] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -33,4 +36,5 @@ class BackendModule:
             "editable": self.editable,
             "has_router": self.router is not None,
             "scan_parsers": list(self.scan_parsers.keys()),
+            "connectors": [connector.to_dict() for connector in self.connectors],
         }

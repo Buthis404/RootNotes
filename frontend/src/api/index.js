@@ -141,6 +141,7 @@ export const api = {
   search:      (q, pid) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}`),
   getPresence: ()        => req('GET', '/presence'),
   listModules: ()        => req('GET', '/modules'),
+  listConnectors: ()     => req('GET', '/connectors'),
 
   // Finding templates
   listFindingTemplates:        ()       => req('GET',    '/finding-templates'),
@@ -234,4 +235,15 @@ export const api = {
   getJob:     (pid, jobId) => req('GET',    `/projects/${pid}/jobs/${jobId}`),
   deleteJob:  (pid, jobId) => req('DELETE', `/projects/${pid}/jobs/${jobId}`),
   cancelJob:  (pid, jobId) => req('PATCH',  `/projects/${pid}/jobs/${jobId}/cancel`),
+  rerunJob:   (pid, jobId) => req('POST',   `/projects/${pid}/jobs/${jobId}/rerun`),
+  retryJob:   (pid, jobId) => req('POST',   `/projects/${pid}/jobs/${jobId}/retry`),
+
+  // Playbooks
+  listPlaybooks: () => req('GET', '/playbooks'),
+  runPlaybook: (pid, playbookId, data) => req('POST', `/projects/${pid}/playbooks/${encodeURIComponent(playbookId)}/run`, data),
+  listPlaybookRuns: (pid, params = {}) => {
+    const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v != null))).toString();
+    return req('GET', `/projects/${pid}/playbook-runs${qs ? `?${qs}` : ''}`);
+  },
+  getPlaybookRun: (pid, runId) => req('GET', `/projects/${pid}/playbook-runs/${runId}`),
 };

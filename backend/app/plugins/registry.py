@@ -30,6 +30,23 @@ class ModuleRegistry:
             parsers.extend(module.scan_parsers.keys())
         return list(set(parsers))
 
+    def get_connector(self, key: str):
+        for module in self.get_enabled():
+            for connector in module.connectors:
+                if connector.key == key and connector.enabled:
+                    return connector
+        return None
+
+    def list_connectors(self) -> list[dict]:
+        connectors = []
+        for module in self.get_enabled():
+            for connector in module.connectors:
+                item = connector.to_dict()
+                item["module"] = module.name
+                connectors.append(item)
+        connectors.sort(key=lambda item: (item["category"], item["title"].lower(), item["key"]))
+        return connectors
+
 
 # Global singleton
 registry = ModuleRegistry()

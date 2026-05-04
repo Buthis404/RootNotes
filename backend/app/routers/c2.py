@@ -602,7 +602,13 @@ async def _do_project_sync(cfg: dict, pid: str, db: Session, iid: str | None = N
         raise ValueError(f"Unsupported C2 type: {cfg['type']}")
 
     label = cfg.get("label") or cfg.get("type", "c2")
-    job = start_job(db, pid, "c2_sync", f"C2 Sync: {label}", target=cfg.get("url", ""), created_by=created_by)
+    job = start_job(
+        db, pid, "c2_sync", f"C2 Sync: {label}",
+        target=cfg.get("url", ""), created_by=created_by,
+        connector_key="c2_integration", operation="sync",
+        related_entity_type="project", related_entity_id=pid,
+        request_json={"iid": iid, "type": cfg.get("type"), "url": cfg.get("url"), "project_id": pid},
+    )
 
     try:
         result = await _do_project_sync_inner(cfg, pid, db, iid)
