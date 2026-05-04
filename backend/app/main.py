@@ -147,6 +147,17 @@ with engine.begin() as conn:
         )
     """))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_playbook_runs_pid ON playbook_runs(pid)"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS custom_playbooks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            steps_json JSONB NOT NULL DEFAULT '[]',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """))
     conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS import_source TEXT NOT NULL DEFAULT ''"))
 
 

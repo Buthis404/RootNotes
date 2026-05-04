@@ -240,10 +240,17 @@ export const api = {
 
   // Playbooks
   listPlaybooks: () => req('GET', '/playbooks'),
+  listPlaybookStepTemplates: () => req('GET', '/playbooks/step-templates'),
+  validatePlaybook: (data) => req('POST', '/playbooks/validate', data),
+  createCustomPlaybook: (data) => req('POST', '/playbooks/custom', data),
+  updateCustomPlaybook: (id, data) => req('PATCH', `/playbooks/custom/${id}`, data),
+  deleteCustomPlaybook: (id) => req('DELETE', `/playbooks/custom/${id}`),
   runPlaybook: (pid, playbookId, data) => req('POST', `/projects/${pid}/playbooks/${encodeURIComponent(playbookId)}/run`, data),
   listPlaybookRuns: (pid, params = {}) => {
     const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v != null))).toString();
     return req('GET', `/projects/${pid}/playbook-runs${qs ? `?${qs}` : ''}`);
   },
   getPlaybookRun: (pid, runId) => req('GET', `/projects/${pid}/playbook-runs/${runId}`),
+  cancelPlaybookRun: (pid, runId) => req('POST', `/projects/${pid}/playbook-runs/${runId}/cancel`),
+  rerunPlaybookRun: (pid, runId) => req('POST', `/projects/${pid}/playbook-runs/${runId}/rerun`),
 };

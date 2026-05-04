@@ -334,3 +334,15 @@ class PlaybookRun(Base):
     jobs_json = Column(JSONB, nullable=False, default=list)
     request_json = Column(JSONB, nullable=False, default=dict)
     result_json = Column(JSONB, nullable=False, default=dict)
+
+
+class CustomPlaybook(Base):
+    __tablename__ = "custom_playbooks"
+
+    id = Column(String, primary_key=True)
+    title = Column(String, nullable=False, default="")
+    description = Column(Text, nullable=False, default="")
+    steps_json = Column(JSONB, nullable=False, default=list)
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False)
