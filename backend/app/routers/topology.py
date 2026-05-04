@@ -85,6 +85,7 @@ class TopologyLinkDiff(BaseModel):
     confidence: float = 1.0
     source: str = "nmap"
     label: str = ""
+    reason: str = ""
 
 
 class TopologyPreview(BaseModel):
@@ -303,14 +304,14 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
     seen: set = set()
 
     def add(src: str, dst: str, link_type: str = "same_subnet",
-            label: str = "", confidence: float = 0.9) -> None:
+            label: str = "", confidence: float = 0.9, reason: str = "") -> None:
         key = tuple(sorted([src, dst]))
         if key not in seen and src != dst:
             seen.add(key)
             links.append(TopologyLinkDiff(
                 source_ip=src, target_ip=dst,
                 link_type=link_type, confidence=confidence,
-                source="auto", label=label,
+                source="auto", label=label, reason=reason,
             ))
 
     subnet_gw: dict[str, str] = {}
@@ -322,19 +323,34 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
 
         gw = _pick_gateway(group)
         gw_ip = gw.get("ip", "")
+        gw_hostname = gw.get("hostname", "") or gw_ip
+
         if gw_ip:
             subnet_gw[subnet] = gw_ip
+
+        # Explain why this host was chosen as gateway
+        if _is_gateway(gw):
+            gw_reason = f"gateway role/tag/OS on {gw_hostname}"
+        else:
+            last_octet = gw_ip.split(".")[-1] if gw_ip else ""
+            if last_octet in ("1", "2", "254", "253", "252"):
+                gw_reason = f"common gateway IP suffix (.{last_octet}) on {gw_hostname}"
+            else:
+                port_count = len(gw.get("ports") or [])
+                gw_reason = f"most open ports ({port_count}) → hub heuristic on {gw_hostname}"
 
         for h in group:
             h_ip = h.get("ip", "")
             if h_ip and h_ip != gw_ip:
-                add(gw_ip, h_ip, "same_subnet")
+                add(gw_ip, h_ip, "same_subnet", confidence=0.9,
+                    reason=f"same /{subnet} subnet; hub: {gw_reason}")
 
     # ── Inter-subnet: gateway ↔ gateway ───────────────────────────────
-    gw_ips = list(subnet_gw.values())
-    for i, a in enumerate(gw_ips):
-        for b in gw_ips[i + 1:]:
-            add(a, b, "lan", confidence=0.7)
+    gw_list = [(s, ip) for s, ip in subnet_gw.items()]
+    for i, (sa, a) in enumerate(gw_list):
+        for sb, b in gw_list[i + 1:]:
+            add(a, b, "lan", confidence=0.7,
+                reason=f"inter-subnet route between {sa} and {sb} (gateway heuristic)")
 
     return links
 
@@ -380,6 +396,7 @@ async def topology_preview(
     keep_manual_positions: bool = Form(True),
     create_links: bool = Form(True),
     update_existing_hosts: bool = Form(True),
+    confidence_threshold: float = Form(0.5),
     db: Session = Depends(get_db),
 ):
     project = db.query(models.Project).filter(models.Project.id == pid).first()
@@ -443,11 +460,30 @@ async def topology_preview(
                 is_new=True,
             ))
 
-    # Infer links
+    # Infer links using smart hub-and-spoke inference with full host metadata
     new_links: list[TopologyLinkDiff] = []
     if create_links:
-        all_hosts_for_links = [{"ip": h.ip} for h in existing_hosts] + [{"ip": ph.ip} for ph in new_hosts]
-        new_links = infer_links(all_hosts_for_links)
+        existing_for_links = [
+            {"ip": h.ip, "hostname": h.hostname, "os": h.os,
+             "ports": h.ports or [], "tags": h.tags or [], "role": h.role}
+            for h in existing_hosts
+        ]
+        new_for_links = [
+            {"ip": h.ip, "hostname": h.hostname, "os": h.os,
+             "ports": h.ports, "tags": h.tags}
+            for h in new_hosts
+        ]
+        all_links = infer_links_smart(existing_for_links + new_for_links)
+        # Filter by confidence threshold and deduplicate against existing edges
+        existing_networks = db.query(models.Network).filter(models.Network.pid == pid).all()
+        existing_edge_pairs: set = set()
+        for net in existing_networks:
+            for edge in (net.edges_json or []):
+                existing_edge_pairs.add((edge.get("from"), edge.get("to")))
+        new_links = [
+            lnk for lnk in all_links
+            if lnk.confidence >= confidence_threshold
+        ]
 
     total = len(new_hosts) + len(updated_hosts)
     summary = f"Found {len(parsed_hosts)} hosts: {len(new_hosts)} new, {len(updated_hosts)} updates, {len(new_links)} links"
@@ -712,33 +748,20 @@ class AutoBuildRequest(BaseModel):
     create_missing_networks: bool = True
 
 
-@router.post("/auto-build", dependencies=[Depends(require_topo_apply)])
-def topology_auto_build(
-    pid: str,
-    body: AutoBuildRequest = AutoBuildRequest(),
-    db: Session = Depends(get_db),
-):
-    """
-    Build or update the network map from all existing project hosts.
-
-    - Creates a network map if none exists (when create_missing_networks=True).
-    - Adds any project hosts not yet on the map as new nodes.
-    - Re-runs the layout algorithm for all auto-positioned nodes.
-    - Manually positioned nodes are preserved when keep_manual_positions=True.
-    """
+def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, create_missing_networks: bool = True) -> dict:
+    """Core topology auto-build logic. Callable from other modules (e.g. C2 sync)."""
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
-        raise HTTPException(404, "Project not found")
+        return {"ok": False, "error": "Project not found"}
 
     all_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
     if not all_hosts:
         return {"ok": True, "nodes_total": 0, "nodes_added": 0, "repositioned": 0}
 
-    # Get or create network
     network = db.query(models.Network).filter(models.Network.pid == pid).first()
     if not network:
-        if not body.create_missing_networks:
-            raise HTTPException(404, "No network map found")
+        if not create_missing_networks:
+            return {"ok": False, "error": "No network map found"}
         network = models.Network(
             id=new_id("net"), pid=pid, name="Network",
             background="#07080b", regions_json=[], nodes_json=[], edges_json=[],
@@ -749,7 +772,6 @@ def topology_auto_build(
     existing_nodes: list = list(network.nodes_json or [])
     existing_edges: list = list(network.edges_json or [])
 
-    # Build CIDR list from project scopes for better subnet grouping
     scope_cidrs: list = []
     try:
         scopes = db.query(models.Scope).filter(models.Scope.pid == pid).all()
@@ -764,12 +786,10 @@ def topology_auto_build(
         pass
 
     def _annotate_subnet(ip: str) -> str:
-        """Return the most specific matching scope CIDR, or /24 fallback."""
         try:
             addr = ipaddress.ip_address(ip)
             matching = [n for n in scope_cidrs if addr in n]
             if matching:
-                # Prefer the most specific (largest prefix length)
                 return str(max(matching, key=lambda n: n.prefixlen))
         except ValueError:
             pass
@@ -786,25 +806,19 @@ def topology_auto_build(
         for h in all_hosts
     ]
 
-    # Run layout over ALL project hosts
-    positioned = compute_layout(
-        hosts_for_layout, existing_nodes, body.keep_manual_positions, existing_edges,
-    )
+    positioned = compute_layout(hosts_for_layout, existing_nodes, keep_manual_positions, existing_edges)
 
-    # Index current map nodes for fast lookup
     node_by_hid: dict = {n.get("host_id"): n for n in existing_nodes if n.get("host_id")}
     node_by_ip:  dict = {n.get("ip"):      n for n in existing_nodes if n.get("ip")}
-
-    nodes_added      = 0
+    nodes_added = 0
     nodes_repositioned = 0
 
     for p in positioned:
         h_id = p.get("id", "")
         h_ip = p.get("ip", "")
         existing = node_by_hid.get(h_id) or node_by_ip.get(h_ip)
-
         if existing:
-            if not (existing.get("manually_positioned") and body.keep_manual_positions):
+            if not (existing.get("manually_positioned") and keep_manual_positions):
                 existing["x"] = p["x"]
                 existing["y"] = p["y"]
                 existing["auto_positioned"] = True
@@ -812,41 +826,28 @@ def topology_auto_build(
                 nodes_repositioned += 1
         else:
             new_node = {
-                "id":               new_id("nd"),
-                "host_id":          h_id,
-                "label":            p.get("hostname") or h_ip,
-                "ip":               h_ip,
-                "ips":              [],
-                "ports":            p.get("ports", []),
-                "services":         p.get("services", []),
-                "status":           p.get("status", "unknown"),
-                "role":             "attacker" if p.get("is_attacker") else p.get("role", "unknown"),
-                "type":             _node_type_for(p),
-                "notes":            "",
-                "is_attacker":      bool(p.get("is_attacker")),
-                "x":                p["x"],
-                "y":                p["y"],
-                "manually_positioned": False,
-                "auto_positioned":  True,
+                "id": new_id("nd"), "host_id": h_id,
+                "label": p.get("hostname") or h_ip, "ip": h_ip, "ips": [],
+                "ports": p.get("ports", []), "services": p.get("services", []),
+                "status": p.get("status", "unknown"),
+                "role": "attacker" if p.get("is_attacker") else p.get("role", "unknown"),
+                "type": _node_type_for(p), "notes": "",
+                "is_attacker": bool(p.get("is_attacker")),
+                "x": p["x"], "y": p["y"],
+                "manually_positioned": False, "auto_positioned": True,
             }
             existing_nodes.append(new_node)
             node_by_hid[h_id] = new_node
             node_by_ip[h_ip]  = new_node
             nodes_added += 1
 
-    # ── Rebuild auto-inferred edges from scratch, keep manual ones ───────
     inferred_links = infer_links_smart(hosts_for_layout)
-
     ip_to_node_id: dict = {n.get("ip"): n.get("id") for n in existing_nodes if n.get("ip")}
-
-    # Preserve manually-drawn edges (not auto-generated by previous auto-build)
     manual_edges = [e for e in existing_edges if e.get("source") != "auto"]
-    manual_edge_keys: set = {
-        (e.get("from"), e.get("to")) for e in manual_edges
-    } | {
-        (e.get("to"), e.get("from")) for e in manual_edges
-    }
-
+    manual_edge_keys: set = (
+        {(e.get("from"), e.get("to")) for e in manual_edges} |
+        {(e.get("to"), e.get("from")) for e in manual_edges}
+    )
     new_auto_edges = []
     seen_auto_keys: set = set(manual_edge_keys)
     links_added = 0
@@ -857,34 +858,37 @@ def topology_auto_build(
         if not src_nid or not dst_nid:
             continue
         key = (src_nid, dst_nid)
-        rkey = (dst_nid, src_nid)
-        if key in seen_auto_keys or rkey in seen_auto_keys:
+        if key in seen_auto_keys or (dst_nid, src_nid) in seen_auto_keys:
             continue
         seen_auto_keys.add(key)
-        seen_auto_keys.add(rkey)
+        seen_auto_keys.add((dst_nid, src_nid))
         new_auto_edges.append({
-            "id":         new_id("edg"),
-            "from":       src_nid,
-            "to":         dst_nid,
-            "type":       link.link_type,
-            "confidence": link.confidence,
-            "source":     link.source,
+            "id": new_id("edg"), "from": src_nid, "to": dst_nid,
+            "type": link.link_type, "confidence": link.confidence, "source": link.source,
         })
         links_added += 1
 
-    existing_edges = manual_edges + new_auto_edges
-
     network.nodes_json = existing_nodes
-    network.edges_json = existing_edges
+    network.edges_json = manual_edges + new_auto_edges
     db.commit()
 
     result = schemas.Network.from_orm_obj(network)
     bcast(pid, "network", "layout_applied", {"network": result.model_dump(), "updated_at": datetime.utcnow().isoformat()})
 
-    return {
-        "ok":           True,
-        "nodes_total":  len(existing_nodes),
-        "nodes_added":  nodes_added,
-        "repositioned": nodes_repositioned,
-        "links_added":  links_added,
-    }
+    return {"ok": True, "nodes_total": len(existing_nodes), "nodes_added": nodes_added,
+            "repositioned": nodes_repositioned, "links_added": links_added}
+
+
+@router.post("/auto-build", dependencies=[Depends(require_topo_apply)])
+def topology_auto_build(
+    pid: str,
+    body: AutoBuildRequest = AutoBuildRequest(),
+    db: Session = Depends(get_db),
+):
+    """Build or update the network map from all existing project hosts."""
+    result = _run_auto_build(pid, db, body.keep_manual_positions, body.create_missing_networks)
+    if not result.get("ok") and result.get("error") == "Project not found":
+        raise HTTPException(404, "Project not found")
+    if not result.get("ok") and result.get("error") == "No network map found":
+        raise HTTPException(404, "No network map found")
+    return result

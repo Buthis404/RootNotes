@@ -73,6 +73,7 @@ class Host(Base):
     domain = Column(String, nullable=False, default="")
     role = Column(String, nullable=False, default="unknown")
     is_attacker = Column(Boolean, nullable=False, default=False)
+    import_source = Column(String, nullable=False, default="")
 
 
 class Cred(Base):
@@ -287,3 +288,22 @@ class GlobalSetting(Base):
 
     key = Column(String, primary_key=True)
     value = Column(JSONB, nullable=False, default=dict)
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    type = Column(String, nullable=False)          # nmap|nuclei|cme|exec|c2_sync|topology
+    status = Column(String, nullable=False, default="queued")  # queued|running|done|failed|cancelled
+    title = Column(String, nullable=False, default="")
+    target = Column(String, nullable=False, default="")
+    command = Column(Text, nullable=False, default="")
+    output = Column(Text, nullable=False, default="")
+    error_output = Column(Text, nullable=False, default="")
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+    started_at = Column(String, nullable=False, default="")
+    finished_at = Column(String, nullable=False, default="")
+    result_json = Column(JSONB, nullable=False, default=dict)

@@ -21,6 +21,7 @@ import ChecklistView from './views/ChecklistView.jsx';
 import TimelineView from './views/TimelineView.jsx';
 import CheatsheetView from './views/CheatsheetView.jsx';
 import ScansView from './views/ScansView.jsx';
+import JobsView from './views/JobsView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
 import UserSettingsView from './views/UserSettingsView.jsx';
@@ -207,6 +208,7 @@ export default function App() {
   // (loading starts true, drives the initial spinner before data arrives)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [jobs, setJobs] = useState([]);
 
   const [showSearch, setShowSearch] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState([]);
@@ -463,6 +465,11 @@ export default function App() {
       if (action === 'update') setHostActivities(prev => prev.map(x => x.id === data.id ? data : x));
       if (action === 'delete') setHostActivities(prev => prev.filter(x => x.id !== data.id));
     }
+    if (entity === 'job') {
+      if (action === 'create') setJobs(prev => prev.some(x => x.id === data.id) ? prev : [data, ...prev]);
+      if (action === 'update') setJobs(prev => prev.map(x => x.id === data.id ? data : x));
+      if (action === 'delete') setJobs(prev => prev.filter(x => x.id !== data.id));
+    }
     if (entity === 'project') {
       if (action === 'update') setProjects(prev => prev.map(x => x.id === data.id ? data : x));
       if (action === 'delete') {
@@ -502,6 +509,7 @@ export default function App() {
     setCreds(prev => prev.filter(x => x.pid !== id));
     setNetworks(prev => prev.filter(n => n.pid !== id));
     setHostActivities(prev => prev.filter(x => x.pid !== id));
+    setJobs(prev => prev.filter(x => x.pid !== id));
   };
 
   // ── Loot CRUD ───────────────────────────────────────────────────────
@@ -803,6 +811,7 @@ export default function App() {
     attackpath: attackPaths.filter(p => p.pid === selectedProject).length,
     loot:       loots.filter(l => l.pid === selectedProject).length,
     scope:      scopes.filter(s => s.pid === selectedProject).length,
+    jobs:     jobs.filter(j => j.pid === selectedProject && (j.status === 'running' || j.status === 'queued')).length,
     network: 0, projects: 0, report: 0, checklist: 0, timeline: 0, cheatsheet: 0, scans: 0,
   };
 
@@ -1028,6 +1037,10 @@ export default function App() {
             onRefreshHosts={refreshHosts}
             onRefreshNetworks={refreshNetworks}
             markLocalOp={markLocalOp}
+            findings={findings.filter(f => f.pid === selectedProject)}
+            objectives={objectives.filter(o => o.pid === selectedProject)}
+            creds={creds.filter(c => c.pid === selectedProject)}
+            attackSteps={attackSteps.filter(s => s.pid === selectedProject)}
           />
         )}
         {tab === 'findings' && (
@@ -1072,6 +1085,15 @@ export default function App() {
         )}
         {tab === 'scans' && (
           <ScansView selectedProject={selectedProject} accent={acc} />
+        )}
+        {tab === 'jobs' && (
+          <JobsView
+            selectedProject={selectedProject}
+            accent={acc}
+            jobs={jobs.filter(j => j.pid === selectedProject)}
+            onJobUpdate={j => setJobs(prev => prev.map(x => x.id === j.id ? j : x))}
+            onJobDelete={id => setJobs(prev => prev.filter(x => x.id !== id))}
+          />
         )}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}

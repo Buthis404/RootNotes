@@ -9,6 +9,7 @@ from .. import models, schemas
 from ..core.access import check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
+from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
 from ..core.utils import new_id
 from ..database import get_db
@@ -189,6 +190,8 @@ async def execute_attacker_command(
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     title = body.snippet_title.strip() or (body.command.strip().splitlines()[0][:80] if body.command.strip() else "Remote command")
 
+    exec_username = getattr(request.state, "username", None)
+
     # Create activity record with status "running" before the SSH call
     activity = models.HostActivity(
         id=new_id("ha"),
@@ -203,10 +206,13 @@ async def execute_attacker_command(
         ts=ts,
     )
     db.add(activity)
-    log_event(db, pid, getattr(request.state, "username", None), "host_activity", "create", f"Attacker exec: {title}", {"host_id": attacker_host.id, "type": activity.activity_type})
+    log_event(db, pid, exec_username, "host_activity", "create", f"Attacker exec: {title}", {"host_id": attacker_host.id, "type": activity.activity_type})
     db.commit()
     db.refresh(activity)
-    activity_id = activity.id
+
+    job = start_job(db, pid, "exec", title,
+                    target=attacker_host.ip or attacker_host.hostname or "",
+                    command=body.command, created_by=exec_username or "")
 
     # Run SSH in thread pool to avoid blocking the event loop
     loop = asyncio.get_event_loop()
@@ -219,20 +225,30 @@ async def execute_attacker_command(
         activity.status = "failed"
         activity.output = str(e)
         db.commit()
+        finish_job(db, job, status="failed", error_output=str(e))
         raise HTTPException(400, str(e))
 
+    combined_output = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
+
     # Update activity with result
-    activity.output = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
+    activity.output = combined_output
     activity.status = "done" if result.get("ok") else "failed"
     activity.summary = f"Executed via attacker SSH ({'project cred' if resolved_cred else 'global config'})"
     db.commit()
     db.refresh(activity)
+
+    finish_job(db, job,
+               status="done" if result.get("ok") else "failed",
+               output=result.get("stdout", "")[:20000],
+               error_output=result.get("stderr", ""),
+               result={"exit_code": result.get("exit_code", -1)})
 
     payload = schemas.HostActivity.model_validate(activity).model_dump()
     bcast(pid, "host_activity", "update", payload)
 
     return {
         "ok": result.get("ok", False),
+        "job_id": job.id,
         "exit_code": result.get("exit_code", -1),
         "stdout": result.get("stdout", ""),
         "stderr": result.get("stderr", ""),

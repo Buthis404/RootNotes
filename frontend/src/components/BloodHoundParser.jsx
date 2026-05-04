@@ -520,7 +520,7 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
       }));
       setProgress({ phase: 0, cur: 0, total: importOptions.hosts ? hostPayload.length : 1 });
       if (importOptions.hosts && hostPayload.length) {
-        await api.batchImport(pid, { hosts: hostPayload, creds: [] });
+        await api.batchImport(pid, { hosts: hostPayload, creds: [], source: 'bloodhound' });
         setProgress({ phase: 0, cur: hostPayload.length, total: hostPayload.length });
       } else {
         setProgress({ phase: 0, cur: 1, total: 1 });

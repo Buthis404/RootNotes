@@ -17,6 +17,7 @@ from .. import models, schemas
 from ..core.access import check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
+from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
 from ..core.utils import new_id
 from ..database import get_db
@@ -148,7 +149,9 @@ async def run_nmap_scan(
     if not target:
         raise HTTPException(400, "target is required")
 
+    username = getattr(request.state, "username", None)
     cmd = f"nmap {body.flags} -oX - {target} 2>/dev/null"
+    job = start_job(db, pid, "nmap", f"Nmap: {target}", target=target, command=cmd, created_by=username or "")
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -160,7 +163,6 @@ async def run_nmap_scan(
 
     created, updated = 0, 0
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-    username = getattr(request.state, "username", None)
 
     host_list = []
     for h in parsed:
@@ -175,6 +177,8 @@ async def run_nmap_scan(
             if h["os"] and not existing.os:
                 existing.os = h["os"]
             existing.status = "up"
+            if not existing.import_source:
+                existing.import_source = "nmap"
             updated += 1
             host_obj = existing
         else:
@@ -188,6 +192,7 @@ async def run_nmap_scan(
                 ports=h["ports"],
                 services=h["services"],
                 tags=["nmap"],
+                import_source="nmap",
             )
             db.add(host_obj)
             created += 1
@@ -201,8 +206,15 @@ async def run_nmap_scan(
         payload = schemas.Host.model_validate(host_obj).model_dump()
         bcast(pid, "host", "upsert", payload)
 
+    job_status = "done" if result.get("ok") else "failed"
+    finish_job(db, job, status=job_status,
+               output=stdout[:20000] if stdout else "",
+               error_output=result.get("stderr", ""),
+               result={"hosts_found": len(parsed), "hosts_created": created, "hosts_updated": updated})
+
     return {
         "ok": result.get("ok", False),
+        "job_id": job.id,
         "target": target,
         "hosts_found": len(parsed),
         "hosts_created": created,
@@ -276,8 +288,10 @@ async def run_nuclei_scan(
     if not target:
         raise HTTPException(400, "target is required")
 
+    username = getattr(request.state, "username", None)
     tpl_flag = f"-t {body.templates}" if body.templates.strip() else ""
     cmd = f"nuclei -u {target} {tpl_flag} -severity {body.severity} -jsonl {body.extra_flags} 2>/dev/null"
+    job = start_job(db, pid, "nuclei", f"Nuclei: {target}", target=target, command=cmd, created_by=username or "")
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -287,7 +301,6 @@ async def run_nuclei_scan(
     parsed = _parse_nuclei_jsonl(result.get("stdout", ""))
 
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-    username = getattr(request.state, "username", None)
 
     existing_titles = {f.title for f in db.query(models.Finding).filter(models.Finding.pid == pid).all()}
     created_findings = []
@@ -318,8 +331,15 @@ async def run_nuclei_scan(
         payload = schemas.Finding.model_validate(finding).model_dump()
         bcast(pid, "finding", "create", payload)
 
+    job_status = "done" if result.get("ok") else "failed"
+    finish_job(db, job, status=job_status,
+               output=result.get("stdout", "")[:20000],
+               error_output=result.get("stderr", ""),
+               result={"findings_found": len(parsed), "findings_created": len(created_findings)})
+
     return {
         "ok": result.get("ok", False),
+        "job_id": job.id,
         "target": target,
         "findings_found": len(parsed),
         "findings_created": len(created_findings),
@@ -409,6 +429,7 @@ async def run_cme_scan(
     if not target:
         raise HTTPException(400, "target is required")
 
+    username = getattr(request.state, "username", None)
     auth = ""
     if body.hash:
         auth = f"-u '{body.username or ''}' -H '{body.hash}'"
@@ -419,6 +440,7 @@ async def run_cme_scan(
 
     domain = f"-d {body.domain}" if body.domain else ""
     cmd = f"nxc {body.protocol} {target} {auth} {domain} {body.extra_flags} 2>/dev/null"
+    job = start_job(db, pid, "cme", f"NetExec ({body.protocol}): {target}", target=target, command=cmd, created_by=username or "")
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -428,7 +450,6 @@ async def run_cme_scan(
     parsed = _parse_cme_output(result.get("stdout", "") + result.get("stderr", ""))
 
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-    username = getattr(request.state, "username", None)
 
     created_hosts, created_creds = 0, 0
     host_objects = []
@@ -444,6 +465,8 @@ async def run_cme_scan(
                 existing.hostname = h["hostname"]
             existing.ports = list(set((existing.ports or []) + h["ports"]))
             existing.services = list(set((existing.services or []) + h["services"]))
+            if not existing.import_source:
+                existing.import_source = "netexec"
             host_objects.append(existing)
         else:
             hobj = models.Host(
@@ -452,6 +475,7 @@ async def run_cme_scan(
                 os="Windows", status="up",
                 ports=h["ports"], services=h["services"],
                 tags=["cme"],
+                import_source="netexec",
             )
             db.add(hobj)
             created_hosts += 1
@@ -487,8 +511,16 @@ async def run_cme_scan(
         db.refresh(obj)
         bcast(pid, "cred", "create", schemas.Cred.model_validate(obj).model_dump())
 
+    job_status = "done" if result.get("ok") else "failed"
+    finish_job(db, job, status=job_status,
+               output=result.get("stdout", "")[:20000],
+               error_output=result.get("stderr", ""),
+               result={"hosts_found": len(parsed["hosts"]), "hosts_created": created_hosts,
+                       "creds_found": len(parsed["creds"]), "creds_created": created_creds})
+
     return {
         "ok": result.get("ok", False),
+        "job_id": job.id,
         "target": target,
         "hosts_found": len(parsed["hosts"]),
         "hosts_created": created_hosts,

@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 import Icon from '../components/Icon.jsx';
 import { HostStatusBadge, SearchBar, FieldInput, Badge, TagEditor } from '../components/UI.jsx';
 import { NODE_STATUS, OS_ICONS, PORT_SERVICES, serviceColor } from '../constants.js';
@@ -7,6 +7,157 @@ import BloodHoundParser from '../components/BloodHoundParser.jsx';
 import { api } from '../api.js';
 import { getCredBadges, getHostBadges, summarizeCreds, HOST_ROLES, normalizeDomain } from '../utils/hostMeta.js';
 import { useColumnResize } from '../hooks/useColumnResize.js';
+
+const BULK_TEMPLATES = {
+  nmap:    { label: 'Nmap quick',  cmd: 'nmap -sV -sC -T4 {target}',       type: 'nmap',  activity: 'recon' },
+  nmap_f:  { label: 'Nmap full',   cmd: 'nmap -p- -T4 --open {target}',    type: 'nmap',  activity: 'recon' },
+  cme:     { label: 'NetExec SMB', cmd: 'netexec smb {target}',            type: 'cme',   activity: 'recon' },
+  cme_all: { label: 'NetExec ALL', cmd: 'netexec all {target}',            type: 'cme',   activity: 'recon' },
+  exec:    { label: 'Custom',      cmd: '',                                 type: 'exec',  activity: 'postex' },
+};
+
+function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) {
+  const [moduleOk, setModuleOk] = useState(null);
+  const [attackerTargets, setAttackerTargets] = useState(null); // { project_hosts, global_targets }
+  const [selectedAttacker, setSelectedAttacker] = useState('');  // 'project:{id}' | 'global:{id}'
+  const [templateKey, setTemplateKey] = useState('nmap');
+  const [command, setCommand] = useState(BULK_TEMPLATES.nmap.cmd);
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState(null);
+  const [timeoutSec, setTimeoutSec] = useState(60);
+
+  useEffect(() => {
+    api.listModules().then(({ modules }) => {
+      const m = (modules || []).find(m => m.name === 'attacker_ssh');
+      setModuleOk(m ? m.enabled !== false : false);
+    }).catch(() => setModuleOk(false));
+
+    api.listAttackerExecutionTargets(selectedProject).then(data => {
+      setAttackerTargets(data);
+      // Auto-select first available
+      if (data.project_hosts?.length > 0) {
+        setSelectedAttacker(`project:${data.project_hosts[0].id}`);
+      } else if (data.global_targets?.length > 0) {
+        setSelectedAttacker(`global:${data.global_targets[0].id}`);
+      }
+    }).catch(() => {});
+  }, [selectedProject]);
+
+  const pickTemplate = (key) => {
+    setTemplateKey(key);
+    if (BULK_TEMPLATES[key].cmd) setCommand(BULK_TEMPLATES[key].cmd);
+  };
+
+  const run = async () => {
+    if (!command.trim()) return;
+    setRunning(true);
+    setResults(null);
+    try {
+      const tpl = BULK_TEMPLATES[templateKey] || BULK_TEMPLATES.exec;
+      const [kind, id] = selectedAttacker.split(':');
+      const res = await api.bulkExec(selectedProject, {
+        host_ids: selectedIds,
+        command_template: command,
+        scan_type: tpl.type,
+        activity_type: tpl.activity,
+        timeout_seconds: timeoutSec,
+        attacker_host_id: kind === 'project' ? id : null,
+        attacker_target_id: kind === 'global' ? id : null,
+      });
+      setResults(res.results || []);
+    } catch (e) {
+      setResults([{ error: e.message || 'Request failed', ok: false }]);
+    }
+    setRunning(false);
+  };
+
+  const selectedHosts = hosts.filter(h => selectedIds.includes(h.id));
+  const acc = accent || '#5b8af5';
+  const allTargets = [
+    ...(attackerTargets?.project_hosts || []).map(h => ({ value: `project:${h.id}`, label: `${h.name || h.host} (project)` })),
+    ...(attackerTargets?.global_targets || []).map(t => ({ value: `global:${t.id}`, label: `${t.name || t.host} (global)` })),
+  ];
+  const noTargets = attackerTargets !== null && allTargets.length === 0;
+
+  return (
+    <div style={{ padding: '14px 18px', borderBottom: '1px solid #1a1c22', background: '#0a0c10', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>Bulk Run</span>
+        <span style={{ fontSize: 11, color: '#606570' }}>→ {selectedIds.length} hosts</span>
+        {moduleOk === false && (
+          <span style={{ fontSize: 10, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a44', borderRadius: 4, padding: '2px 8px', fontFamily: 'JetBrains Mono' }}>
+            ⚠ Attacker SSH module is disabled
+          </span>
+        )}
+        {noTargets && moduleOk && (
+          <span style={{ fontSize: 10, color: '#cc2233', background: '#cc223318', border: '1px solid #cc223344', borderRadius: 4, padding: '2px 8px', fontFamily: 'JetBrains Mono' }}>
+            No attacker hosts configured
+          </span>
+        )}
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', color: '#606570', display: 'flex' }}>
+          <Icon name="close" size={12} color="currentColor" />
+        </button>
+      </div>
+
+      {/* Attacker host selector */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>Run from:</span>
+        <select
+          value={selectedAttacker}
+          onChange={e => setSelectedAttacker(e.target.value)}
+          style={{ flex: 1, background: '#0e1016', border: `1px solid ${acc}44`, borderRadius: 4, padding: '5px 8px', color: '#c8cfe0', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none' }}
+        >
+          {allTargets.length === 0 && <option value="">— no attacker hosts available —</option>}
+          {allTargets.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </select>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        {Object.entries(BULK_TEMPLATES).map(([key, tpl]) => (
+          <button key={key} onClick={() => pickTemplate(key)}
+            style={{ background: templateKey === key ? `${acc}22` : '#13161f', border: `1px solid ${templateKey === key ? acc + '66' : '#1e2230'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: templateKey === key ? acc : '#606570', fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>
+            {tpl.label}
+          </button>
+        ))}
+        <input
+          type="number" min={5} max={300} value={timeoutSec}
+          onChange={e => setTimeoutSec(Number(e.target.value))}
+          style={{ width: 60, background: '#13161f', border: '1px solid #1e2230', borderRadius: 4, padding: '3px 8px', color: '#9098a8', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none' }}
+          title="Timeout (seconds)"
+        />
+        <span style={{ fontSize: 10, color: '#404550' }}>sec</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          value={command} onChange={e => setCommand(e.target.value)}
+          placeholder="nmap -sV {target} — use {target} for host IP"
+          style={{ flex: 1, background: '#0e1016', border: `1px solid ${acc}44`, borderRadius: 4, padding: '6px 10px', color: '#c8cfe0', fontSize: 12, outline: 'none', fontFamily: 'JetBrains Mono' }}
+        />
+        <button onClick={run} disabled={running || !moduleOk || !command.trim() || !selectedAttacker || noTargets}
+          style={{ background: (moduleOk && command.trim() && selectedAttacker && !noTargets) ? acc : '#1e2230', border: 'none', borderRadius: 4, padding: '6px 16px', cursor: 'pointer', color: '#fff', fontSize: 12, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: running ? 0.7 : 1 }}>
+          {running ? 'Running…' : `Run on ${selectedIds.length} hosts`}
+        </button>
+      </div>
+
+      <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>
+        Targets: {selectedHosts.slice(0, 6).map(h => h.ip || h.hostname).join(', ')}{selectedHosts.length > 6 ? ` +${selectedHosts.length - 6} more` : ''}
+      </div>
+
+      {results && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 200, overflowY: 'auto' }}>
+          {results.map((r, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', background: r.ok ? '#39d35310' : r.error ? '#f09a3a10' : '#cc223310', border: `1px solid ${r.ok ? '#39d35333' : r.error ? '#f09a3a33' : '#cc223333'}`, borderRadius: 4 }}>
+              <span style={{ fontSize: 10, color: r.ok ? '#39d353' : '#cc2233', fontFamily: 'JetBrains Mono', minWidth: 16 }}>{r.ok ? '✓' : '✗'}</span>
+              <span style={{ fontSize: 10, color: '#9098a8', fontFamily: 'JetBrains Mono', flex: 1 }}>{r.ip || r.error || '?'}</span>
+              {r.exit_code !== undefined && <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>exit {r.exit_code}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const ACCESS_ROLES = [
   { id: 'local_admin', label: 'LA', title: 'Local Admin' },
@@ -129,6 +280,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
   const [newHost, setNewHost] = useState({ ip: '', hostname: '', os: 'Linux', status: 'unknown', ports: '', services: '', tags: '', notes: '' });
   const [selectedIds, setSelectedIds] = useState([]);
   const [showBulkEdit, setShowBulkEdit] = useState(false);
+  const [showBulkRun, setShowBulkRun] = useState(false);
   const [filterTag, setFilterTag] = useState(null);
   const [bulkOs, setBulkOs] = useState('');
   const [bulkStatus, setBulkStatus] = useState('');
@@ -251,7 +403,8 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
           <span style={{ fontSize: Math.max(10, fs - 2), color: '#404550', marginLeft: 10 }}>{filtered.length} of {projectHosts.length}</span>
           {selectedIds.length > 0 && <span style={{ fontSize: Math.max(10, fs - 2), color: accent, marginLeft: 10, fontWeight: 600 }}>({selectedIds.length} selected)</span>}
         </div>
-        {selectedIds.length > 0 && <button onClick={() => setShowBulkEdit(v => !v)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#fff', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}><Icon name="terminal" size={10} color="#fff" /> Bulk edit</button>}
+        {selectedIds.length > 0 && <button onClick={() => { setShowBulkRun(v => !v); setShowBulkEdit(false); }} style={{ background: '#39d35322', border: '1px solid #39d35344', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#39d353', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}><Icon name="terminal" size={10} color="currentColor" /> Bulk Run</button>}
+        {selectedIds.length > 0 && <button onClick={() => { setShowBulkEdit(v => !v); setShowBulkRun(false); }} style={{ background: accent, border: 'none', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#fff', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}><Icon name="terminal" size={10} color="#fff" /> Bulk edit</button>}
         {selectedIds.length > 0 && <button onClick={async () => {
           if (!window.confirm(`Delete ${selectedIds.length} selected host(s)?`)) return;
           for (const id of selectedIds) await onDelete(id);
@@ -289,6 +442,16 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
           <button onClick={addHost} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#fff', fontSize: Math.max(11, fs - 2), fontWeight: 600, fontFamily: 'JetBrains Mono', alignSelf: 'flex-end' }}>Save</button>
           <button onClick={() => setShowAdd(false)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#606570', fontSize: Math.max(11, fs - 2), fontFamily: 'JetBrains Mono', alignSelf: 'flex-end' }}>Cancel</button>
         </div>
+      )}
+
+      {showBulkRun && selectedIds.length > 0 && (
+        <BulkRunPanel
+          selectedIds={selectedIds}
+          hosts={hosts}
+          selectedProject={selectedProject}
+          accent={accent}
+          onClose={() => setShowBulkRun(false)}
+        />
       )}
 
       {showBulkEdit && selectedIds.length > 0 && (
@@ -402,6 +565,11 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
                 </div>
                 <div style={{ width: widths.tags, display: 'flex', gap: 3, overflow: 'hidden', alignItems: 'center', flexWrap: 'nowrap', minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
                   {intelBadges.slice(0, 2).map(b => <span key={b.label} style={{ fontSize: Math.max(9, fs - 4), color: b.color, background: `${b.color}18`, border: `1px solid ${b.color}44`, borderRadius: 3, padding: '1px 5px', whiteSpace: 'nowrap' }}>{b.label}</span>)}
+                  {host.import_source && (() => {
+                    const srcColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', cs: '#f44336', sliver: '#8bc34a', nmap: '#4caf50', bloodhound: '#c07af0', bh: '#c07af0' };
+                    const c = srcColors[host.import_source] || '#f09a3a';
+                    return <span title={`Imported from: ${host.import_source}`} style={{ fontSize: Math.max(9, fs - 4), color: c, background: `${c}18`, border: `1px solid ${c}44`, borderRadius: 3, padding: '1px 5px', whiteSpace: 'nowrap', fontFamily: 'JetBrains Mono' }}>{host.import_source}</span>;
+                  })()}
                 </div>
                 <button onClick={e => { e.stopPropagation(); onDelete(host.id); setSelected(null); }} style={{ width: 28, background: 'none', border: 'none', cursor: 'pointer', color: '#303540', display: 'flex', justifyContent: 'center' }}><Icon name="trash" size={12} color="currentColor" /></button>
               </div>
@@ -638,7 +806,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
         onClose={() => setShowNmap(false)}
         onImport={async (parsedHosts) => {
           const payload = parsedHosts.map(h => ({ ...h, pid: selectedProject, ips: [], tags: [], notes: '' }));
-          return api.batchImport(selectedProject, { hosts: payload, creds: [] });
+          return api.batchImport(selectedProject, { hosts: payload, creds: [], source: 'nmap' });
         }}
       />
     )}

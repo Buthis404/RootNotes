@@ -134,6 +134,7 @@ class HostBase(BaseModel):
     domain: str = ""
     role: str = "unknown"
     is_attacker: bool = False
+    import_source: str = ""
 
 
 class HostCreate(HostBase):

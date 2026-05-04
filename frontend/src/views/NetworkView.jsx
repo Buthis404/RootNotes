@@ -548,11 +548,12 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
   );
 }
 
-function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks }) {
+function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData }) {
   const HISTORY_LIMIT = 50;
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [connecting, setConnecting] = useState(null);
+  const [showOverlay, setShowOverlay] = useState(false);
   const [pan, setPan] = useState({ x: 40, y: 40 });
   const [zoom, setZoom] = useState(1);
   const [draggingNode, setDraggingNode] = useState(null);
@@ -682,6 +683,87 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
 
   const selectedNodeSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const selectedNode = useMemo(() => selectedNodeIds.length === 1 ? nodeById.get(selectedNodeIds[0]) ?? null : null, [selectedNodeIds, nodeById]);
+
+  const attackPathSet = useMemo(() => {
+    if (!showOverlay || selectedNodeIds.length === 0) return null;
+
+    // Use ALL nodes/edges so path through off-screen nodes works
+    const adj = new Map();
+    for (const e of edges) {
+      if (!adj.has(e.from)) adj.set(e.from, []);
+      if (!adj.has(e.to)) adj.set(e.to, []);
+      adj.get(e.from).push({ node: e.to, eid: e.id });
+      adj.get(e.to).push({ node: e.from, eid: e.id });
+    }
+
+    // BFS shortest path from a set of starts to a single target; returns path nodes+edges or null
+    const bfsPath = (startSet, targetId) => {
+      if (startSet.has(targetId)) return { pathNodes: new Set([targetId]), pathEdges: new Set() };
+      const parent = new Map();
+      for (const id of startSet) parent.set(id, null);
+      const queue = [...startSet];
+      while (queue.length) {
+        const cur = queue.shift();
+        for (const { node, eid } of (adj.get(cur) || [])) {
+          if (!parent.has(node)) {
+            parent.set(node, { from: cur, eid });
+            if (node === targetId) {
+              const pathNodes = new Set();
+              const pathEdges = new Set();
+              let n = node;
+              while (n != null) {
+                pathNodes.add(n);
+                const p = parent.get(n);
+                if (p) { pathEdges.add(p.eid); n = p.from; } else break;
+              }
+              return { pathNodes, pathEdges };
+            }
+            queue.push(node);
+          }
+        }
+      }
+      return null;
+    };
+
+    const attackerNodeIds = new Set(
+      nodes
+        .filter(n => {
+          const h = (hosts || []).find(x => x.id === n.host_id || (n.ip && x.ip === n.ip));
+          return h && isAttackerHost(h);
+        })
+        .map(n => n.id)
+    );
+
+    const pathNodes = new Set(selectedNodeSet);
+    const pathEdges = new Set();
+
+    if (attackerNodeIds.size > 0) {
+      for (const targetId of selectedNodeIds) {
+        const result = bfsPath(attackerNodeIds, targetId);
+        if (result) {
+          for (const n of result.pathNodes) pathNodes.add(n);
+          for (const e of result.pathEdges) pathEdges.add(e);
+          for (const id of attackerNodeIds) pathNodes.add(id);
+        } else {
+          // No path to this target — show its direct neighbours
+          for (const { node, eid } of (adj.get(targetId) || [])) {
+            pathNodes.add(node);
+            pathEdges.add(eid);
+          }
+        }
+      }
+    } else {
+      // No attacker on map — selected + direct neighbours
+      for (const id of selectedNodeSet) {
+        for (const { node, eid } of (adj.get(id) || [])) {
+          pathNodes.add(node);
+          pathEdges.add(eid);
+        }
+      }
+    }
+
+    return { nodes: pathNodes, edges: pathEdges };
+  }, [showOverlay, selectedNodeIds, selectedNodeSet, nodes, edges, hosts]);
   const selectedRegion = regions.find(r => r.id === selectedRegionId) || null;
   const hostObj = useMemo(() => {
     if (!selectedNode) return null;
@@ -1199,6 +1281,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
         <div style={{ width: 1, height: 16, background: '#2a2d35' }} />
         {unplaced.length > 0 && <button onClick={() => setShowAddFromProject(v => !v)} style={{ background: 'none', border: `1px solid ${accent}66`, borderRadius: 4, padding: '4px 10px', color: accent, cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>+ from project ({unplaced.length})</button>}
         <button onClick={() => setShowAttackAnalyzer(true)} style={{ background: 'none', border: '1px solid #cc223366', borderRadius: 4, padding: '4px 10px', color: '#cc2233', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>⚡ Attack paths</button>
+        {overlayData && <button onClick={() => setShowOverlay(v => !v)} style={{ background: showOverlay ? '#f09a3a22' : 'none', border: `1px solid ${showOverlay ? '#f09a3a88' : '#2a2d3566'}`, borderRadius: 4, padding: '4px 10px', color: showOverlay ? '#f09a3a' : '#606570', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }} title="Toggle threat overlay">🔍 Overlay</button>}
         <button onClick={addRegion} style={{ background: 'none', border: `1px solid ${accentGreen}66`, borderRadius: 4, padding: '4px 10px', color: accentGreen, cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Region</button>
         <button onClick={() => setShowCreateNode(v => !v)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '4px 10px', color: '#fff', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Node</button>
         {selectedNodeIds.length > 0 && <><button onClick={() => setConnecting(selectedNodeIds[0])} title={selectedNodeIds.length > 1 ? `Create edges from ${selectedNodeIds.length} nodes` : 'Create edge'} style={{ background: connecting ? `${accentGreen}22` : 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: connecting ? accentGreen : '#606570', cursor: 'pointer' }}><Icon name="link" size={12} color="currentColor" />{selectedNodeIds.length > 1 && <span style={{ fontSize: 9, marginLeft: 4, fontFamily: 'JetBrains Mono' }}>×{selectedNodeIds.length}</span>}</button><button onClick={deleteSelected} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#cc2233', cursor: 'pointer' }}><Icon name="trash" size={12} color="currentColor" /></button></>}
@@ -1255,16 +1338,24 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                 const mx = (fn.x + tn.x) / 2;
                 const my = (fn.y + tn.y) / 2;
                 const edgeLabel = String(edge.label || '').trim();
-                return <g key={edge.id}><line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke={ep.stroke} strokeWidth={ep.sw} strokeDasharray={animateLinks ? (ep.dash === 'none' ? undefined : ep.dash) : undefined} markerEnd={markerFor(edge.style)} opacity=".9" style={animateEdges && ep.anim ? { animation: 'dash 1.5s linear infinite' } : undefined} />{edgeLabel && !simplifiedNodes && <><rect x={mx - edgeLabel.length * 3 - 4} y={my - 8} width={edgeLabel.length * 6 + 8} height={14} rx="3" fill="#0e1016" stroke={ep.stroke} strokeWidth="0.5" opacity=".95" /><text x={mx} y={my + 3} textAnchor="middle" fontSize="9" fill={ep.stroke} fontFamily="JetBrains Mono">{edgeLabel}</text></>}<line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke="transparent" strokeWidth={14} style={{ cursor: 'default' }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setEdgeMenu({ x: e.clientX, y: e.clientY, edgeId: edge.id }); }} /></g>;
+                const edgeDimmed = attackPathSet ? !attackPathSet.edges.has(edge.id) : false;
+                return <g key={edge.id} style={{ opacity: edgeDimmed ? 0.08 : 1, transition: 'opacity .2s' }}><line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke={ep.stroke} strokeWidth={ep.sw} strokeDasharray={animateLinks ? (ep.dash === 'none' ? undefined : ep.dash) : undefined} markerEnd={markerFor(edge.style)} opacity=".9" style={animateEdges && ep.anim ? { animation: 'dash 1.5s linear infinite' } : undefined} />{edgeLabel && !simplifiedNodes && <><rect x={mx - edgeLabel.length * 3 - 4} y={my - 8} width={edgeLabel.length * 6 + 8} height={14} rx="3" fill="#0e1016" stroke={ep.stroke} strokeWidth="0.5" opacity=".95" /><text x={mx} y={my + 3} textAnchor="middle" fontSize="9" fill={ep.stroke} fontFamily="JetBrains Mono">{edgeLabel}</text></>}<line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke="transparent" strokeWidth={14} style={{ cursor: 'default' }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setEdgeMenu({ x: e.clientX, y: e.clientY, edgeId: edge.id }); }} /></g>;
               })}
               {visibleNodes.map(node => {
                 const sc = NODE_STATUS[node.status]?.color || '#404550';
                 const isSel = selectedNodeSet.has(node.id);
+                const isDimmed = attackPathSet ? !attackPathSet.nodes.has(node.id) : false;
                 const displayIps = node.ips && node.ips.length > 0 ? node.ips : (node.ip ? [node.ip] : []);
-                return <g key={node.id} className={`map-node${isSel ? ' map-node-sel' : ''}`} transform={`translate(${node.x - 20},${node.y - 20})`} onMouseDown={(e) => onNodeMouseDown(e, node.id)} style={{ '--sc': sc, cursor: 'pointer', userSelect: 'none' }}>
+                const overlayEntry = showOverlay && overlayData ? (
+                  overlayData.get(node.host_id) || overlayData.get(node.ip) || null
+                ) : null;
+                return <g key={node.id} className={`map-node${isSel ? ' map-node-sel' : ''}`} transform={`translate(${node.x - 20},${node.y - 20})`} onMouseDown={(e) => onNodeMouseDown(e, node.id)} style={{ '--sc': sc, cursor: 'pointer', userSelect: 'none', opacity: isDimmed ? 0.15 : 1, filter: isDimmed ? 'grayscale(0.7)' : undefined, transition: 'opacity .2s, filter .2s' }}>
                   {isSel && <rect x="-5" y="-5" width="50" height="50" rx="10" fill={`${accent}18`} stroke={accent} strokeWidth="1.5" />}
+                  {overlayEntry && isSel && <rect x="-5" y="-5" width="50" height="50" rx="10" fill={`${overlayEntry.color}33`} stroke={overlayEntry.color} strokeWidth="3" />}
+                  {overlayEntry && !isSel && <rect x="-5" y="-5" width="50" height="50" rx="10" fill={`${overlayEntry.color}22`} stroke={overlayEntry.color} strokeWidth="2" strokeDasharray="4 2" opacity=".9" />}
                   <rect className="node-hov" x="-3" y="-3" width="46" height="46" rx="9" fill="#ffffff08" stroke="var(--sc)" strokeWidth="1" style={{ pointerEvents: 'none' }} />
                   <NodeShape type={node.type} status={node.status} size={40} selected={isSel} accent={accent} />
+                  {overlayEntry && <circle cx="4" cy="4" r="5" fill={overlayEntry.color} opacity=".95" style={{ filter: `drop-shadow(0 0 4px ${overlayEntry.color})` }} />}
                   <circle cx="36" cy="4" r="4" fill={sc} opacity=".9" style={{ filter: `drop-shadow(0 0 3px ${sc})` }} />
                   {(!simplifiedNodes || isSel) && <text x="20" y="53" textAnchor="middle" fontSize="10" fill={isSel ? '#f0f2f6' : '#9098a8'} fontFamily="JetBrains Mono" fontWeight={isSel ? 600 : 400}>{node.label}</text>}
                   {!simplifiedNodes && displayIps.map((ip, idx) => (
@@ -1381,7 +1472,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
   );
 }
 
-export default function NetworkView({ projectId, accent, accentGreen, networks, onCreateNetwork, onUpdateNetwork, onDeleteNetwork, onCreateHost, onUpdateHost, onSyncHostByIp, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, onRefreshHosts, onRefreshNetworks, markLocalOp, animateLinks = true }) {
+export default function NetworkView({ projectId, accent, accentGreen, networks, onCreateNetwork, onUpdateNetwork, onDeleteNetwork, onCreateHost, onUpdateHost, onSyncHostByIp, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, onRefreshHosts, onRefreshNetworks, markLocalOp, animateLinks = true, findings = [], objectives = [], creds = [], attackSteps = [] }) {
   const [activeNetId, setActiveNetId] = useState(null);
   const [editingName, setEditingName] = useState(null);
   const [nameVal, setNameVal] = useState('');
@@ -1411,6 +1502,50 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
 
   const activeNet = networks.find(n => n.id === activeNetId);
   const projectHosts = hosts;
+
+  // Compute overlay map: host_id|ip → { color, label, priority }
+  const overlayData = useMemo(() => {
+    const map = new Map();
+    const set = (key, entry) => {
+      if (!key) return;
+      const existing = map.get(key);
+      if (!existing || entry.priority > existing.priority) map.set(key, entry);
+    };
+
+    // Creds linked to hosts → green (lowest priority)
+    for (const cred of creds) {
+      for (const hid of (cred.host_ids || [])) set(hid, { color: '#39d353', label: 'Has creds', priority: 1 });
+    }
+
+    // Captured objectives on hosts
+    for (const obj of objectives) {
+      if (obj.host_id && (obj.status === 'captured' || obj.status === 'submitted')) {
+        set(obj.host_id, { color: '#f09a3a', label: 'Objective captured', priority: 3 });
+      }
+    }
+
+    // Findings (critical/high) on hosts
+    for (const f of findings) {
+      if (f.host_id) {
+        if (f.severity === 'critical') set(f.host_id, { color: '#e8574a', label: 'Critical finding', priority: 5 });
+        else if (f.severity === 'high') set(f.host_id, { color: '#f09a3a', label: 'High finding', priority: 4 });
+        else if (f.severity === 'medium') set(f.host_id, { color: '#e8cc42', label: 'Medium finding', priority: 2 });
+      }
+    }
+
+    // Attack steps referencing hosts (by label/IP match) — mark as blue
+    for (const step of attackSteps) {
+      if (!step.label) continue;
+      for (const host of projectHosts) {
+        if (step.label === host.ip || step.label === host.hostname || step.sublabel === host.ip) {
+          set(host.id, { color: '#5b8af5', label: 'In attack path', priority: 3 });
+          break;
+        }
+      }
+    }
+
+    return map;
+  }, [creds, objectives, findings, attackSteps, projectHosts]);
 
   const mappedIps = useMemo(
     () => new Set((activeNet?.nodes || []).map(n => n.ip).filter(Boolean)),
@@ -1496,7 +1631,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       )}
 
       {activeNet
-        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} />
+        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} />
         : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 14, color: '#303540' }}>
             <Icon name="network" size={40} color="#2a2d35" />

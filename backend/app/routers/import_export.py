@@ -441,6 +441,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
 class BatchImportBody(BaseModel):
     hosts: List[schemas.HostCreate] = []
     creds: List[schemas.CredCreate] = []
+    source: str = ""  # import_source applied to all new hosts if they don't have one
 
 
 class BatchImportResult(BaseModel):
@@ -508,6 +509,8 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db),
                 existing.status = h_data["status"]
             new_hosts.append(existing)
         else:
+            if body.source and not h_data.get("import_source"):
+                h_data["import_source"] = body.source
             host = models.Host(id=new_id("hst"), **h_data)
             db.add(host)
             existing_by_ip[ip] = host

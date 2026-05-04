@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
 
@@ -371,10 +371,161 @@ function WebhookPanel({ pid, accent }) {
 const C2_TYPES = [
   { id: 'cobalt_strike', label: 'Cobalt Strike', color: '#cc2233', hint: 'Team Server REST API (4.7+). Token: CS Preferences → REST API' },
   { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'REST API (multiplayer mode). Token: sliver-client generate-token' },
-  { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API. Use Bearer token or username/password' },
+  { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API under /endpoint path. Username + password (or token). URL: https://host:port' },
 ];
 
-const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', verify_ssl: false, project_ids: [], enabled: true };
+const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0 };
+
+const SESSION_STATUS = {
+  true:  { color: '#39d353', label: 'Active' },
+  false: { color: '#6a7080', label: 'Dead'   },
+};
+
+function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
+  const [sessions, setSessions] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [markingId, setMarkingId] = useState('');
+
+  const load = useCallback(async () => {
+    if (!pid) return;
+    setLoading(true); setError('');
+    try {
+      const data = await api.getC2LiveSessions(pid);
+      setSessions(data);
+    } catch (e) {
+      setError(e.message || 'Failed to fetch sessions');
+    }
+    setLoading(false);
+  }, [pid]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const markStatus = async (hostId, status) => {
+    if (!hostId) return;
+    setMarkingId(hostId);
+    try {
+      await api.updateHost(hostId, { status });
+      // Refresh sessions to update matched_host_status
+      setSessions(prev => prev ? prev.map(s => s.matched_host_id === hostId ? { ...s, matched_host_status: status } : s) : prev);
+    } catch {}
+    setMarkingId('');
+  };
+
+  const grouped = useMemo(() => {
+    if (!sessions) return {};
+    const map = {};
+    for (const s of sessions) {
+      const key = s.integration_name || s.integration_id;
+      if (!map[key]) map[key] = { name: key, type: s.integration_type, sessions: [], error: null };
+      if (s.error) map[key].error = s.error;
+      else map[key].sessions.push(s);
+    }
+    return map;
+  }, [sessions]);
+
+  const acc = accent || '#5b8af5';
+  const typeColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', sliver: '#8bc34a' };
+
+  return (
+    <div style={{ marginTop: 20, borderTop: '1px solid #1e2230', paddingTop: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: '#e0e4ec' }}>Live Sessions</span>
+        <button onClick={load} disabled={loading}
+          style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+          {loading ? 'Loading...' : 'Refresh'}
+        </button>
+        {sessions && <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>{sessions.filter(s => !s.error).length} agent(s)</span>}
+      </div>
+
+      {error && <div style={{ fontSize: 11, color: '#cc2233', fontFamily: 'JetBrains Mono', marginBottom: 8 }}>{error}</div>}
+
+      {sessions && Object.values(grouped).map(group => (
+        <div key={group.name} style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span style={{ fontSize: 10, color: typeColors[group.type] || '#808590', background: `${typeColors[group.type] || '#808590'}18`, border: `1px solid ${typeColors[group.type] || '#808590'}44`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{group.type}</span>
+            <span style={{ fontSize: 11, color: '#808590' }}>{group.name}</span>
+          </div>
+          {group.error && (
+            <div style={{ fontSize: 10, color: '#cc2233', fontFamily: 'JetBrains Mono', padding: '6px 8px', background: '#1a0508', border: '1px solid #cc223333', borderRadius: 4 }}>{group.error}</div>
+          )}
+          {group.sessions.length === 0 && !group.error && (
+            <div style={{ fontSize: 10, color: '#404550', padding: '6px 0', fontFamily: 'JetBrains Mono' }}>No active agents</div>
+          )}
+          {group.sessions.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #1e2230' }}>
+                  {['', 'Host', 'IP', 'Privilege', 'User', 'OS', 'Process / Listener', 'Last seen', 'Action'].map((h, i) => (
+                    <th key={i} style={{ padding: '4px 8px', color: '#404550', fontWeight: 500, fontSize: 10, textAlign: 'left', fontFamily: 'JetBrains Mono' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {group.sessions.map((s, idx) => {
+                  const stCfg = SESSION_STATUS[String(s.alive)] || SESSION_STATUS.true;
+                  const userStr = [s.username, s.domain].filter(Boolean).join('@') || '—';
+                  const os = [s.os, s.arch].filter(Boolean).join(' ') || '—';
+                  const procListener = [s.process, s.listener].filter(Boolean).join(' / ') || '—';
+                  const tier = s.privilege_tier || 'user';
+                  const privColors = { system: '#cc2233', admin: '#f09a3a', user: '#5b8af5' };
+                  const privColor = privColors[tier] || '#808590';
+                  const suggestedStatus = s.suggested_status || (tier === 'user' ? 'access' : 'pwned');
+                  const actionLabel = suggestedStatus === 'pwned' ? '→ pwned' : '→ access';
+                  const actionColor = suggestedStatus === 'pwned' ? '#cc2233' : '#f09a3a';
+                  const alreadyMarked = s.matched_host_status === suggestedStatus || s.matched_host_status === 'pwned' || s.matched_host_status === 'owned';
+                  return (
+                    <tr key={idx} style={{ borderBottom: '1px solid #14161b', opacity: s.alive ? 1 : 0.4 }}>
+                      <td style={{ padding: '5px 8px' }}>
+                        <span title={s.mark || stCfg.label} style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: stCfg.color }} />
+                      </td>
+                      <td style={{ padding: '5px 8px', color: '#c8cfe0', fontFamily: 'JetBrains Mono' }}>{s.hostname || '—'}</td>
+                      <td style={{ padding: '5px 8px', color: '#808590', fontFamily: 'JetBrains Mono' }}>{s.ip || '—'}</td>
+                      <td style={{ padding: '5px 8px' }}>
+                        <span style={{ fontSize: 9, color: privColor, background: `${privColor}18`, border: `1px solid ${privColor}44`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', fontWeight: 700 }}>
+                          {s.privilege_label || tier}
+                        </span>
+                      </td>
+                      <td style={{ padding: '5px 8px', color: '#c07af0', fontFamily: 'JetBrains Mono', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userStr}</td>
+                      <td style={{ padding: '5px 8px', color: '#606570', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>{os}</td>
+                      <td style={{ padding: '5px 8px', color: '#404550', fontFamily: 'JetBrains Mono', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{procListener}</td>
+                      <td style={{ padding: '5px 8px', color: '#404550', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap', fontSize: 10 }}>{s.last_seen || '—'}</td>
+                      <td style={{ padding: '5px 8px' }}>
+                        {s.matched_host_id ? (
+                          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                            {s.alive && !alreadyMarked && (
+                              <button onClick={() => markStatus(s.matched_host_id, suggestedStatus)} disabled={markingId === s.matched_host_id}
+                                style={{ fontSize: 9, color: actionColor, background: `${actionColor}18`, border: `1px solid ${actionColor}44`, borderRadius: 3, padding: '1px 7px', cursor: 'pointer', fontFamily: 'JetBrains Mono', fontWeight: 600 }}>
+                                {markingId === s.matched_host_id ? '...' : actionLabel}
+                              </button>
+                            )}
+                            {alreadyMarked && (
+                              <span style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>{s.matched_host_status}</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{ fontSize: 9, color: '#353840', fontFamily: 'JetBrains Mono' }}>no match</span>
+                        )}
+                      </td>
+                      <td style={{ padding: '5px 8px' }}>
+                        {s.matched_host_id && onNavigateToHost && (
+                          <button onClick={() => onNavigateToHost(s.matched_host_id)}
+                            style={{ fontSize: 9, color: acc, background: `${acc}18`, border: `1px solid ${acc}44`, borderRadius: 3, padding: '1px 6px', cursor: 'pointer', fontFamily: 'JetBrains Mono' }}>
+                            → host
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function C2Panel({ pid, accent }) {
   const [integrations, setIntegrations] = useState([]);
@@ -404,7 +555,7 @@ function C2Panel({ pid, accent }) {
 
   const setF = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  const openNew = () => { setForm(EMPTY_FORM); setEditing(null); setShowForm(true); };
+  const openNew = () => { setForm({ ...EMPTY_FORM, project_ids: pid ? [pid] : [] }); setEditing(null); setShowForm(true); };
   const openEdit = (cfg) => {
     setForm({ ...cfg, token: '', password: '' });
     setEditing(cfg.id);
@@ -593,18 +744,40 @@ function C2Panel({ pid, accent }) {
           </div>
 
           {form.type === 'adaptix' ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <FieldRow label="Username (or leave blank if using token)">
-                <Input value={form.username} onChange={v => setF('username', v)} placeholder="admin" />
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <FieldRow label="Username">
+                  <Input value={form.username} onChange={v => setF('username', v)} placeholder="operator1" />
+                </FieldRow>
+                <FieldRow label="Password">
+                  <Input value={form.password} onChange={v => setF('password', v)} placeholder="teamserver password" />
+                </FieldRow>
+              </div>
+              <FieldRow label="Endpoint path">
+                <Input value={form.endpoint || '/endpoint'} onChange={v => setF('endpoint', v)} placeholder="/endpoint" monospace />
               </FieldRow>
-              <FieldRow label="Password">
-                <Input value={form.password} onChange={v => setF('password', v)} placeholder="password" />
-              </FieldRow>
-            </div>
+            </>
           ) : null}
 
           <FieldRow label={form.type === 'cobalt_strike' ? 'REST API Token (Bearer)' : 'API Token'}>
             <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing ? '(leave blank to keep existing)' : 'token...'} monospace />
+          </FieldRow>
+
+          <FieldRow label="Auto-sync interval (minutes, 0 = manual only)">
+            <Input value={String(form.sync_interval_minutes ?? 0)} onChange={v => setF('sync_interval_minutes', parseInt(v) || 0)} placeholder="0" monospace />
+          </FieldRow>
+
+          <FieldRow label="Project scope">
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={() => setF('project_ids', pid ? [pid] : [])}
+                style={{ flex: 1, background: (form.project_ids?.length > 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length > 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: (form.project_ids?.length > 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                This project only
+              </button>
+              <button onClick={() => setF('project_ids', [])}
+                style={{ flex: 1, background: (form.project_ids?.length === 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length === 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: (form.project_ids?.length === 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                All projects
+              </button>
+            </div>
           </FieldRow>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
@@ -633,6 +806,11 @@ function C2Panel({ pid, accent }) {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Live Sessions — shown when there are integrations */}
+      {integrations.length > 0 && pid && (
+        <C2SessionsPanel pid={pid} accent={accent} />
       )}
     </div>
   );

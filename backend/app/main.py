@@ -4,6 +4,7 @@ RootNotes — FastAPI application entry point.
 This file assembles the application from domain modules.
 Business logic lives in routers/, core/, and plugins/.
 """
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -92,6 +93,69 @@ with engine.begin() as conn:
     conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_pm_project_user ON project_members(project_id, user_id)"))
     conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_token TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_projects_webhook_token ON projects(webhook_token) WHERE webhook_token <> ''"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            title TEXT NOT NULL DEFAULT '',
+            target TEXT NOT NULL DEFAULT '',
+            command TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '',
+            error_output TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            result_json JSONB NOT NULL DEFAULT '{}'
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_pid ON jobs(pid)"))
+    conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS import_source TEXT NOT NULL DEFAULT ''"))
+
+
+# ── C2 auto-sync background task ─────────────────────────────────────
+async def _c2_auto_sync_loop():
+    """Periodically sync C2 integrations that have sync_interval_minutes > 0."""
+    await asyncio.sleep(30)  # initial delay to let app fully start
+    while True:
+        try:
+            from .routers.c2 import _load_integrations, _CONNECTORS, _C2_SETTING_KEY, _do_project_sync
+            db = SessionLocal()
+            try:
+                integrations = _load_integrations(db)
+                now = datetime.utcnow()
+                for cfg in integrations:
+                    if not cfg.get("enabled"):
+                        continue
+                    interval = int(cfg.get("sync_interval_minutes") or 0)
+                    if interval <= 0:
+                        continue
+                    last_sync = cfg.get("last_sync")
+                    if last_sync:
+                        try:
+                            last_dt = datetime.strptime(last_sync, "%Y-%m-%d %H:%M")
+                            if (now - last_dt).total_seconds() / 60 < interval:
+                                continue
+                        except Exception:
+                            pass
+                    project_ids = cfg.get("project_ids") or []
+                    if not project_ids:
+                        project_ids = [p.id for p in db.query(models.Project).all()]
+                    for pid in project_ids:
+                        try:
+                            await _do_project_sync(cfg, pid, db, iid=cfg.get("id"), created_by="auto-sync")
+                            logger.info("[c2-auto-sync] %s → %s OK", cfg.get("name"), pid)
+                        except Exception as e:
+                            logger.warning("[c2-auto-sync] %s → %s failed: %s", cfg.get("name"), pid, e)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[c2-auto-sync] loop error: %s", e)
+        await asyncio.sleep(60)
 
 
 # ── Lifespan: auto-create admin on first run ──────────────────────────
@@ -161,7 +225,15 @@ async def lifespan(app: FastAPI):
         db.close()
 
     init_plugins(app)
+
+    # Start C2 auto-sync background task
+    task = asyncio.create_task(_c2_auto_sync_loop())
     yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────
@@ -257,7 +329,7 @@ from .routers import (
     activities, attack_paths, loots, scopes,
     cred_host_notes, search, templates, import_export, topology, members,
     system_modules, attacker_exec, export, project_templates,
-    scans, webhooks, c2,
+    scans, webhooks, c2, jobs, bulk_actions,
 )
 
 app.include_router(auth.router)
@@ -289,3 +361,5 @@ app.include_router(project_templates.router)
 app.include_router(scans.router)
 app.include_router(webhooks.router)
 app.include_router(c2.router)
+app.include_router(jobs.router)
+app.include_router(bulk_actions.router)

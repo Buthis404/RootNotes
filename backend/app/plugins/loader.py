@@ -52,6 +52,16 @@ def _register_builtin_modules():
     )
     registry.register(attacker_ssh_module)
 
+    c2_module = BackendModule(
+        name="c2_integration",
+        version="1.0.0",
+        title="C2 Integration",
+        description="Sync sessions, agents and credentials from C2 frameworks (Cobalt Strike, Sliver, Adaptix)",
+        enabled=True,
+        source="builtin",
+    )
+    registry.register(c2_module)
+
 
 def _nmap_parser_placeholder(xml_content: str) -> list[dict]:
     """Placeholder — actual parsing done in topology router."""

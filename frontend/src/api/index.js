@@ -220,4 +220,18 @@ export const api = {
   testC2Integration:     (id)            => req('POST',   `/admin/c2/${id}/test`),
   syncC2ToProject:       (id, pid)       => req('POST',   `/admin/c2/${id}/sync/${pid}`),
   listC2ForProject:      (pid)           => req('GET',    `/admin/c2/for-project/${pid}`),
+  getC2LiveSessions:     (pid)           => req('GET',    `/admin/c2/sessions/${pid}`),
+
+  // Bulk actions
+  bulkExec:      (pid, data)           => req('POST', `/projects/${pid}/bulk-exec`,                data),
+  validateCred:  (pid, credId, data)   => req('POST', `/projects/${pid}/creds/${credId}/validate`, data),
+
+  // Jobs
+  listJobs:   (pid, params = {}) => {
+    const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v]) => v != null))).toString();
+    return req('GET', `/projects/${pid}/jobs${qs ? `?${qs}` : ''}`);
+  },
+  getJob:     (pid, jobId) => req('GET',    `/projects/${pid}/jobs/${jobId}`),
+  deleteJob:  (pid, jobId) => req('DELETE', `/projects/${pid}/jobs/${jobId}`),
+  cancelJob:  (pid, jobId) => req('PATCH',  `/projects/${pid}/jobs/${jobId}/cancel`),
 };

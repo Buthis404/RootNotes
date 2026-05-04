@@ -2,24 +2,65 @@ import { useState, useRef } from 'react';
 import { api } from '../api.js';
 import Icon from './Icon.jsx';
 
-const SEVERITY_COLOR = { new: '#39d353', updated: '#f09a3a', conflict: '#cc2233' };
+const CONF_COLOR = (c) => c >= 0.85 ? '#39d353' : c >= 0.65 ? '#f09a3a' : '#cc2233';
+
+function ConfBadge({ value }) {
+  const pct = Math.round(value * 100);
+  return (
+    <span style={{ fontSize: 9, fontFamily: 'JetBrains Mono', color: CONF_COLOR(value),
+      background: `${CONF_COLOR(value)}18`, border: `1px solid ${CONF_COLOR(value)}44`,
+      borderRadius: 3, padding: '1px 5px', flexShrink: 0 }}>
+      {pct}%
+    </span>
+  );
+}
+
+function ItemRow({ checked, onToggle, children }) {
+  return (
+    <div onClick={onToggle}
+      style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: '#0a0c10',
+        border: `1px solid ${checked ? '#2a2d35' : '#1a1c22'}`, borderRadius: 4,
+        padding: '6px 10px', marginBottom: 4, cursor: 'pointer',
+        opacity: checked ? 1 : 0.45, userSelect: 'none' }}>
+      <span style={{ fontSize: 10, color: checked ? '#39d353' : '#353840', flexShrink: 0, marginTop: 1 }}>
+        {checked ? '☑' : '☐'}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+function SectionHeader({ color, label, count, allChecked, onToggleAll }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
+      <span style={{ fontSize: 10, color, fontWeight: 600, flex: 1 }}>{label} ({count})</span>
+      <button onClick={onToggleAll}
+        style={{ background: 'transparent', border: 'none', cursor: 'pointer',
+          color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '2px 6px' }}>
+        {allChecked ? 'deselect all' : 'select all'}
+      </button>
+    </div>
+  );
+}
 
 export default function TopologyBuilderModal({ projectId, accent, onClose, onApplied }) {
-  const [step, setStep] = useState('select'); // select | preview | applying | done
+  const [step, setStep] = useState('select');
   const [sourceType, setSourceType] = useState('nmap');
   const [file, setFile] = useState(null);
   const [keepManual, setKeepManual] = useState(true);
   const [createLinks, setCreateLinks] = useState(true);
   const [updateExisting, setUpdateExisting] = useState(true);
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.5);
   const [preview, setPreview] = useState(null);
+  const [selectedNewHosts, setSelectedNewHosts] = useState(new Set());
+  const [selectedUpdatedHosts, setSelectedUpdatedHosts] = useState(new Set());
+  const [selectedLinks, setSelectedLinks] = useState(new Set());
   const [error, setError] = useState('');
   const [applying, setApplying] = useState(false);
   const fileRef = useRef();
 
-  const handleFileChange = (e) => {
-    setFile(e.target.files?.[0] || null);
-    setError('');
-  };
+  const handleFileChange = (e) => { setFile(e.target.files?.[0] || null); setError(''); };
 
   const handlePreview = async () => {
     if (!file) { setError('Select a scan file first'); return; }
@@ -32,8 +73,12 @@ export default function TopologyBuilderModal({ projectId, accent, onClose, onApp
       form.append('keep_manual_positions', keepManual ? 'true' : 'false');
       form.append('create_links', createLinks ? 'true' : 'false');
       form.append('update_existing_hosts', updateExisting ? 'true' : 'false');
+      form.append('confidence_threshold', String(confidenceThreshold));
       const result = await api.topologyPreview(projectId, form);
       setPreview(result);
+      setSelectedNewHosts(new Set(result.new_hosts.map(h => h.ip)));
+      setSelectedUpdatedHosts(new Set(result.updated_hosts.map(h => h.ip)));
+      setSelectedLinks(new Set(result.new_links.map((_, i) => i)));
     } catch (e) {
       setError(e.message);
       setStep('select');
@@ -45,14 +90,20 @@ export default function TopologyBuilderModal({ projectId, accent, onClose, onApp
     setApplying(true);
     setError('');
     try {
+      const filteredPreview = {
+        ...preview,
+        new_hosts: preview.new_hosts.filter(h => selectedNewHosts.has(h.ip)),
+        updated_hosts: preview.updated_hosts.filter(h => selectedUpdatedHosts.has(h.ip)),
+        new_links: preview.new_links.filter((_, i) => selectedLinks.has(i)),
+      };
       await api.topologyApply(projectId, {
-        preview,
+        preview: filteredPreview,
         options: {
           keep_manual_positions: keepManual,
           create_missing_networks: true,
           create_links: createLinks,
           update_existing_hosts: updateExisting,
-          confidence_threshold: 0.5,
+          confidence_threshold: confidenceThreshold,
           source_type: sourceType,
         },
       });
@@ -74,15 +125,27 @@ export default function TopologyBuilderModal({ projectId, accent, onClose, onApp
     }
   };
 
+  const toggleSet = (set, setter, key) => {
+    setter(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
+
   const inputStyle = { background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none', width: '100%' };
   const btnStyle = (color) => ({ background: color, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 });
   const ghostBtn = { background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 14px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' };
   const checkRow = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, cursor: 'pointer', fontSize: 11, color: '#808590' };
 
+  const selectedCount = (preview
+    ? selectedNewHosts.size + selectedUpdatedHosts.size
+    : 0);
+
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: '#000000bb', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
       onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 10, width: 560, maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #00000099' }}>
+      <div style={{ background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 10, width: 600, maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #00000099' }}>
 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid #1e2029' }}>
@@ -128,6 +191,23 @@ export default function TopologyBuilderModal({ projectId, accent, onClose, onApp
                     {label}
                   </label>
                 ))}
+
+                {createLinks && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                      <span style={{ fontSize: 10, color: '#606570' }}>Min confidence</span>
+                      <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: CONF_COLOR(confidenceThreshold) }}>
+                        {Math.round(confidenceThreshold * 100)}%
+                      </span>
+                    </div>
+                    <input type="range" min="0" max="1" step="0.05" value={confidenceThreshold}
+                      onChange={e => setConfidenceThreshold(parseFloat(e.target.value))}
+                      style={{ width: '100%', accentColor: accent }} />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#353840', fontFamily: 'JetBrains Mono' }}>
+                      <span>0% (all)</span><span>50%</span><span>100% (certain only)</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {error && <div style={{ color: '#cc2233', fontSize: 11, marginBottom: 12 }}>{error}</div>}
@@ -149,54 +229,90 @@ export default function TopologyBuilderModal({ projectId, accent, onClose, onApp
             <div>
               <div style={{ background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 6, padding: '10px 14px', marginBottom: 16, fontSize: 11, color: '#808590' }}>
                 {preview.summary}
+                {selectedCount > 0 && (
+                  <span style={{ marginLeft: 12, color: accent }}>
+                    → {selectedNewHosts.size} new + {selectedUpdatedHosts.size} updated selected
+                  </span>
+                )}
               </div>
 
+              {/* New hosts */}
               {preview.new_hosts.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 10, color: '#39d353', fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#39d353', display: 'inline-block' }} />
-                    New hosts ({preview.new_hosts.length})
-                  </div>
+                  <SectionHeader color="#39d353" label="New hosts" count={preview.new_hosts.length}
+                    allChecked={selectedNewHosts.size === preview.new_hosts.length}
+                    onToggleAll={() => setSelectedNewHosts(
+                      selectedNewHosts.size === preview.new_hosts.length
+                        ? new Set()
+                        : new Set(preview.new_hosts.map(h => h.ip))
+                    )} />
                   {preview.new_hosts.map((h, i) => (
-                    <div key={i} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, padding: '6px 10px', marginBottom: 4, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#c8cdd6' }}>
-                      <span style={{ color: '#39d353' }}>{h.ip}</span>
-                      {h.hostname && <span style={{ color: '#505560' }}> · {h.hostname}</span>}
-                      {h.os && h.os !== 'Unknown' && <span style={{ color: '#404550' }}> · {h.os}</span>}
-                      {h.ports.length > 0 && <span style={{ color: '#404550' }}> · {h.ports.length} ports</span>}
-                    </div>
+                    <ItemRow key={i} checked={selectedNewHosts.has(h.ip)}
+                      onToggle={() => toggleSet(selectedNewHosts, setSelectedNewHosts, h.ip)}>
+                      <div style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#c8cdd6' }}>
+                        <span style={{ color: '#39d353' }}>{h.ip}</span>
+                        {h.hostname && <span style={{ color: '#505560' }}> · {h.hostname}</span>}
+                        {h.os && h.os !== 'Unknown' && <span style={{ color: '#404550' }}> · {h.os}</span>}
+                        {h.ports.length > 0 && <span style={{ color: '#404550' }}> · {h.ports.length} ports</span>}
+                      </div>
+                    </ItemRow>
                   ))}
                 </div>
               )}
 
+              {/* Updated hosts */}
               {preview.updated_hosts.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 10, color: '#f09a3a', fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f09a3a', display: 'inline-block' }} />
-                    Updated hosts ({preview.updated_hosts.length})
-                  </div>
+                  <SectionHeader color="#f09a3a" label="Updated hosts" count={preview.updated_hosts.length}
+                    allChecked={selectedUpdatedHosts.size === preview.updated_hosts.length}
+                    onToggleAll={() => setSelectedUpdatedHosts(
+                      selectedUpdatedHosts.size === preview.updated_hosts.length
+                        ? new Set()
+                        : new Set(preview.updated_hosts.map(h => h.ip))
+                    )} />
                   {preview.updated_hosts.map((h, i) => (
-                    <div key={i} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, padding: '6px 10px', marginBottom: 4, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#c8cdd6' }}>
-                      <span style={{ color: '#f09a3a' }}>{h.ip}</span>
-                      {Object.keys(h.changes).map(k => (
-                        <span key={k} style={{ color: '#606570', marginLeft: 8 }}>+{k}</span>
-                      ))}
-                    </div>
+                    <ItemRow key={i} checked={selectedUpdatedHosts.has(h.ip)}
+                      onToggle={() => toggleSet(selectedUpdatedHosts, setSelectedUpdatedHosts, h.ip)}>
+                      <div style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#c8cdd6' }}>
+                        <span style={{ color: '#f09a3a' }}>{h.ip}</span>
+                        {Object.keys(h.changes).map(k => (
+                          <span key={k} style={{ color: '#606570', marginLeft: 8 }}>+{k}</span>
+                        ))}
+                      </div>
+                    </ItemRow>
                   ))}
                 </div>
               )}
 
+              {/* Links */}
               {preview.new_links.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 10, color: '#5b8af5', fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#5b8af5', display: 'inline-block' }} />
-                    New links ({preview.new_links.length})
-                  </div>
-                  <div style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono' }}>
-                    {preview.new_links.slice(0, 5).map((l, i) => (
-                      <div key={i}>{l.source_ip} ↔ {l.target_ip} <span style={{ color: '#404550' }}>({l.link_type})</span></div>
-                    ))}
-                    {preview.new_links.length > 5 && <div style={{ color: '#404550' }}>+{preview.new_links.length - 5} more…</div>}
-                  </div>
+                  <SectionHeader color="#5b8af5" label="Inferred links" count={preview.new_links.length}
+                    allChecked={selectedLinks.size === preview.new_links.length}
+                    onToggleAll={() => setSelectedLinks(
+                      selectedLinks.size === preview.new_links.length
+                        ? new Set()
+                        : new Set(preview.new_links.map((_, i) => i))
+                    )} />
+                  {preview.new_links.map((l, i) => (
+                    <ItemRow key={i} checked={selectedLinks.has(i)}
+                      onToggle={() => toggleSet(selectedLinks, setSelectedLinks, i)}>
+                      <div style={{ fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: l.reason ? 3 : 0 }}>
+                          <span style={{ color: '#c8cdd6' }}>{l.source_ip}</span>
+                          <span style={{ color: '#404550' }}>↔</span>
+                          <span style={{ color: '#c8cdd6' }}>{l.target_ip}</span>
+                          <span style={{ color: '#354060', background: '#1a1e2a', border: '1px solid #2a2d40', borderRadius: 3, padding: '1px 5px', fontSize: 9 }}>{l.link_type}</span>
+                          <ConfBadge value={l.confidence} />
+                        </div>
+                        {l.reason && (
+                          <div style={{ color: '#404550', fontSize: 9, paddingLeft: 2 }}>
+                            {l.reason}
+                          </div>
+                        )}
+                      </div>
+                    </ItemRow>
+                  ))}
                 </div>
               )}
 
@@ -207,8 +323,10 @@ export default function TopologyBuilderModal({ projectId, accent, onClose, onApp
               {error && <div style={{ color: '#cc2233', fontSize: 11, marginBottom: 12 }}>{error}</div>}
 
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={handleApply} disabled={applying} style={{ ...btnStyle('#39d353'), opacity: applying ? 0.6 : 1 }}>
-                  {applying ? 'Applying…' : '✓ Apply'}
+                <button onClick={handleApply}
+                  disabled={applying || selectedCount === 0}
+                  style={{ ...btnStyle('#39d353'), opacity: (applying || selectedCount === 0) ? 0.5 : 1 }}>
+                  {applying ? 'Applying…' : `✓ Apply selected (${selectedCount} hosts, ${selectedLinks.size} links)`}
                 </button>
                 <button onClick={() => setStep('select')} style={ghostBtn}>← Back</button>
                 <button onClick={onClose} style={ghostBtn}>Cancel</button>
