@@ -219,6 +219,7 @@ class NetworkUpdate(BaseModel):
     regions: Optional[List[Any]] = None
     nodes: Optional[List[Any]] = None
     edges: Optional[List[Any]] = None
+    meta: Optional[dict[str, Any]] = None
 
 
 class Network(BaseModel):
@@ -229,6 +230,7 @@ class Network(BaseModel):
     regions: List[Any] = []
     nodes: List[Any] = []
     edges: List[Any] = []
+    meta: dict[str, Any] = {}
     model_config = {"from_attributes": True}
 
     @classmethod
@@ -249,6 +251,7 @@ class Network(BaseModel):
             regions=_parse(getattr(obj, 'regions_json', [])),
             nodes=_parse(obj.nodes_json),
             edges=_parse(obj.edges_json),
+            meta=_parse(getattr(obj, 'meta_json', {})) if isinstance(getattr(obj, 'meta_json', {}), str) else (getattr(obj, 'meta_json', {}) or {}),
         )
 
 

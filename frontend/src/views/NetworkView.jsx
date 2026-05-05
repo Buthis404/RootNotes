@@ -4,282 +4,12 @@ import { FieldInput, Badge } from '../components/UI.jsx';
 import { NODE_STATUS, NODE_TYPES, OS_ICONS } from '../constants.js';
 import { api } from '../api.js';
 import AttackVectorAnalyzer from '../components/AttackVectorAnalyzer.jsx';
-import { getCredBadges, getHostBadges, inferNodeType, summarizeCreds, normalizeDomain, HOST_ROLES, isAttackerHost } from '../utils/hostMeta.js';
+import { getCredBadges, getHostBadges, summarizeCreds, normalizeDomain, domainsMatch, HOST_ROLES, isAttackerHost } from '../utils/hostMeta.js';
 import TopologyBuilderModal from '../components/TopologyBuilderModal.jsx';
-
-const ACCESS_ROLES = [
-  { id: 'local_admin', label: 'LA', title: 'Local Admin' },
-  { id: 'domain_admin', label: 'DA', title: 'Domain Admin' },
-  { id: 'rdp', label: 'RDP', title: 'RDP access' },
-  { id: 'ssh', label: 'SSH', title: 'SSH access' },
-  { id: 'winrm', label: 'WRM', title: 'WinRM access' },
-  { id: 'no_rights', label: 'None', title: 'No rights' },
-];
-
-function CredPanel({ cred, host, accent, pid, linkType }) {
-  const [open, setOpen] = useState(false);
-  const [chn, setChn] = useState(null);
-  const [notes, setNotes] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    api.getCredHostNotes({ cred_id: cred.id, host_id: host.id }).then(list => {
-      const found = list[0] || null;
-      setChn(found);
-      setNotes(found?.notes || '');
-    }).catch(() => {});
-  }, [open, cred.id, host.id]);
-
-  const toggleAccess = async (roleId) => {
-    const current = chn?.access || [];
-    const next = current.includes(roleId) ? current.filter(r => r !== roleId) : [...current, roleId];
-    await saveNote(notes, next);
-  };
-
-  const saveNote = async (newNotes, newAccess) => {
-    setSaving(true);
-    try {
-      const body = { cred_id: cred.id, host_id: host.id, pid, notes: newNotes, access: newAccess ?? chn?.access ?? [] };
-      const result = chn
-        ? await api.updateCredHostNote(chn.id, { notes: newNotes, access: newAccess ?? chn.access })
-        : await api.upsertCredHostNote(body);
-      setChn(result);
-      setNotes(result.notes);
-    } catch {}
-    setSaving(false);
-  };
-
-  const linkColors = { ip: '#5b8af5', domain: '#c07af0', 'domain?': '#f09a3a', linked: '#39d353' };
-  const linkLabels = { ip: 'IP', domain: 'domain', 'domain?': 'domain?', linked: 'linked' };
-  const linkTitles = { ip: 'Linked by IP', domain: 'Domain credential (host is domain-joined)', 'domain?': 'Domain credential — set host domain to confirm', linked: 'Linked via host_ids' };
-
-  return (
-    <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, marginBottom: 6 }}>
-      <div onClick={() => setOpen(v => !v)} style={{ padding: '6px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ fontSize: 11, color: '#e0e4ec', fontFamily: 'JetBrains Mono', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cred.username}</span>
-            <div style={{ display: 'flex', gap: 3, flexShrink: 0, alignItems: 'center' }}>
-              <span title={linkTitles[linkType]} style={{ fontSize: 8, color: linkColors[linkType], background: linkColors[linkType] + '22', border: `1px solid ${linkColors[linkType]}44`, borderRadius: 3, padding: '1px 4px', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>{linkLabels[linkType]}</span>
-              {cred.is_domain && <span style={{ fontSize: 8, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a44', borderRadius: 3, padding: '1px 4px', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>AD</span>}
-              {(chn?.access || []).slice(0, 2).map(r => {
-                const role = ACCESS_ROLES.find(a => a.id === r);
-                return role ? <span key={r} style={{ fontSize: 8, color: accent, background: accent + '22', border: `1px solid ${accent}44`, borderRadius: 3, padding: '1px 4px', fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>{role.label}</span> : null;
-              })}
-            </div>
-          </div>
-          <div style={{ fontSize: 9, color: '#606570', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cred.service || '—'} · {cred.type}{cred.cracked ? ' · cracked' : ''}</div>
-        </div>
-        <Icon name="chevron" size={10} color="#606570" style={{ transform: open ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .12s', flexShrink: 0 }} />
-      </div>
-      {open && (
-        <div style={{ padding: '8px', borderTop: '1px solid #1e2029' }}>
-          <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', marginBottom: 4 }}>Secret</div>
-          <div style={{ fontSize: 10, color: '#c8cdd6', fontFamily: 'JetBrains Mono', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', wordBreak: 'break-all', marginBottom: 8 }}>{cred.secret || '(empty)'}</div>
-          <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', marginBottom: 4 }}>Access on this host</div>
-          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 8 }}>
-            {ACCESS_ROLES.map(role => {
-              const active = (chn?.access || []).includes(role.id);
-              return (
-                <button key={role.id} onClick={() => toggleAccess(role.id)} title={role.title}
-                  style={{ background: active ? accent + '22' : '#0e1016', border: `1px solid ${active ? accent + '66' : '#2a2d35'}`, borderRadius: 3, padding: '3px 7px', cursor: 'pointer', color: active ? accent : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>
-                  {role.label}
-                </button>
-              );
-            })}
-          </div>
-          <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', marginBottom: 4 }}>Notes on this host</div>
-          <textarea value={notes} onChange={e => setNotes(e.target.value)} onBlur={() => saveNote(notes)}
-            placeholder="e.g. can't RDP, needs relay, password expired..."
-            style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono', lineHeight: 1.5, resize: 'vertical', outline: 'none', minHeight: 54, boxSizing: 'border-box' }} />
-          {cred.notes && <div style={{ fontSize: 9, color: '#606570', marginTop: 6, lineHeight: 1.5 }}>Cred notes: {cred.notes}</div>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const ACTIVITY_TYPES = {
-  recon:   { label: 'Recon', color: '#5b8af5' },
-  scan:    { label: 'Scan', color: '#6fc8f0' },
-  exploit: { label: 'Exploit', color: '#e8574a' },
-  privesc: { label: 'PrivEsc', color: '#f09a3a' },
-  lateral: { label: 'Lateral', color: '#e8cc42' },
-  postex:  { label: 'PostEx', color: '#39d353' },
-  note:    { label: 'Note', color: '#808590' },
-};
-
-const ACTIVITY_STATUS = {
-  planned: { label: 'Planned', color: '#5b8af5' },
-  running: { label: 'Running', color: '#f09a3a' },
-  done:    { label: 'Done', color: '#39d353' },
-  failed:  { label: 'Failed', color: '#cc2233' },
-};
-
-const NETWORK_BACKGROUNDS = ['#07080b', '#0b1116', '#100c16', '#161008', '#0a1511', '#120a0f'];
-const REGION_FILL = ['#5b8af522', '#c07af022', '#39d35322', '#f09a3a22', '#e8574a22', '#6fc8f022'];
-const REGION_STROKE = ['#5b8af5', '#c07af0', '#39d353', '#f09a3a', '#e8574a', '#6fc8f0'];
-
-const NodeShape = ({ type, status, size = 40, selected, accent }) => {
-  const sc = NODE_STATUS[status]?.color || '#404550';
-  const W = size, H = size;
-  const base = { filter: `drop-shadow(0 0 5px ${sc}55)` };
-  
-  // SQUARE-BASED NODES: server, web, dc, workstation, attacker
-  if (['server', 'web', 'dc', 'workstation', 'attacker'].includes(type)) {
-    const isAtt = type === 'attacker';
-    const isDC = type === 'dc';
-    return (
-      <svg width={W} height={H} viewBox="0 0 40 40" style={base}>
-        {selected && <rect x="1" y="1" width="38" height="38" rx="7" fill="none" stroke={accent} strokeWidth="2" opacity=".7" />}
-        <rect x="4" y="4" width="32" height="32" rx="6" fill={isAtt ? `${sc}33` : '#12141a'} stroke={sc} strokeWidth={isAtt ? 2 : 1.5} />
-        {isAtt && <><line x1="20" y1="10" x2="20" y2="30" stroke={sc} strokeWidth="1.5" opacity=".6" /><line x1="10" y1="20" x2="30" y2="20" stroke={sc} strokeWidth="1.5" opacity=".6" /><circle cx="20" cy="20" r="4" fill={sc} opacity=".9" /></>}
-        {type === 'server' && <><rect x="10" y="13" width="20" height="5" rx="1.5" fill={sc} opacity=".3" /><rect x="10" y="22" width="20" height="5" rx="1.5" fill={sc} opacity=".2" /><circle cx="14" cy="15.5" r="1.2" fill={sc} opacity=".8" /><circle cx="14" cy="24.5" r="1.2" fill={sc} opacity=".5" /></>}
-        {type === 'web' && <><ellipse cx="20" cy="20" rx="8" ry="8" fill="none" stroke={sc} strokeWidth="1.2" opacity=".5" /><line x1="12" y1="20" x2="28" y2="20" stroke={sc} strokeWidth="1" opacity=".5" /><path d="M16 13a12 8 0 010 14" fill="none" stroke={sc} strokeWidth="1" opacity=".4" /></>}
-        {type === 'workstation' && <><rect x="10" y="12" width="20" height="13" rx="2" fill="none" stroke={sc} strokeWidth="1.2" opacity=".6" /><rect x="16" y="25" width="8" height="3" rx="1" fill={sc} opacity=".4" /></>}
-        {isDC && <><path d="M13 16 L20 12 L27 16 L27 24 L20 28 L13 24Z" fill="none" stroke={sc} strokeWidth="1.3" opacity=".7" /><circle cx="20" cy="20" r="2.5" fill={sc} opacity=".8" /></>}
-      </svg>
-    );
-  }
-  
-  // FIREWALL: shield with lightning
-  if (type === 'firewall') {
-    return (
-      <svg width={W} height={H} viewBox="0 0 40 40" style={base}>
-        {selected && <circle cx="20" cy="20" r="19" fill="none" stroke={accent} strokeWidth="2" opacity=".7" />}
-        <path d="M20 4 L34 11 L34 24 C34 31 20 36 20 36 C20 36 6 31 6 24 L6 11Z" fill="#12141a" stroke={sc} strokeWidth="1.5" />
-        <path d="M14 19 L18 14 L18 21 L22 16 L22 26 L26 21" fill="none" stroke={sc} strokeWidth="1.5" strokeLinecap="round" opacity=".8" />
-      </svg>
-    );
-  }
-  
-  // DEFAULT/ROUTER/CLOUD: circle with radiating lines
-  return (
-    <svg width={W} height={H} viewBox="0 0 40 40" style={base}>
-      {selected && <circle cx="20" cy="20" r="19" fill="none" stroke={accent} strokeWidth="2" opacity=".7" />}
-      <circle cx="20" cy="20" r="15" fill="#12141a" stroke={sc} strokeWidth="1.5" />
-      <circle cx="20" cy="20" r="8" fill="none" stroke={sc} strokeWidth="1" opacity=".4" />
-      <circle cx="20" cy="20" r="3" fill={sc} opacity=".8" />
-      {[0, 60, 120, 180, 240, 300].map(a => {
-        const r = a * Math.PI / 180;
-        return <line key={a} x1={20 + 8 * Math.cos(r)} y1={20 + 8 * Math.sin(r)} x2={20 + 15 * Math.cos(r)} y2={20 + 15 * Math.sin(r)} stroke={sc} strokeWidth="1.2" opacity=".6" />;
-      })}
-    </svg>
-  );
-};
-
-function guessNodeType(host) {
-  return inferNodeType(host);
-}
-
-// ── Role icon mapping ─────────────────────────────────────────────────
-const ROLE_ICON = {
-  unknown:           'server',
-  workstation:       'monitor',
-  server:            'server',
-  domain_controller: 'crown',
-  file_server:       'fileserver',
-  web_server:        'globe',
-  database:          'db',
-  jump_host:         'jump',
-  attacker:          'bolt',
-  external:          'external',
-  network_device:    'router',
-  firewall:          'firewall',
-  custom:            'settings',
-};
-
-const ROLE_SHORT = {
-  unknown: '?', workstation: 'WS', server: 'SRV', domain_controller: 'DC',
-  file_server: 'FS', web_server: 'WEB', database: 'DB', jump_host: 'JMP',
-  attacker: 'ATK', external: 'EXT', network_device: 'RT', firewall: 'FW', custom: '?',
-};
-
-function inferAllRoles(host) {
-  if (!host) return [];
-  const roles = [];
-  const seen = new Set();
-  const push = (id) => {
-    if (!seen.has(id) && HOST_ROLES[id]) {
-      seen.add(id);
-      roles.push({ id, ...HOST_ROLES[id], short: ROLE_SHORT[id] || id.slice(0, 3).toUpperCase() });
-    }
-  };
-
-  if (host.is_attacker || host.role === 'attacker') { push('attacker'); return roles; }
-  if (host.role && host.role !== 'unknown') push(host.role);
-
-  const tags = new Set((host.tags || []).map(t => String(t).toLowerCase()));
-  const ports = new Set((host.ports || []).map(p => String(p).split('/')[0]));
-  const WEB_PORTS = new Set(['80', '443', '8080', '8443']);
-
-  if (tags.has('dc') || tags.has('domain-controller') || ports.has('88')) push('domain_controller');
-  if ([...ports].some(p => WEB_PORTS.has(p))) push('web_server');
-  if (tags.has('pivot') || tags.has('jump') || tags.has('jumphost') || tags.has('jump_host')) push('jump_host');
-  if (tags.has('firewall') || tags.has('fw')) push('firewall');
-  if (tags.has('router')) push('network_device');
-  if (tags.has('db') || tags.has('database') || ports.has('3306') || ports.has('5432') || ports.has('1433')) push('database');
-  if (tags.has('external')) push('external');
-
-  return roles.slice(0, 4);
-}
-
-function AddFromProjectPanel({ hosts, accent, onAdd, onClose }) {
-  const [sel, setSel] = useState(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
-  const toggle = (ip) => setSel(prev => { const next = new Set(prev); next.has(ip) ? next.delete(ip) : next.add(ip); return next; });
-  
-  // Filter hosts by search query
-  const filteredHosts = searchQuery.trim() 
-    ? hosts.filter(h => 
-        (h.ip && h.ip.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (h.hostname && h.hostname.toLowerCase().includes(searchQuery.toLowerCase()))
-      )
-    : hosts;
-  
-  const selectAll = () => setSel(new Set(filteredHosts.map(h => h.ip)));
-  
-  return (
-    <div style={{ background: '#0c0e13', borderBottom: '1px solid #2a2d35', flexShrink: 0, maxHeight: 280, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '8px 14px', borderBottom: '1px solid #1e2029', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', flex: 1 }}>Add hosts from project</span>
-        <button onClick={selectAll} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 3, padding: '2px 8px', cursor: 'pointer', color: '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>All{searchQuery && ` (${filteredHosts.length})`}</button>
-        <button onClick={() => sel.size > 0 && onAdd(sel)} style={{ background: sel.size ? accent : '#1a1c22', border: 'none', borderRadius: 3, padding: '3px 12px', cursor: sel.size ? 'pointer' : 'default', color: '#fff', fontSize: 9, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: sel.size ? 1 : .4 }}>Add {sel.size ? `(${sel.size})` : ''}</button>
-        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}><Icon name="close" size={12} color="#606570" /></button>
-      </div>
-      <div style={{ padding: '6px 14px', borderBottom: '1px solid #1e2029' }}>
-        <input 
-          type="text" 
-          placeholder="Search by IP or hostname..."
-          value={searchQuery} 
-          onChange={e => setSearchQuery(e.target.value)}
-          style={{ 
-            width: '100%',
-            background: '#12141a', 
-            border: '1px solid #2a2d35', 
-            borderRadius: 4, 
-            padding: '5px 10px', 
-            color: '#c8cdd6', 
-            fontSize: 10, 
-            fontFamily: 'JetBrains Mono',
-            outline: 'none'
-          }}
-        />
-      </div>
-      <div style={{ overflowY: 'auto', flex: 1 }}>
-        {filteredHosts.length === 0 ? (
-          <div style={{ padding: '20px', textAlign: 'center', color: '#404550', fontSize: 10 }}>No results</div>
-        ) : (
-          filteredHosts.map(h => <div key={h.ip} onClick={() => toggle(h.ip)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 14px', cursor: 'pointer', background: sel.has(h.ip) ? `${accent}10` : 'transparent', borderLeft: sel.has(h.ip) ? `2px solid ${accent}` : '2px solid transparent' }}><div style={{ width: 12, height: 12, borderRadius: 2, border: `1px solid ${sel.has(h.ip) ? accent : '#404550'}`, background: sel.has(h.ip) ? accent : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{sel.has(h.ip) && <Icon name="check" size={9} color="#fff" />}</div><span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: '#9098a8', width: 120 }}>{h.ip}</span><span style={{ fontSize: 10, color: '#c8cdd6', width: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{h.hostname || '—'}</span></div>)
-        )}
-      </div>
-    </div>
-  );
-}
-
-const EMPTY_ACTIVITY = { title: '', activity_type: 'recon', command: '', summary: '', output: '', status: 'done' };
-const INSPECTOR_TABS = ['details', 'activity', 'credentials'];
+import CredPanel from './network-map/CredPanel.jsx';
+import AddFromProjectPanel from './network-map/AddFromProjectPanel.jsx';
+import { NodeShape, guessNodeType, inferAllRoles } from './network-map/NodeVisuals.jsx';
+import { ACTIVITY_TYPES, ACTIVITY_STATUS, NETWORK_BACKGROUNDS, REGION_FILL, REGION_STROKE, EMPTY_ACTIVITY, INSPECTOR_TABS, ROLE_ICON } from './network-map/constants.js';
 
 const CommitFieldInput = memo(function CommitFieldInput({ label, value, onCommit, placeholder, mono = true, textarea = false }) {
   const [draft, setDraft] = useState(value || '');
@@ -321,7 +51,7 @@ const CommitFieldInput = memo(function CommitFieldInput({ label, value, onCommit
   );
 });
 
-function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, onClose, onAddActivity, onUpdateActivity, onDeleteActivity }) {
+function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, deleteEdge, onClose, onAddActivity, onUpdateActivity, onDeleteActivity }) {
   const [activeTab, setActiveTab] = useState('details');
   const [creds, setCreds] = useState(null);
   const [credsLoading, setCredsLoading] = useState(false);
@@ -382,7 +112,7 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
       (c.host_ids || []).includes(hostObj.id) ||
       nodeIps.has(c.host) ||
       (hostObj.hostname && c.host === hostObj.hostname) ||
-      (c.is_domain && hostDomain && normalizeDomain(c.domain || '') === hostDomain)
+      (c.is_domain && hostDomain && domainsMatch(c.domain || '', hostDomain))
     )).map(c => ({
       ...c,
       _linkType: (c.host_ids || []).includes(hostObj.id) ? 'linked'
@@ -512,6 +242,7 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 10, color: '#9098a8', flex: 1 }}>{peer.label || '?'}</span>
                       <select value={edge.style} onChange={e => updateEdge(edge.id, { style: e.target.value })} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 3, color: '#606570', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '1px 4px' }}>{['normal', 'exploit', 'lateral', 'tunnel'].map(s => <option key={s} value={s}>{s}</option>)}</select>
+                      <button onClick={() => deleteEdge(edge.id)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 3, color: '#cc2233', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '2px 6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}><Icon name="trash" size={10} color="#cc2233" />Delete</button>
                     </div>
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                       <span style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.type || 'link'}</span>
@@ -575,7 +306,6 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
 }
 
 function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData }) {
-  const HISTORY_LIMIT = 50;
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [connecting, setConnecting] = useState(null);
@@ -608,6 +338,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
   const renderCountRef = useRef(0);
   const interactionStartRef = useRef(null);
   const lastPositionSyncRef = useRef(0);
+  const netIdRef = useRef(net?.id || null);
 
   renderCountRef.current += 1;
 
@@ -618,11 +349,21 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
 
   useEffect(() => {
     const next = net || { nodes: [], edges: [], regions: [] };
-    draftNetRef.current = next;
-    setDraftNet(next);
+    const nextClone = cloneNet(next);
+    if (netIdRef.current !== (net?.id || null)) {
+      netIdRef.current = net?.id || null;
+      draftNetRef.current = nextClone;
+      setDraftNet(nextClone);
+      interactionStartRef.current = null;
+      setHistoryState({ past: [], future: [] });
+      return;
+    }
+    if (sameNet(nextClone, draftNetRef.current)) return;
+    setHistoryState(state => ({ past: [...state.past, cloneNet(draftNetRef.current)], future: [] }));
+    draftNetRef.current = nextClone;
+    setDraftNet(nextClone);
     interactionStartRef.current = null;
-    setHistoryState({ past: [], future: [] });
-  }, [net]);
+  }, [cloneNet, net, sameNet]);
 
   const nodes = draftNet?.nodes || [];
   const edges = draftNet?.edges || [];
@@ -639,7 +380,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
   const pushHistorySnapshot = useCallback((previous, next) => {
     if (sameNet(previous, next)) return;
     setHistoryState(state => ({
-      past: [...state.past.slice(-(HISTORY_LIMIT - 1)), cloneNet(previous)],
+      past: [...state.past, cloneNet(previous)],
       future: [],
     }));
   }, [cloneNet, sameNet]);
@@ -830,7 +571,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
           const next = state.future[0];
           const current = cloneNet(draftNetRef.current);
           queueMicrotask(() => applySnapshot(next));
-          return { past: [...state.past.slice(-(HISTORY_LIMIT - 1)), current], future: state.future.slice(1) };
+          return { past: [...state.past, current], future: state.future.slice(1) };
         });
         return;
       }
@@ -1290,7 +1031,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
       const next = state.future[0];
       const current = cloneNet(draftNetRef.current);
       queueMicrotask(() => applySnapshot(next));
-      return { past: [...state.past.slice(-(HISTORY_LIMIT - 1)), current], future: state.future.slice(1) };
+      return { past: [...state.past, current], future: state.future.slice(1) };
     });
   }, [applySnapshot, cloneNet]);
 
@@ -1488,6 +1229,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
           updateNode={updateNode}
           updateEdge={updateEdge}
           updateRegion={updateRegion}
+          deleteEdge={deleteEdge}
           onClose={() => { setSelectedNodeIds([]); setSelectedRegionId(null); }}
           onAddActivity={onAddActivity}
           onUpdateActivity={onUpdateActivity}

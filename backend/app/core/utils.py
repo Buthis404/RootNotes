@@ -14,7 +14,34 @@ def new_id(prefix: str) -> str:
 
 
 def normalize_domain(value: str) -> str:
-    return (value or "").strip().lower().rstrip(".")
+    cleaned = (value or "").strip().lower()
+    if cleaned and cleaned.replace('.', '') == '':
+        return ''
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
+    return cleaned
+
+
+def domain_short_label(value: str) -> str:
+    normalized = normalize_domain(value).strip('.')
+    if not normalized:
+        return ""
+    return normalized.split(".", 1)[0]
+
+
+def domains_match(left: str, right: str) -> bool:
+    a = normalize_domain(left).strip('.')
+    b = normalize_domain(right).strip('.')
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    a_has_dot = "." in a
+    b_has_dot = "." in b
+    if not a_has_dot and b_has_dot:
+        return a == domain_short_label(b)
+    if not b_has_dot and a_has_dot:
+        return b == domain_short_label(a)
+    return False
 
 
 def norm_text(value: str) -> str:

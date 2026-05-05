@@ -25,7 +25,7 @@ def list_networks(pid: str | None = None, db: Session = Depends(get_db), user: m
 @router.post("", response_model=schemas.Network, status_code=201)
 def create_network(body: schemas.NetworkCreate, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, body.pid, user, "network.update")
-    net = models.Network(id=new_id("net"), pid=body.pid, name=body.name, background=body.background, regions_json=[], nodes_json=[], edges_json=[])
+    net = models.Network(id=new_id("net"), pid=body.pid, name=body.name, background=body.background, regions_json=[], nodes_json=[], edges_json=[], meta_json={})
     db.add(net)
     db.commit()
     db.refresh(net)
@@ -50,6 +50,8 @@ def update_network(nid: str, body: schemas.NetworkUpdate, db: Session = Depends(
         net.nodes_json = body.nodes
     if body.edges is not None:
         net.edges_json = body.edges
+    if body.meta is not None:
+        net.meta_json = body.meta
     db.commit()
     db.refresh(net)
     result = schemas.Network.from_orm_obj(net)

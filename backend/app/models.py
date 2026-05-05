@@ -104,6 +104,7 @@ class Network(Base):
     regions_json = Column(JSONB, nullable=False, default=[])
     nodes_json = Column(JSONB, nullable=False, default=[])
     edges_json = Column(JSONB, nullable=False, default=[])
+    meta_json = Column(JSONB, nullable=False, default={})
 
 
 class Finding(Base):

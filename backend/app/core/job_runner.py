@@ -317,8 +317,6 @@ async def _run_topology_rebuild_job(db, job: models.Job) -> None:
             node["x"], node["y"] = new_pos
             node["auto_positioned"] = True
             node["manually_positioned"] = False
-    for e in existing_edges:
-        e.pop("label", None)
     network.nodes_json = existing_nodes
     network.edges_json = existing_edges
     db.commit()

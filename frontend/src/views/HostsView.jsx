@@ -5,7 +5,7 @@ import { NODE_STATUS, OS_ICONS, PORT_SERVICES, serviceColor } from '../constants
 import NmapParser from '../components/NmapParser.jsx';
 import BloodHoundParser from '../components/BloodHoundParser.jsx';
 import { api } from '../api.js';
-import { getCredBadges, getHostBadges, summarizeCreds, HOST_ROLES, normalizeDomain } from '../utils/hostMeta.js';
+import { getCredBadges, getHostBadges, summarizeCreds, HOST_ROLES, normalizeDomain, domainsMatch } from '../utils/hostMeta.js';
 import { useColumnResize } from '../hooks/useColumnResize.js';
 
 const BULK_TEMPLATES = {
@@ -303,7 +303,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
       c.host === host.ip ||
       (host.hostname && c.host === host.hostname) ||
       (c.host_ids || []).includes(host.id) ||
-      (c.is_domain && hostDomain && normalizeDomain(c.domain || '') === hostDomain)
+      (c.is_domain && hostDomain && domainsMatch(c.domain || '', hostDomain))
     )).length;
   };
   const getSortValue = (host) => {
@@ -336,7 +336,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
       (c.host_ids || []).includes(selHost.id) ||
       c.host === selHost.ip ||
       (selHost.hostname && c.host === selHost.hostname) ||
-      (c.is_domain && hostDomain && normalizeDomain(c.domain || '') === hostDomain)
+      (c.is_domain && hostDomain && domainsMatch(c.domain || '', hostDomain))
     )).map(c => ({
       ...c,
       _linkType: (c.host_ids || []).includes(selHost.id) ? 'linked'

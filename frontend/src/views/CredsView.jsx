@@ -3,19 +3,20 @@ import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
 import { Badge, CredTypeBadge, SearchBar, FieldInput, TagEditor } from '../components/UI.jsx';
 import { CRED_TYPES } from '../constants.js';
-import { getCredBadges, getCredTagMeta, normalizeDomain } from '../utils/hostMeta.js';
+import { getCredBadges, getCredTagMeta, normalizeDomain, domainsMatch } from '../utils/hostMeta.js';
 import { useColumnResize } from '../hooks/useColumnResize.js';
 
 const COMMON_SERVICES = ['SSH','SMB','RDP','HTTP','HTTPS','FTP','MySQL','PostgreSQL','MSSQL','Oracle','WinRM','LDAP','Kerberos','VNC','Telnet','WebApp'];
 
 const isWindows = h => h.os === 'Windows' || (h.os || '').toLowerCase().includes('windows');
+const sanitizeDomainDraft = (value) => /^\.+$/.test(String(value || '').trim()) ? '' : value;
 
 // Returns { confirmed: Host[], predicted: Host[] } for a cred
 function getApplicableHosts(cred, projectHosts) {
   const confirmed = projectHosts.filter(h => (cred.host_ids || []).includes(h.id));
   const credDomain = normalizeDomain(cred.domain || '');
   const predicted = cred.is_domain
-    ? projectHosts.filter(h => !confirmed.some(c => c.id === h.id) && isWindows(h) && normalizeDomain(h.domain || '') && normalizeDomain(h.domain || '') === credDomain)
+    ? projectHosts.filter(h => !confirmed.some(c => c.id === h.id) && isWindows(h) && normalizeDomain(h.domain || '') && domainsMatch(h.domain || '', credDomain))
     : [];
   return { confirmed, predicted };
 }
@@ -86,23 +87,26 @@ function HostChips({ cred, projectHosts, maxVisible = 2 }) {
 }
 
 // ── Multi-host selector in edit panel ────────────────────────────────
-function HostSelector({ selectedIds, onChange, projectHosts }) {
+function HostSelector({ selectedIds, onChange, projectHosts, domainFilter = '' }) {
   if (!projectHosts.length) return <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>No hosts in project</div>;
   return (
     <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid #2a2d35', borderRadius: 5, background: '#07080b' }}>
       {projectHosts.map(h => {
         const checked = selectedIds.includes(h.id);
+        const domainLocked = !!domainFilter;
+        const matchesDomain = !domainLocked || domainsMatch(h.domain || '', domainFilter);
         return (
           <label key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid #13151c' }}
-            onMouseEnter={e => e.currentTarget.style.background = '#ffffff04'}
+            onMouseEnter={e => e.currentTarget.style.background = matchesDomain ? '#ffffff04' : '#301214'}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-            <input type="checkbox" checked={checked}
-              onChange={() => onChange(checked ? selectedIds.filter(id => id !== h.id) : [...selectedIds, h.id])}
+            <input type="checkbox" checked={checked} disabled={!matchesDomain}
+              onChange={() => matchesDomain && onChange(checked ? selectedIds.filter(id => id !== h.id) : [...selectedIds, h.id])}
               style={{ accentColor: '#5b8af5', flexShrink: 0 }} />
-            <span style={{ fontSize: 10, color: '#9098a8', fontFamily: 'JetBrains Mono', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span style={{ fontSize: 10, color: matchesDomain ? '#9098a8' : '#90545a', fontFamily: 'JetBrains Mono', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {h.ip}{h.hostname ? ` — ${h.hostname}` : ''}
             </span>
             <span style={{ fontSize: 9, color: '#404550' }}>{h.os}</span>
+            {domainLocked && h.domain && <span style={{ fontSize: 8, color: matchesDomain ? '#39d353' : '#cc2233' }}>{matchesDomain ? 'match' : 'other'}</span>}
             {checked && isWindows(h) && (
               <span style={{ fontSize: 8, color: '#39d353' }}>✓</span>
             )}
@@ -128,7 +132,7 @@ function ValidateCredPanel({ cred, projectHosts, selectedProject, accent, onClos
     const credDomain = (cred.domain || '').toLowerCase().replace(/^\./, '');
     const pred = cred.is_domain
       ? projectHosts.filter(h => !conf.some(c => c.id === h.id) && isWindows(h) &&
-          h.domain && h.domain.toLowerCase().replace(/^\./, '') === credDomain)
+          h.domain && domainsMatch(h.domain, credDomain))
       : [];
     return { confirmed: conf, predicted: pred };
   }, [cred, projectHosts]);
@@ -332,6 +336,20 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
     setShowAdd(false);
   };
 
+  const handleExportCsv = async () => {
+    try {
+      const blob = await api.exportCredsCsv(selectedProject);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `creds_${selectedProject?.slice(0, 8) || 'project'}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e.message || 'Failed to export credentials CSV');
+    }
+  };
+
   const importBulkCreds = async () => {
     const delim = bulkDelimiter === '\t' ? '\t' : bulkDelimiter;
     const lines = bulkText.split('\n').map(l => l.trim()).filter(Boolean);
@@ -439,6 +457,10 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
         <button onClick={() => setShowBulk(v => !v)}
           style={{ background: 'transparent', border: `1px solid ${accent}66`, borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: accent, fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
           <Icon name="export" size={10} color="currentColor" /> Bulk
+        </button>
+        <button onClick={handleExportCsv}
+          style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#808590', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Icon name="export" size={10} color="currentColor" /> CSV
         </button>
       </div>
 
@@ -593,7 +615,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
           </div>
           <div style={{ width: 150 }}>
             <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Domain</div>
-            <input value={newCred.domain} onChange={e => setNewCred(c => ({ ...c, domain: e.target.value }))}
+            <input value={newCred.domain} onChange={e => setNewCred(c => ({ ...c, domain: sanitizeDomainDraft(e.target.value) }))}
               style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
           </div>
           {/* Domain toggle */}
@@ -795,6 +817,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                   selectedIds={selCred.host_ids || []}
                   onChange={ids => onUpdate(selCred.id, { host_ids: ids })}
                   projectHosts={projectHosts}
+                  domainFilter={selCred.is_domain ? normalizeDomain(selCred.domain || '') : ''}
                 />
                 {(selCred.host_ids || []).length > 0 && selCred.is_domain && (
                   <div style={{ marginTop: 4, fontSize: 9, color: '#39d353', fontFamily: 'JetBrains Mono' }}>
@@ -810,7 +833,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                   style={{ width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
               </div>
 
-              <FieldInput label="Domain" value={selCred.domain || ''} onChange={v => onUpdate(selCred.id, { domain: v })} placeholder="edu.stf" />
+              <FieldInput label="Domain" value={selCred.domain || ''} onChange={v => onUpdate(selCred.id, { domain: sanitizeDomainDraft(v) })} placeholder="edu or edu.local" />
 
               {/* Service */}
               <div>

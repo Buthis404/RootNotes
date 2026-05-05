@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
-from ..core.utils import new_id, normalize_domain
+from ..core.utils import new_id, normalize_domain, domains_match
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 from ..core.permissions import get_membership, get_permissions_for_role
@@ -26,6 +26,21 @@ def _cred_out(cred: models.Cred, user: models.User, db: Session) -> dict:
     if not _can_read_secret(user, cred.pid, db):
         data["secret"] = ""
     return data
+
+
+def _validate_domain_host_links(pid: str, domain: str, host_ids: list[str], db: Session):
+    normalized_domain = normalize_domain(domain)
+    if not normalized_domain or not host_ids:
+        return
+    hosts = db.query(models.Host).filter(models.Host.pid == pid, models.Host.id.in_(host_ids)).all()
+    by_id = {host.id: host for host in hosts}
+    missing = [hid for hid in host_ids if hid not in by_id]
+    if missing:
+        raise HTTPException(404, f"Host not found: {missing[0]}")
+    mismatched = [host for host in hosts if not domains_match(host.domain or '', normalized_domain)]
+    if mismatched:
+        labels = ", ".join((host.hostname or host.ip or host.id) for host in mismatched[:5])
+        raise HTTPException(400, f"Domain credential cannot be linked to hosts from another domain: {labels}")
 
 
 @router.get("", response_model=list[schemas.Cred])
@@ -56,6 +71,8 @@ def create_cred(body: schemas.CredCreate, request: Request, db: Session = Depend
             extracted = username.split("@", 1)[1]
             payload["domain"] = normalize_domain(extracted)
     cred = models.Cred(id=new_id("c"), **payload)
+    if payload.get("is_domain"):
+        _validate_domain_host_links(payload["pid"], payload.get("domain", ""), payload.get("host_ids") or [], db)
     db.add(cred)
     label = f"Cred added: {cred.username}" + (f"@{cred.host}" if cred.host else "")
     log_event(db, cred.pid, getattr(request.state, "username", None), "cred", "create", label, {"username": cred.username})
@@ -83,6 +100,8 @@ def update_cred(cid: str, body: schemas.CredUpdate, request: Request, db: Sessio
             updates["domain"] = normalize_domain(extracted)
     for k, v in updates.items():
         setattr(cred, k, v)
+    if cred.is_domain:
+        _validate_domain_host_links(cred.pid, cred.domain or '', cred.host_ids or [], db)
     if body.cracked is not None and body.cracked and not old_cracked:
         log_event(
             db, cred.pid, getattr(request.state, "username", None), "cred", "cracked",

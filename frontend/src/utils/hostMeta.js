@@ -28,7 +28,26 @@ function hasNote(text, needle) {
 }
 
 export function normalizeDomain(value) {
-  return String(value || '').trim().toLowerCase().replace(/\.$/, '');
+  const cleaned = String(value || '').trim().toLowerCase().replace(/\.{2,}/g, '.')
+  return cleaned.replace(/\./g, '') === '' ? '' : cleaned.replace(/^\.+|\.+$/g, '')
+}
+
+export function domainShortLabel(value) {
+  const normalized = normalizeDomain(value)
+  if (!normalized) return ''
+  return normalized.split('.', 1)[0]
+}
+
+export function domainsMatch(left, right) {
+  const a = normalizeDomain(left)
+  const b = normalizeDomain(right)
+  if (!a || !b) return false
+  if (a === b) return true
+  const aHasDot = a.includes('.')
+  const bHasDot = b.includes('.')
+  if (!aHasDot && bHasDot) return a === domainShortLabel(b)
+  if (!bHasDot && aHasDot) return b === domainShortLabel(a)
+  return false
 }
 
 export function isAttackerHost(host) {

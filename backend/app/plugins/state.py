@@ -122,6 +122,21 @@ def list_attacker_targets(db: Session | None = None) -> list[dict]:
     return [_decrypt_target(t) for t in config.get("targets", [])]
 
 
+def list_attacker_targets_safe(db: Session | None = None) -> list[dict]:
+    targets = list_attacker_targets(db)
+    safe = []
+    for target in targets:
+        item = dict(target)
+        has_password = bool(item.get("password"))
+        has_private_key = bool(item.get("private_key"))
+        item["password"] = ""
+        item["private_key"] = ""
+        item["has_password"] = has_password
+        item["has_private_key"] = has_private_key
+        safe.append(item)
+    return safe
+
+
 def save_attacker_targets(targets: list[dict], db: Session | None = None) -> list[dict]:
     config = load_attacker_ssh_config(db)
     config["targets"] = [_encrypt_target(t) for t in targets]

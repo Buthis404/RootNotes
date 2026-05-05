@@ -13,7 +13,7 @@ from ..core.ssh_exec import run_ssh_command
 from ..core.utils import new_id
 from ..plugins.loader import load_plugin_module
 from ..plugins.registry import registry
-from ..plugins.state import list_modules, create_custom_module, update_module, delete_custom_module, delete_uploaded_module, MODULE_NAME_RE, list_attacker_targets, save_attacker_targets
+from ..plugins.state import list_modules, create_custom_module, update_module, delete_custom_module, delete_uploaded_module, MODULE_NAME_RE, list_attacker_targets, list_attacker_targets_safe, save_attacker_targets
 
 
 router = APIRouter(prefix="/api/admin/modules", tags=["system-modules"])
@@ -182,20 +182,20 @@ def _validate_attacker_target(body: AttackerSSHTargetBody):
     _require_attacker_module_enabled()
     if not body.name.strip() or not body.host.strip() or not body.username.strip():
         raise HTTPException(400, "Name, host and username are required")
-    if not body.password and not body.private_key.strip():
-        raise HTTPException(400, "Password or private key is required")
     if body.port <= 0 or body.port > 65535:
         raise HTTPException(400, "Invalid SSH port")
 
 
 @router.get("/attacker-ssh/config")
 def admin_get_attacker_ssh_config(admin: models.User = Depends(require_admin)):
-    return {"targets": list_attacker_targets()}
+    return {"targets": list_attacker_targets_safe()}
 
 
 @router.post("/attacker-ssh/targets", status_code=201)
 def admin_create_attacker_target(body: AttackerSSHTargetBody, admin: models.User = Depends(require_admin)):
     _validate_attacker_target(body)
+    if not body.password and not body.private_key.strip():
+        raise HTTPException(400, "Password or private key is required")
     targets = list_attacker_targets()
     target = {
         "id": new_id("atk"),
@@ -212,7 +212,7 @@ def admin_create_attacker_target(body: AttackerSSHTargetBody, admin: models.User
     }
     targets.append(target)
     save_attacker_targets(targets)
-    return target
+    return next(item for item in list_attacker_targets_safe() if item.get("id") == target["id"])
 
 
 @router.patch("/attacker-ssh/targets/{target_id}")
@@ -222,20 +222,24 @@ def admin_update_attacker_target(target_id: str, body: AttackerSSHTargetBody, ad
     for idx, target in enumerate(targets):
         if target.get("id") != target_id:
             continue
+        next_password = body.password if body.password else target.get("password", "")
+        next_private_key = body.private_key if body.private_key.strip() else target.get("private_key", "")
+        if not next_password and not str(next_private_key).strip():
+            raise HTTPException(400, "Password or private key is required")
         targets[idx] = {
             **target,
             "name": body.name.strip(),
             "host": body.host.strip(),
             "port": body.port,
             "username": body.username.strip(),
-            "password": body.password,
-            "private_key": body.private_key,
+            "password": next_password,
+            "private_key": next_private_key,
             "known_hosts_policy": body.known_hosts_policy,
             "project_ids": body.project_ids,
             "enabled": body.enabled,
         }
         save_attacker_targets(targets)
-        return targets[idx]
+        return next(item for item in list_attacker_targets_safe() if item.get("id") == target_id)
     raise HTTPException(404, "Attacker target not found")
 
 

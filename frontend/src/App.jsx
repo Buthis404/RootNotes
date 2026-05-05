@@ -28,119 +28,9 @@ import LoginView from './views/LoginView.jsx';
 import UserSettingsView from './views/UserSettingsView.jsx';
 import { hasAutoRoleSignals, inferNodeType, isAttackerHost } from './utils/hostMeta.js';
 import { useProjectPermissions } from './context/ProjectPermissions.jsx';
-
-const TWEAK_DEFAULTS = { accent: '#15bbb1', accentGreen: '#39d353', fontSize: 14, networkMapAnimations: true };
-const TWEAKS_KEY = 'rt_tweaks_v2'; // v2 to avoid stale key reset
-const statusColor = { active: '#39d353', paused: '#f09a3a', done: '#555' };
-
-// ── Small UI components ───────────────────────────────────────────────
-const NavTab = ({ tab, active, onClick, accent, badge, expanded }) => {
-  const [hov, setHov] = useState(false);
-  return (
-    <button onClick={onClick} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} title={tab.label}
-      style={{ width: '100%', padding: expanded ? '12px 14px' : '14px 0', border: 'none', cursor: 'pointer', background: active ? `${accent}18` : hov ? '#ffffff08' : 'transparent', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', display: 'flex', flexDirection: expanded ? 'row' : 'column', alignItems: 'center', justifyContent: expanded ? 'flex-start' : 'center', gap: expanded ? 10 : 6, transition: 'all .15s', position: 'relative' }}>
-      <Icon name={tab.icon} size={20} color={active ? accent : hov ? '#9098a8' : '#404550'} />
-      {expanded && <span style={{ fontSize: 10, color: active ? accent : hov ? '#9098a8' : '#606570', letterSpacing: '0.04em', textTransform: 'uppercase', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{tab.label}</span>}
-      {badge > 0 && <span style={{ position: 'absolute', top: 10, right: 10, background: accent, color: '#fff', fontSize: 9, fontWeight: 700, borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{badge > 9 ? '9+' : badge}</span>}
-    </button>
-  );
-};
-
-const ProjectPicker = ({ projects, notes, hosts, creds, selected, onSelect, accent }) => (
-  <div style={{ padding: '10px 0' }}>
-    <div style={{ padding: '6px 14px 10px', fontSize: 9, color: '#353840', letterSpacing: '0.14em', textTransform: 'uppercase' }}>Active target</div>
-    {projects.map(p => {
-      const act = p.id === selected;
-      const sc = statusColor[p.status] || '#555';
-      const pwned = hosts.filter(h => h.pid === p.id && !isAttackerHost(h) && (h.status === 'pwned' || h.status === 'owned')).length;
-      return (
-        <div key={p.id} onClick={() => onSelect(p.id)}
-          style={{ padding: '10px 14px', cursor: 'pointer', background: act ? `${accent}18` : 'transparent', borderLeft: act ? `2px solid ${accent}` : '2px solid transparent', transition: 'all .12s' }}
-          onMouseEnter={e => !act && (e.currentTarget.style.background = '#ffffff08')}
-          onMouseLeave={e => !act && (e.currentTarget.style.background = 'transparent')}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: sc, boxShadow: `0 0 6px ${sc}`, flexShrink: 0 }} />
-            <span style={{ fontSize: 13, color: act ? '#f0f2f6' : '#9098a8', fontWeight: act ? 600 : 400, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-          </div>
-          <div style={{ display: 'flex', gap: 8, paddingLeft: 17, alignItems: 'center', minWidth: 0 }}>
-            <span style={{ fontSize: 11, color: '#404550', fontFamily: 'JetBrains Mono', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.ip}</span>
-            {pwned > 0 && <span style={{ fontSize: 11, color: '#cc2233', fontFamily: 'JetBrains Mono', fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap' }}>⚠ {pwned} pwned</span>}
-          </div>
-        </div>
-      );
-    })}
-  </div>
-);
-
-const ACCENT_PRESETS = ['#15bbb1','#cc2233','#5b8af5','#c07af0','#f09a3a','#39d353','#e8574a','#6fc8f0'];
-
-const TweaksPanel = ({ tweaks, updateTweak, onClose, left }) => {
-  const acc = tweaks.accent;
-  const fs = tweaks.fontSize;
-  return (
-    <div style={{ position: 'fixed', bottom: 70, left, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 8, padding: 18, width: 280, zIndex: 300, boxShadow: '0 8px 40px #00000099' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <span style={{ fontSize: 11, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Interface settings</span>
-        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}><Icon name="close" size={12} color="#606570" /></button>
-      </div>
-
-      {/* Accent colour */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 9, color: '#505560', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Accent color</div>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-          {ACCENT_PRESETS.map(c => (
-            <button key={c} onClick={() => updateTweak('accent', c)}
-              style={{ width: 22, height: 22, borderRadius: 4, background: c, border: `2px solid ${acc === c ? '#fff' : c}`, cursor: 'pointer', transition: 'transform .1s', transform: acc === c ? 'scale(1.2)' : 'scale(1)' }} />
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input type="color" value={acc} onChange={e => updateTweak('accent', e.target.value)}
-            style={{ width: 36, height: 28, border: '1px solid #2a2d35', borderRadius: 4, cursor: 'pointer', padding: 2, background: '#1a1c22' }} />
-          <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>{acc}</span>
-        </div>
-      </div>
-
-      {/* Success colour */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 9, color: '#505560', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Success color</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input type="color" value={tweaks.accentGreen} onChange={e => updateTweak('accentGreen', e.target.value)}
-            style={{ width: 36, height: 28, border: '1px solid #2a2d35', borderRadius: 4, cursor: 'pointer', padding: 2, background: '#1a1c22' }} />
-          <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>{tweaks.accentGreen}</span>
-        </div>
-      </div>
-
-      {/* Font size */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 9, color: '#505560', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em', display: 'flex', justifyContent: 'space-between' }}>
-          <span>Font size</span>
-          <span style={{ color: acc, fontFamily: 'JetBrains Mono' }}>{fs}px</span>
-        </div>
-        <div style={{ display: 'flex', gap: 4 }}>
-          {[12, 14, 16, 18, 20].map(s => (
-            <button key={s} onClick={() => updateTweak('fontSize', s)}
-              style={{ flex: 1, background: fs === s ? `${acc}22` : '#1a1c22', border: `1px solid ${fs === s ? acc + '66' : '#2a2d35'}`, borderRadius: 3, padding: '3px 0', cursor: 'pointer', color: fs === s ? acc : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>
-              {s}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 9, color: '#505560', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Network map animation</div>
-        <button onClick={() => updateTweak('networkMapAnimations', !tweaks.networkMapAnimations)}
-          style={{ width: '100%', background: tweaks.networkMapAnimations ? `${acc}22` : '#1a1c22', border: `1px solid ${tweaks.networkMapAnimations ? acc + '66' : '#2a2d35'}`, borderRadius: 4, padding: '7px 10px', cursor: 'pointer', color: tweaks.networkMapAnimations ? acc : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono', textAlign: 'left' }}>
-          {tweaks.networkMapAnimations ? 'Enabled: dashed and animated' : 'Disabled: solid lines'}
-        </button>
-      </div>
-
-      <button onClick={() => { updateTweak('accent', TWEAK_DEFAULTS.accent); updateTweak('accentGreen', TWEAK_DEFAULTS.accentGreen); updateTweak('fontSize', TWEAK_DEFAULTS.fontSize); }}
-        style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 12px', cursor: 'pointer', color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono', width: '100%', marginTop: 4 }}>
-        Reset to defaults
-      </button>
-    </div>
-  );
-};
+import { NavTab, ProjectPicker, TweaksPanel } from './app/AppChrome.jsx';
+import { TWEAK_DEFAULTS, TWEAKS_KEY } from './app/uiConstants.js';
+import { applySyncEvent } from './app/applySyncEvent.js';
 
 // ── Main App ──────────────────────────────────────────────────────────
 export default function App() {
@@ -314,175 +204,24 @@ export default function App() {
   }, []);
 
   const handleSyncEvent = useCallback((msg) => {
-    const { entity, action, data } = msg;
-
-    // Skip echoes from our own mutations
-    if (data?._lid && localOps.current.has(data._lid)) {
-      localOps.current.delete(data._lid);
-      return;
-    }
-
-    if (entity === 'note') {
-      if (action === 'create') setNotes(prev => prev.some(x => x.id === data.id) ? prev : [data, ...prev]);
-      if (action === 'update') setNotes(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setNotes(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'host') {
-      if (action === 'create') setHosts(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setHosts(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'upsert') setHosts(prev => prev.some(x => x.id === data.id) ? prev.map(x => x.id === data.id ? data : x) : [...prev, data]);
-      if (action === 'delete') setHosts(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'cred') {
-      if (action === 'create') setCreds(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setCreds(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setCreds(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'network') {
-      if (action === 'create') setNetworks(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setNetworks(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setNetworks(prev => prev.filter(x => x.id !== data.id));
-      if (action === 'node_created') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          nodes: net.nodes?.some(node => node.id === data.node.id) ? net.nodes : [...(net.nodes || []), data.node],
-        }));
-      }
-      if (action === 'node_updated') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          nodes: (net.nodes || []).map(node => {
-            if (node.id !== data.node.id) return node;
-            if ((node.version || 0) > (data.node.version || 0)) return node;
-            return { ...node, ...data.node };
-          }),
-        }));
-      }
-      if (action === 'node_position_updated') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          nodes: (net.nodes || []).map(node => {
-            if (node.id !== data.node_id) return node;
-            if ((node.version || 0) > (data.version || 0)) return node;
-            return {
-              ...node,
-              x: data.position.x,
-              y: data.position.y,
-              manually_positioned: data.manually_positioned,
-              auto_positioned: !data.manually_positioned,
-              updated_at: data.updated_at,
-              version: data.version,
-            };
-          }),
-        }));
-      }
-      if (action === 'node_deleted') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          nodes: (net.nodes || []).filter(node => node.id !== data.node_id),
-          edges: (net.edges || []).filter(edge => edge.from !== data.node_id && edge.to !== data.node_id && !(data.deleted_edge_ids || []).includes(edge.id)),
-        }));
-      }
-      if (action === 'link_created') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          edges: net.edges?.some(edge => edge.id === data.link.id) ? net.edges : [...(net.edges || []), data.link],
-        }));
-      }
-      if (action === 'link_updated') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          edges: (net.edges || []).map(edge => {
-            if (edge.id !== data.link.id) return edge;
-            if ((edge.version || 0) > (data.link.version || 0)) return edge;
-            return { ...edge, ...data.link };
-          }),
-        }));
-      }
-      if (action === 'link_deleted') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          edges: (net.edges || []).filter(edge => edge.id !== data.link_id),
-        }));
-      }
-      if (action === 'region_created') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          regions: net.regions?.some(region => region.id === data.region.id) ? net.regions : [...(net.regions || []), data.region],
-        }));
-      }
-      if (action === 'region_updated') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          regions: (net.regions || []).map(region => {
-            if (region.id !== data.region.id) return region;
-            if ((region.version || 0) > (data.region.version || 0)) return region;
-            return { ...region, ...data.region };
-          }),
-        }));
-      }
-      if (action === 'region_deleted') {
-        updateOneNetwork(data.network_id, (net) => ({
-          ...net,
-          regions: (net.regions || []).filter(region => region.id !== data.region_id),
-        }));
-      }
-      if (action === 'layout_applied' || action === 'topology_rebuilt' || action === 'layout_reset') {
-        if (data.network) setNetworks(prev => prev.map(net => net.id === data.network.id ? data.network : net));
-      }
-    }
-    if (entity === 'finding') {
-      if (action === 'create') setFindings(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setFindings(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setFindings(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'objective') {
-      if (action === 'create') setObjectives(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setObjectives(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setObjectives(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'attack_path') {
-      if (action === 'create') setAttackPaths(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setAttackPaths(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setAttackPaths(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'attack_step') {
-      if (action === 'create') setAttackSteps(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setAttackSteps(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setAttackSteps(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'loot') {
-      if (action === 'create') setLoots(prev => prev.some(x => x.id === data.id) ? prev : [data, ...prev]);
-      if (action === 'update') setLoots(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setLoots(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'scope') {
-      if (action === 'create') setScopes(prev => prev.some(x => x.id === data.id) ? prev : [...prev, data]);
-      if (action === 'update') setScopes(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setScopes(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'host_activity') {
-      if (action === 'create') setHostActivities(prev => prev.some(x => x.id === data.id) ? prev : [data, ...prev]);
-      if (action === 'update') setHostActivities(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setHostActivities(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'job') {
-      if (action === 'create') setJobs(prev => prev.some(x => x.id === data.id) ? prev : [data, ...prev]);
-      if (action === 'update') setJobs(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') setJobs(prev => prev.filter(x => x.id !== data.id));
-    }
-    if (entity === 'project') {
-      if (action === 'update') setProjects(prev => prev.map(x => x.id === data.id ? data : x));
-      if (action === 'delete') {
-        setProjects(prev => prev.filter(x => x.id !== data.id));
-        setNotes(prev => prev.filter(x => x.pid !== data.id));
-        setHosts(prev => prev.filter(x => x.pid !== data.id));
-        setCreds(prev => prev.filter(x => x.pid !== data.id));
-        setNetworks(prev => prev.filter(x => x.pid !== data.id));
-        setHostActivities(prev => prev.filter(x => x.pid !== data.id));
-      }
-    }
-  }, [updateOneNetwork]);
+    applySyncEvent(msg, {
+      localOps,
+      setNotes,
+      setHosts,
+      setCreds,
+      setNetworks,
+      setFindings,
+      setObjectives,
+      setAttackPaths,
+      setAttackSteps,
+      setLoots,
+      setScopes,
+      setHostActivities,
+      setJobs,
+      setProjects,
+      updateOneNetwork,
+    });
+  }, [setAttackPaths, setAttackSteps, setCreds, setFindings, setHostActivities, setHosts, setJobs, setLoots, setNetworks, setNotes, setObjectives, setProjects, setScopes, updateOneNetwork]);
 
   const { send: sendWs } = useSync(selectedProject, currentUser?.username, handleSyncEvent, setPresence);
   const sendFocus = useCallback((noteId) => sendWs(noteId ? { type: 'focus', note_id: noteId } : { type: 'blur' }), [sendWs]);
@@ -920,7 +659,7 @@ export default function App() {
             <div style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk' }}>{TABS.find(t => t.id === tab)?.label}</div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto' }}>
-            <ProjectPicker projects={projects} notes={notes} hosts={hosts.filter(h => !isAttackerHost(h))} creds={creds} selected={selectedProject} onSelect={setSelectedProject} accent={acc} />
+            <ProjectPicker projects={projects} hosts={hosts.filter(h => !isAttackerHost(h))} selected={selectedProject} onSelect={setSelectedProject} accent={acc} />
           </div>
           <div style={{ borderTop: '1px solid #151720', padding: '12px 14px' }}>
             {[['notes', notes.filter(n => n.pid === selectedProject).length, 'notes'],

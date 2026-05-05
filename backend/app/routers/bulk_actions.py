@@ -16,6 +16,7 @@ from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
+from ..core.utils import domains_match
 from ..core.utils import new_id
 from ..database import get_db
 from ..plugins.registry import registry
@@ -339,10 +340,32 @@ async def validate_cred(
     loop = asyncio.get_event_loop()
     results = []
 
+    job = start_job(
+        db, pid, "cred_validate", f"Cred validate: {cred.username}",
+        target=cred.username,
+        command=f"validate {body.service} against {len(body.host_ids)} host(s)",
+        created_by=exec_username or "",
+        connector_key="attacker_ssh",
+        operation="cred_validate",
+        related_entity_type="cred",
+        related_entity_id=cred.id,
+        request_json={"cred_id": cred.id, **body.model_dump()},
+    )
+
     for host in target_hosts:
         target_ip = host.ip or host.hostname
         if not target_ip:
             results.append({"host_id": host.id, "ok": False, "error": "Host has no IP"})
+            continue
+
+        if cred.is_domain and cred.domain and not domains_match(cred.domain, host.domain or ''):
+            results.append({
+                "host_id": host.id,
+                "ip": target_ip,
+                "ok": False,
+                "service": body.service,
+                "error": f"Domain mismatch: cred={cred.domain} host={host.domain or '-'}",
+            })
             continue
 
         # Determine service
@@ -431,4 +454,21 @@ async def validate_cred(
             "activity_id": activity.id,
         })
 
-    return {"ok": True, "results": results, "cred_id": cred_id}
+    success_count = sum(1 for item in results if item.get("ok"))
+    finish_job(
+        db,
+        job,
+        status="done",
+        output="\n".join(
+            f"{item.get('ip', item.get('host_id', '?'))}: {'OK' if item.get('ok') else 'FAIL'} ({item.get('service', body.service)})"
+            for item in results
+        )[:20000],
+        result={
+            "cred_id": cred.id,
+            "hosts_total": len(results),
+            "hosts_valid": success_count,
+            "hosts_failed": len(results) - success_count,
+        },
+    )
+
+    return {"ok": True, "results": results, "cred_id": cred_id, "job_id": job.id}

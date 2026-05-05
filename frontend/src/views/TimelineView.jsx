@@ -5,7 +5,7 @@ import { api } from '../api.js';
 const ENTITY_META = {
   note:    { icon: 'notes',   color: '#5b8af5', label: 'Note' },
   host:    { icon: 'hosts',   color: '#c07af0', label: 'Host' },
-  cred:    { icon: 'creds',   color: '#39d353', label: 'Cred' },
+  cred:    { icon: 'person',  color: '#39d353', label: 'Cred' },
   finding: { icon: 'bug',     color: '#e8574a', label: 'Finding' },
 };
 

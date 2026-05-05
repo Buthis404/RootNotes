@@ -10,7 +10,7 @@ const RUN_STATUS = {
 };
 
 function emptyStep() {
-  return { title: '', connector_key: 'nmap', operation: 'scan', params: {}, on_failure: 'stop' };
+  return { title: '', connector_key: 'nmap', operation: 'scan', params: {}, on_success: 'next', on_success_step: null, on_failure: 'stop', on_failure_step: null, result_conditions: [] };
 }
 
 function emptyPlaybook() {
@@ -32,12 +32,20 @@ function buildStepFromTemplate(template) {
     connector_key: template.connector_key,
     operation: template.operation,
     params: Object.fromEntries((template.fields || []).map(field => [field.key, field.default ?? (field.type === 'boolean' ? false : '')])),
+    on_success: 'next',
+    on_success_step: null,
     on_failure: 'stop',
+    on_failure_step: null,
+    result_conditions: [],
   };
 }
 
 function templateLabel(template) {
   return `${template.connector_key}:${template.operation}`;
+}
+
+function emptyCondition() {
+  return { when: 'success', result_key: '', operator: 'eq', value: '', action: 'stop', target_step: null };
 }
 
 function PlaybookCard({ playbook, accent, selected, onSelect }) {
@@ -63,7 +71,7 @@ function PlaybookCard({ playbook, accent, selected, onSelect }) {
   );
 }
 
-function StepEditor({ step, connectors, templates, onChange, onDelete, disableDelete }) {
+function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChange, onDelete, disableDelete }) {
   const matchingConnectors = connectors.filter(c => c.key === step.connector_key);
   const connector = matchingConnectors[0] || null;
   const operations = connector?.supported_operations?.length ? connector.supported_operations : ['scan'];
@@ -94,11 +102,44 @@ function StepEditor({ step, connectors, templates, onChange, onDelete, disableDe
           {operations.map(op => <option key={op} value={op}>{op}</option>)}
         </select>
         <div style={{ display: 'flex', gap: 6 }}>
-          <select value={step.on_failure || 'stop'} onChange={e => onChange({ ...step, on_failure: e.target.value })} style={inp()}>
+          <select value={step.on_failure || 'stop'} onChange={e => onChange({ ...step, on_failure: e.target.value, on_failure_step: e.target.value === 'jump' ? (step.on_failure_step || Math.min(stepCount, stepIndex + 2)) : null })} style={inp()}>
             <option value="stop">stop</option>
             <option value="continue">continue</option>
+            <option value="jump">jump</option>
           </select>
           <button onClick={onDelete} disabled={disableDelete} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '0 10px', cursor: disableDelete ? 'default' : 'pointer', color: '#cc2233', fontSize: 11, fontFamily: 'JetBrains Mono', opacity: disableDelete ? 0.5 : 1 }}>Delete</button>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+        <div>
+          <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>On success</div>
+          <select value={step.on_success || 'next'} onChange={e => onChange({ ...step, on_success: e.target.value, on_success_step: e.target.value === 'jump' ? (step.on_success_step || Math.min(stepCount, stepIndex + 2)) : null })} style={inp()}>
+            <option value="next">next</option>
+            <option value="stop">stop</option>
+            <option value="jump">jump</option>
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Success jump</div>
+          <select value={step.on_success_step || ''} disabled={(step.on_success || 'next') !== 'jump'} onChange={e => onChange({ ...step, on_success_step: e.target.value ? Number(e.target.value) : null })} style={{ ...inp(), opacity: (step.on_success || 'next') === 'jump' ? 1 : 0.5 }}>
+            <option value="">Select step</option>
+            {Array.from({ length: stepCount }, (_, i) => i + 1).map(num => <option key={num} value={num}>Step {num}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>On failure</div>
+          <select value={step.on_failure || 'stop'} onChange={e => onChange({ ...step, on_failure: e.target.value, on_failure_step: e.target.value === 'jump' ? (step.on_failure_step || Math.min(stepCount, stepIndex + 2)) : null })} style={inp()}>
+            <option value="stop">stop</option>
+            <option value="continue">continue</option>
+            <option value="jump">jump</option>
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Failure jump</div>
+          <select value={step.on_failure_step || ''} disabled={(step.on_failure || 'stop') !== 'jump'} onChange={e => onChange({ ...step, on_failure_step: e.target.value ? Number(e.target.value) : null })} style={{ ...inp(), opacity: (step.on_failure || 'stop') === 'jump' ? 1 : 0.5 }}>
+            <option value="">Select step</option>
+            {Array.from({ length: stepCount }, (_, i) => i + 1).map(num => <option key={num} value={num}>Step {num}</option>)}
+          </select>
         </div>
       </div>
       {template ? (
@@ -130,6 +171,61 @@ function StepEditor({ step, connectors, templates, onChange, onDelete, disableDe
         <div style={{ background: '#1a0808', border: '1px solid #3a1010', borderRadius: 6, padding: '10px 12px', color: '#f87171', fontSize: 11 }}>No step template exists for this connector/operation yet.</div>
       )}
       {template?.description && <div style={{ fontSize: 10, color: '#505560', marginTop: 8, lineHeight: 1.5 }}>{template.description}</div>}
+      <div style={{ fontSize: 10, color: '#505560', marginTop: 6, lineHeight: 1.5 }}>Flow: success → <code>{step.on_success || 'next'}{step.on_success_step ? `:${step.on_success_step}` : ''}</code>, failure → <code>{step.on_failure || 'stop'}{step.on_failure_step ? `:${step.on_failure_step}` : ''}</code></div>
+      <div style={{ marginTop: 10, background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Result conditions</div>
+          <button onClick={() => onChange({ ...step, result_conditions: [...(step.result_conditions || []), emptyCondition()] })} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Add condition</button>
+        </div>
+        {(step.result_conditions || []).length === 0 ? (
+          <div style={{ fontSize: 10, color: '#505560' }}>No result-based branching rules.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {(step.result_conditions || []).map((cond, idx) => (
+              <div key={idx} style={{ display: 'grid', gridTemplateColumns: '110px 1fr 100px 120px 100px 110px 40px', gap: 6, alignItems: 'end' }}>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>When</div>
+                  <select value={cond.when || 'success'} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, when: e.target.value } : item) })} style={inp()}>
+                    <option value="success">success</option>
+                    <option value="failure">failure</option>
+                    <option value="always">always</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Result key</div>
+                  <input value={cond.result_key || ''} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, result_key: e.target.value } : item) })} placeholder="findings_created" style={inp()} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Op</div>
+                  <select value={cond.operator || 'eq'} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, operator: e.target.value } : item) })} style={inp()}>
+                    {['eq','ne','gt','gte','lt','lte','contains'].map(op => <option key={op} value={op}>{op}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Value</div>
+                  <input value={cond.value ?? ''} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, value: e.target.value } : item) })} placeholder="0" style={inp()} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Action</div>
+                  <select value={cond.action || 'stop'} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, action: e.target.value, target_step: e.target.value === 'jump' ? (item.target_step || Math.min(stepCount, stepIndex + 2)) : null } : item) })} style={inp()}>
+                    <option value="stop">stop</option>
+                    <option value="next">next</option>
+                    <option value="jump">jump</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Jump</div>
+                  <select value={cond.target_step || ''} disabled={(cond.action || 'stop') !== 'jump'} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, target_step: e.target.value ? Number(e.target.value) : null } : item) })} style={{ ...inp(), opacity: (cond.action || 'stop') === 'jump' ? 1 : 0.5 }}>
+                    <option value="">Step</option>
+                    {Array.from({ length: stepCount }, (_, i) => i + 1).map(num => <option key={num} value={num}>Step {num}</option>)}
+                  </select>
+                </div>
+                <button onClick={() => onChange({ ...step, result_conditions: step.result_conditions.filter((_, i) => i !== idx) })} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '7px 0', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -218,7 +314,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
       const payload = {
         title: editor.title,
         description: editor.description,
-        steps: (editor.steps || []).map(step => ({ title: step.title, connector_key: step.connector_key, operation: step.operation, params: step.params || {}, on_failure: step.on_failure || 'stop' })),
+        steps: (editor.steps || []).map(step => ({ title: step.title, connector_key: step.connector_key, operation: step.operation, params: step.params || {}, on_success: step.on_success || 'next', on_success_step: step.on_success_step ?? null, on_failure: step.on_failure || 'stop', on_failure_step: step.on_failure_step ?? null, result_conditions: step.result_conditions || [] })),
       };
       const validationRes = await api.validatePlaybook(payload);
       setValidation({ errors: validationRes.errors || [], warnings: validationRes.warnings || [] });
@@ -340,6 +436,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                       step={step}
                       connectors={connectors}
                       templates={stepTemplates}
+                      stepCount={editor.steps.length}
+                      stepIndex={idx}
                       onChange={(next) => setEditor(prev => ({ ...prev, steps: prev.steps.map((item, i) => i === idx ? next : item) }))}
                       onDelete={() => setEditor(prev => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))}
                       disableDelete={editor.steps.length <= 1}
@@ -366,7 +464,9 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                           {step.params && Object.keys(step.params).length > 0 && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{JSON.stringify(step.params)}</div>}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontSize: 9, color: step.on_failure === 'continue' ? '#f09a3a' : '#808590', background: step.on_failure === 'continue' ? '#f09a3a18' : '#80859018', border: `1px solid ${step.on_failure === 'continue' ? '#f09a3a33' : '#80859033'}`, borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>{step.on_failure || 'stop'}</span>
+                          <span style={{ fontSize: 9, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>ok:{step.on_success || 'next'}{step.on_success_step ? `:${step.on_success_step}` : ''}</span>
+                          <span style={{ fontSize: 9, color: step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a' : '#808590', background: step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a18' : '#80859018', border: `1px solid ${step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a33' : '#80859033'}`, borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>fail:{step.on_failure || 'stop'}{step.on_failure_step ? `:${step.on_failure_step}` : ''}</span>
+                          {!!(step.result_conditions || []).length && <span style={{ fontSize: 9, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>conditions:{step.result_conditions.length}</span>}
                         </div>
                       </div>
                     ))}

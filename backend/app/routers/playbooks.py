@@ -28,7 +28,11 @@ class PlaybookStepBody(BaseModel):
     connector_key: str
     operation: str
     params: dict = Field(default_factory=dict)
-    on_failure: str = "stop"  # stop | continue
+    on_success: str = "next"  # next | stop | jump
+    on_success_step: int | None = None
+    on_failure: str = "stop"  # stop | continue | jump
+    on_failure_step: int | None = None
+    result_conditions: list[dict] = Field(default_factory=list)
 
 
 class PlaybookBody(BaseModel):
@@ -133,6 +137,8 @@ STEP_TEMPLATES = {
     },
 }
 
+CONDITION_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains"}
+
 
 def _template_for(connector_key: str, operation: str) -> dict | None:
     return STEP_TEMPLATES.get(f"{connector_key}:{operation}")
@@ -149,6 +155,82 @@ def _normalize_field_value(field: dict, value):
     return "" if value is None else value
 
 
+def _normalize_branch_action(value: str | None, *, success: bool) -> str:
+    if not value:
+        return "next" if success else "stop"
+    value = value.strip().lower()
+    if value == "continue":
+        return "next"
+    return value
+
+
+def _normalize_condition(rule: dict) -> dict:
+    return {
+        "when": (rule.get("when") or "success").strip().lower(),
+        "result_key": str(rule.get("result_key") or "").strip(),
+        "operator": str(rule.get("operator") or "eq").strip().lower(),
+        "value": rule.get("value"),
+        "action": _normalize_branch_action(rule.get("action"), success=True),
+        "target_step": rule.get("target_step"),
+    }
+
+
+def _extract_result_value(result: dict, result_key: str):
+    current = result
+    for part in result_key.split('.'):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _condition_matches(actual, operator: str, expected) -> bool:
+    if operator == "eq":
+        return actual == expected
+    if operator == "ne":
+        return actual != expected
+    if operator == "contains":
+        return expected in actual if isinstance(actual, (str, list, tuple, set)) else False
+    try:
+        a = float(actual)
+        b = float(expected)
+    except Exception:
+        return False
+    if operator == "gt":
+        return a > b
+    if operator == "gte":
+        return a >= b
+    if operator == "lt":
+        return a < b
+    if operator == "lte":
+        return a <= b
+    return False
+
+
+def _resolve_result_condition_target(step: dict, job_result: dict, *, status: str, total_steps: int):
+    rules = step.get("result_conditions") or []
+    for raw_rule in rules:
+        rule = _normalize_condition(raw_rule)
+        if rule["when"] not in {"success", "failure", "always"}:
+            continue
+        if rule["when"] == "success" and status != "done":
+            continue
+        if rule["when"] == "failure" and status == "done":
+            continue
+        actual = _extract_result_value(job_result or {}, rule["result_key"])
+        if _condition_matches(actual, rule["operator"], rule["value"]):
+            if rule["action"] == "stop":
+                return None, True
+            if rule["action"] == "jump":
+                target = rule.get("target_step")
+                if isinstance(target, int) and 1 <= target <= total_steps:
+                    return target - 1, False
+                return None, True
+            return None, False
+    return None, False
+
+
 def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[dict]) -> dict:
     errors = []
     warnings = []
@@ -160,6 +242,7 @@ def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[di
         errors.append("At least one step is required")
 
     normalized_steps = []
+    total_steps = len(body.steps)
     for idx, step in enumerate(body.steps):
         prefix = f"Step {idx + 1}"
         if not step.title.strip():
@@ -171,11 +254,42 @@ def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[di
         if step.operation not in (connector.get("supported_operations") or []):
             errors.append(f"{prefix}: unsupported operation {step.operation!r} for connector {step.connector_key!r}")
             continue
-        if step.on_failure not in {"stop", "continue"}:
-            errors.append(f"{prefix}: on_failure must be 'stop' or 'continue'")
+        on_success = _normalize_branch_action(step.on_success, success=True)
+        on_failure = _normalize_branch_action(step.on_failure, success=False)
+        if on_success not in {"next", "stop", "jump"}:
+            errors.append(f"{prefix}: on_success must be 'next', 'stop', or 'jump'")
+        if on_failure not in {"next", "stop", "jump"}:
+            errors.append(f"{prefix}: on_failure must be 'stop', 'next', or 'jump'")
+        if on_success == "jump":
+            if step.on_success_step is None:
+                errors.append(f"{prefix}: on_success_step is required when on_success='jump'")
+            elif step.on_success_step < 1 or step.on_success_step > total_steps:
+                errors.append(f"{prefix}: on_success_step must be between 1 and {total_steps}")
+        if on_failure == "jump":
+            if step.on_failure_step is None:
+                errors.append(f"{prefix}: on_failure_step is required when on_failure='jump'")
+            elif step.on_failure_step < 1 or step.on_failure_step > total_steps:
+                errors.append(f"{prefix}: on_failure_step must be between 1 and {total_steps}")
 
         template = _template_for(step.connector_key, step.operation)
         params = dict(step.params or {})
+        normalized_conditions = []
+        for ridx, raw_rule in enumerate(step.result_conditions or []):
+            cond = _normalize_condition(raw_rule)
+            if cond["when"] not in {"success", "failure", "always"}:
+                errors.append(f"{prefix}: condition {ridx + 1} has invalid when value")
+            if not cond["result_key"]:
+                errors.append(f"{prefix}: condition {ridx + 1} requires result_key")
+            if cond["operator"] not in CONDITION_OPERATORS:
+                errors.append(f"{prefix}: condition {ridx + 1} has invalid operator")
+            if cond["action"] not in {"next", "stop", "jump"}:
+                errors.append(f"{prefix}: condition {ridx + 1} has invalid action")
+            if cond["action"] == "jump":
+                if cond["target_step"] is None:
+                    errors.append(f"{prefix}: condition {ridx + 1} requires target_step when action='jump'")
+                elif cond["target_step"] < 1 or cond["target_step"] > total_steps:
+                    errors.append(f"{prefix}: condition {ridx + 1} target_step must be between 1 and {total_steps}")
+            normalized_conditions.append(cond)
         if template:
           allowed = {field["key"]: field for field in template.get("fields", [])}
           unknown = [key for key in params.keys() if key not in allowed]
@@ -195,7 +309,11 @@ def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[di
             "connector_key": step.connector_key,
             "operation": step.operation,
             "params": params,
-            "on_failure": step.on_failure,
+            "on_success": on_success,
+            "on_success_step": step.on_success_step,
+            "on_failure": on_failure,
+            "on_failure_step": step.on_failure_step,
+            "result_conditions": normalized_conditions,
         })
 
     return {
@@ -226,8 +344,8 @@ BUILTIN_PLAYBOOKS = {
         "description": "Run an Nmap scan and then refresh topology from discovered hosts.",
         "editable": False,
         "steps": [
-            {"title": "Nmap scan", "connector_key": "nmap", "operation": "scan", "params": {}, "on_failure": "stop"},
-            {"title": "Topology auto-build", "connector_key": "topology", "operation": "auto_build", "params": {}, "on_failure": "continue"},
+            {"title": "Nmap scan", "connector_key": "nmap", "operation": "scan", "params": {}, "on_success": "next", "on_failure": "stop", "result_conditions": [{"when": "success", "result_key": "hosts_found", "operator": "eq", "value": 0, "action": "stop"}]},
+            {"title": "Topology auto-build", "connector_key": "topology", "operation": "auto_build", "params": {}, "on_success": "next", "on_failure": "stop"},
         ],
     },
     "web-triage": {
@@ -236,10 +354,23 @@ BUILTIN_PLAYBOOKS = {
         "description": "Run a Nuclei scan against a supplied target URL.",
         "editable": False,
         "steps": [
-            {"title": "Nuclei scan", "connector_key": "nuclei", "operation": "scan", "params": {}, "on_failure": "stop"},
+            {"title": "Nuclei scan", "connector_key": "nuclei", "operation": "scan", "params": {}, "on_success": "next", "on_failure": "stop", "result_conditions": [{"when": "success", "result_key": "findings_created", "operator": "gt", "value": 0, "action": "stop"}]},
         ],
     },
 }
+
+
+def _resolve_next_step_index(step: dict, *, success: bool, current_idx: int, total_steps: int) -> int | None:
+    action = _normalize_branch_action(step.get("on_success") if success else step.get("on_failure"), success=success)
+    target = step.get("on_success_step") if success else step.get("on_failure_step")
+    if action == "stop":
+        return None
+    if action == "jump":
+        if isinstance(target, int) and 1 <= target <= total_steps:
+            return target - 1
+        return None
+    next_idx = current_idx + 1
+    return next_idx if next_idx < total_steps else None
 
 
 def _playbook_run_dict(run: models.PlaybookRun) -> dict:
@@ -471,7 +602,12 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
         db.close()
 
     completed = []
-    for idx, job_id in enumerate(job_ids):
+    failed = []
+    total_steps = len(job_ids)
+    idx = 0
+    while idx < total_steps:
+        job_id = job_ids[idx]
+        step = steps[idx] if idx < len(steps) else {}
         db = SessionLocal()
         try:
             run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
@@ -483,9 +619,31 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
         schedule_job_run(job_id)
         result = await _wait_for_job(job_id, run_id)
         completed.append(result)
+        condition_idx, condition_stop = _resolve_result_condition_target(step, result or {}, status=result.get("status"), total_steps=total_steps)
+        if condition_stop:
+            db = SessionLocal()
+            try:
+                run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+                if run and run.status != "cancelled":
+                    terminal = "done" if result.get("status") == "done" else ("cancelled" if result.get("status") == "cancelled" else "failed")
+                    _update_run(
+                        db,
+                        run,
+                        status=terminal,
+                        finished_at=_now(),
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "condition_stop": True},
+                    )
+            finally:
+                db.close()
+            return
+        if condition_idx is not None:
+            idx = condition_idx
+            continue
         if result.get("status") != "done":
-            on_failure = (steps[idx] or {}).get("on_failure", "stop")
-            if on_failure == "continue":
+            failed.append(result)
+            next_idx = _resolve_next_step_index(step, success=False, current_idx=idx, total_steps=total_steps)
+            if next_idx is not None:
+                idx = next_idx
                 continue
             db = SessionLocal()
             try:
@@ -498,25 +656,28 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         status=terminal,
                         finished_at=_now(),
                         error_output=f"Step job {job_id} ended with status {result.get('status')}",
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_job_id": job_id},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "failed_job_id": job_id},
                     )
             finally:
                 db.close()
             break
-    else:
-        db = SessionLocal()
-        try:
-            run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
-            if run and run.status != "cancelled":
-                _update_run(
-                    db,
-                    run,
-                    status="done",
-                    finished_at=_now(),
-                    result_json={"completed_jobs": [item.get("id") for item in completed], "job_count": len(completed)},
-                )
-        finally:
-            db.close()
+        next_idx = _resolve_next_step_index(step, success=True, current_idx=idx, total_steps=total_steps)
+        if next_idx is None:
+            db = SessionLocal()
+            try:
+                run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+                if run and run.status != "cancelled":
+                    _update_run(
+                        db,
+                        run,
+                        status="done",
+                        finished_at=_now(),
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed)},
+                    )
+            finally:
+                db.close()
+            return
+        idx = next_idx
 
 
 def _create_run_record(db: Session, pid: str, playbook: dict, body: PlaybookRunBody, created_by: str, jobs: list[models.Job]) -> models.PlaybookRun:

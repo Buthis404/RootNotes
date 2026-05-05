@@ -14,6 +14,7 @@ const TYPE_CFG = {
   nuclei:   { color: '#e056c0', label: 'nuclei' },
   cme:      { color: '#f09a3a', label: 'netexec' },
   exec:     { color: '#39d353', label: 'exec' },
+  cred_validate: { color: '#c07af0', label: 'cred-validate' },
   c2_sync:  { color: '#8f7af5', label: 'c2' },
   topology: { color: '#a0a8b8', label: 'topology' },
 };
@@ -67,7 +68,7 @@ function MetaBadge({ value, color = '#808590' }) {
 
 function summarizeResult(result) {
   if (!result || typeof result !== 'object') return '';
-  const preferred = ['hosts_created', 'hosts_updated', 'links_added', 'findings_created', 'findings_found', 'creds_created', 'creds_found', 'nodes_repositioned', 'exit_code'];
+  const preferred = ['hosts_created', 'hosts_updated', 'links_added', 'findings_created', 'findings_found', 'creds_created', 'creds_found', 'hosts_valid', 'hosts_failed', 'nodes_repositioned', 'exit_code'];
   const parts = [];
   for (const key of preferred) {
     if (result[key] !== undefined && result[key] !== '') parts.push(`${key}=${result[key]}`);

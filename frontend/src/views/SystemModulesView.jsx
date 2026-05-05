@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { moduleRegistry } from '../features/plugins/registry.js';
 
 function AttackerSSHPanel({ accent, enabled }) {
-  const emptyTarget = { name: '', host: '', port: 22, username: '', password: '', private_key: '', known_hosts_policy: 'accept_new', project_ids: [], enabled: true };
+  const emptyTarget = { name: '', host: '', port: 22, username: '', password: '', private_key: '', known_hosts_policy: 'accept_new', project_ids: [], enabled: true, has_password: false, has_private_key: false };
   const [targets, setTargets] = useState([]);
   const [projects, setProjects] = useState([]);
   const [selectedTargetId, setSelectedTargetId] = useState('');
@@ -26,7 +26,7 @@ function AttackerSSHPanel({ accent, enabled }) {
       setProjects(projs || []);
       if (loadedTargets[0]) {
         setSelectedTargetId(loadedTargets[0].id);
-        setForm({ ...loadedTargets[0] });
+        setForm({ ...loadedTargets[0], password: '', private_key: '' });
         setIsEditing(true);
       }
     })
@@ -37,7 +37,7 @@ function AttackerSSHPanel({ accent, enabled }) {
 
   useEffect(() => {
     const selected = targets.find(t => t.id === selectedTargetId);
-    if (selected) { setForm({ ...selected }); setIsEditing(true); }
+    if (selected) { setForm({ ...selected, password: '', private_key: '' }); setIsEditing(true); }
   }, [selectedTargetId, targets]);
 
   const toggleProjectId = (pid) => {
@@ -143,13 +143,18 @@ function AttackerSSHPanel({ accent, enabled }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
             <div>
               <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Password</div>
-              <input style={inp} type="password" value={form.password} onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))} disabled={!enabled} />
+              <input style={inp} type="password" value={form.password} onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))} disabled={!enabled} placeholder={isEditing && form.has_password ? 'Stored - enter new to replace' : 'Enter password'} />
             </div>
             <div>
               <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Private key (PEM)</div>
-              <textarea style={{ ...inp, resize: 'vertical', minHeight: 80 }} value={form.private_key} onChange={e => setForm(prev => ({ ...prev, private_key: e.target.value }))} disabled={!enabled} placeholder="Optional — paste PEM key instead of password" />
+              <textarea style={{ ...inp, resize: 'vertical', minHeight: 80 }} value={form.private_key} onChange={e => setForm(prev => ({ ...prev, private_key: e.target.value }))} disabled={!enabled} placeholder={isEditing && form.has_private_key ? 'Stored - paste new PEM to replace' : 'Optional - paste PEM key instead of password'} />
             </div>
           </div>
+          {isEditing && (form.has_password || form.has_private_key) && (
+            <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
+              Stored secrets are write-only. Leave fields blank to keep current values.
+            </div>
+          )}
 
           {/* Project scope */}
           <div style={{ marginBottom: 14 }}>

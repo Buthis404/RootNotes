@@ -564,7 +564,7 @@ def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session =
     if not network and body.options.create_missing_networks:
         network = models.Network(
             id=new_id("net"), pid=pid, name="Network",
-            background="#07080b", regions_json=[], nodes_json=[], edges_json=[],
+            background="#07080b", regions_json=[], nodes_json=[], edges_json=[], meta_json={},
         )
         db.add(network)
         db.flush()
@@ -572,6 +572,8 @@ def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session =
     if network:
         existing_nodes = list(network.nodes_json or [])
         existing_edges = list(network.edges_json or [])
+        existing_meta = deepcopy(network.meta_json or {})
+        suppressed_auto_links = set(existing_meta.get(AUTO_LINK_SUPPRESSIONS_KEY) or [])
 
         # Build set of existing node IPs/host_ids
         existing_node_ips = {n.get("ip") for n in existing_nodes if n.get("ip")}
@@ -626,12 +628,16 @@ def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session =
         if body.options.create_links:
             # Build ip→node_id map
             ip_to_node_id = {n.get("ip"): n.get("id") for n in existing_nodes if n.get("ip")}
+            node_by_id = {n.get("id"): n for n in existing_nodes if n.get("id")}
             existing_edge_keys = {(e.get("from"), e.get("to")) for e in existing_edges}
 
             for link in body.preview.new_links:
                 src_node = ip_to_node_id.get(link.source_ip)
                 dst_node = ip_to_node_id.get(link.target_ip)
                 if not src_node or not dst_node:
+                    continue
+                edge_ref = _edge_ref(node_by_id.get(src_node), node_by_id.get(dst_node))
+                if edge_ref and edge_ref in suppressed_auto_links:
                     continue
                 key = (src_node, dst_node)
                 rkey = (dst_node, src_node)
@@ -653,6 +659,7 @@ def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session =
 
         network.nodes_json = existing_nodes
         network.edges_json = existing_edges
+        network.meta_json = existing_meta
 
     db.commit()
 
@@ -742,9 +749,6 @@ def topology_rebuild_layout(
             node["auto_positioned"] = True
             node["manually_positioned"] = False
 
-    for e in existing_edges:
-        e.pop("label", None)
-
     network.nodes_json = existing_nodes
     network.edges_json = existing_edges
     db.commit()
@@ -802,13 +806,14 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
             return {"ok": False, "error": "No network map found"}
         network = models.Network(
             id=new_id("net"), pid=pid, name="Network",
-            background="#07080b", regions_json=[], nodes_json=[], edges_json=[],
+            background="#07080b", regions_json=[], nodes_json=[], edges_json=[], meta_json={},
         )
         db.add(network)
         db.flush()
 
     existing_nodes: list = list(network.nodes_json or [])
     existing_edges: list = list(network.edges_json or [])
+    existing_meta: dict = deepcopy(network.meta_json or {})
 
     scope_cidrs: list = []
     try:
@@ -882,7 +887,9 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
 
     inferred_links = infer_links_smart(hosts_for_layout)
     ip_to_node_id: dict = {n.get("ip"): n.get("id") for n in existing_nodes if n.get("ip")}
-    manual_edges = [e for e in existing_edges if e.get("source") != "auto"]
+    node_by_id: dict = {n.get("id"): n for n in existing_nodes if n.get("id")}
+    suppressed_auto_links = set(existing_meta.get(AUTO_LINK_SUPPRESSIONS_KEY) or [])
+    manual_edges = [e for e in existing_edges if e.get("source") != "auto" or e.get("manual_override")]
     manual_edge_keys: set = (
         {(e.get("from"), e.get("to")) for e in manual_edges} |
         {(e.get("to"), e.get("from")) for e in manual_edges}
@@ -895,6 +902,9 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
         src_nid = ip_to_node_id.get(link.source_ip)
         dst_nid = ip_to_node_id.get(link.target_ip)
         if not src_nid or not dst_nid:
+            continue
+        edge_ref = _edge_ref(node_by_id.get(src_nid), node_by_id.get(dst_nid))
+        if edge_ref and edge_ref in suppressed_auto_links:
             continue
         key = (src_nid, dst_nid)
         if key in seen_auto_keys or (dst_nid, src_nid) in seen_auto_keys:
@@ -910,6 +920,7 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
 
     network.nodes_json = existing_nodes
     network.edges_json = manual_edges + new_auto_edges
+    network.meta_json = existing_meta
     db.commit()
 
     result = schemas.Network.from_orm_obj(network)

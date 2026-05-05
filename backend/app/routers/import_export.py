@@ -302,6 +302,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 regions_json=net.get("regions", []),
                 nodes_json=net.get("nodes", []),
                 edges_json=net.get("edges", []),
+                meta_json=net.get("meta", {}),
             ))
 
         for f in findings_data:

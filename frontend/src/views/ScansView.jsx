@@ -374,7 +374,7 @@ const C2_TYPES = [
   { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API under /endpoint path. Username + password (or token). URL: https://host:port' },
 ];
 
-const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0 };
+const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0, has_token: false, has_password: false };
 
 const SESSION_STATUS = {
   true:  { color: '#39d353', label: 'Active' },
@@ -750,7 +750,7 @@ function C2Panel({ pid, accent }) {
                   <Input value={form.username} onChange={v => setF('username', v)} placeholder="operator1" />
                 </FieldRow>
                 <FieldRow label="Password">
-                  <Input value={form.password} onChange={v => setF('password', v)} placeholder="teamserver password" />
+                  <Input value={form.password} onChange={v => setF('password', v)} placeholder={editing && form.has_password ? 'Stored - enter new to replace' : 'teamserver password'} />
                 </FieldRow>
               </div>
               <FieldRow label="Endpoint path">
@@ -760,8 +760,13 @@ function C2Panel({ pid, accent }) {
           ) : null}
 
           <FieldRow label={form.type === 'cobalt_strike' ? 'REST API Token (Bearer)' : 'API Token'}>
-            <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing ? '(leave blank to keep existing)' : 'token...'} monospace />
+            <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : 'token...')} monospace />
           </FieldRow>
+          {editing && ((form.type === 'adaptix' && form.has_password) || (form.type !== 'adaptix' && form.has_token)) && (
+            <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
+              Stored integration secrets are write-only. Leave blank to keep current values.
+            </div>
+          )}
 
           <FieldRow label="Auto-sync interval (minutes, 0 = manual only)">
             <Input value={String(form.sync_interval_minutes ?? 0)} onChange={v => setF('sync_interval_minutes', parseInt(v) || 0)} placeholder="0" monospace />

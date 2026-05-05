@@ -46,6 +46,7 @@ with engine.begin() as conn:
     conn.execute(text("CREATE TABLE IF NOT EXISTS global_settings (key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}')"))
     conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '#07080b'"))
     conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS regions_json JSONB NOT NULL DEFAULT '[]'"))
+    conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS meta_json JSONB NOT NULL DEFAULT '{}'"))
     conn.execute(text("ALTER TABLE networks ALTER COLUMN name SET DEFAULT 'Network'"))
     conn.execute(text("UPDATE networks SET name = 'Network' WHERE name = 'Сеть'"))
     conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS ips TEXT[] NOT NULL DEFAULT '{}'"))

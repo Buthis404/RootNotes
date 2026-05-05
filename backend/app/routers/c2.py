@@ -82,10 +82,10 @@ def _decrypt_integration(cfg: dict) -> dict:
 def _safe_integration(cfg: dict) -> dict:
     """Return config without sensitive fields for API responses."""
     c = dict(cfg)
-    if c.get("token"):
-        c["token"] = "***"
-    if c.get("password"):
-        c["password"] = "***"
+    c["has_token"] = bool(c.get("token"))
+    c["has_password"] = bool(c.get("password"))
+    c["token"] = ""
+    c["password"] = ""
     return c
 
 
