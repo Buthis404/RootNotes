@@ -4,6 +4,7 @@ import { FieldInput, Badge } from '../components/UI.jsx';
 import { NODE_STATUS, NODE_TYPES, OS_ICONS } from '../constants.js';
 import { api } from '../api.js';
 import AttackVectorAnalyzer from '../components/AttackVectorAnalyzer.jsx';
+import C2HostActionsPanel from '../components/C2HostActionsPanel.jsx';
 import { getCredBadges, getHostBadges, summarizeCreds, normalizeDomain, domainsMatch, HOST_ROLES, isAttackerHost } from '../utils/hostMeta.js';
 import TopologyBuilderModal from '../components/TopologyBuilderModal.jsx';
 import CredPanel from './network-map/CredPanel.jsx';
@@ -232,6 +233,7 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                 {hostObj?.ip && <div style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>Primary IP: {hostObj.ip}</div>}
               </div>
             )}
+            {hostObj && <C2HostActionsPanel pid={projectId} host={hostObj} accent={accent} />}
             <div>
               <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Links / Connections</div>
               {selectedNodeEdges.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No connections for this host</div>}

@@ -222,6 +222,10 @@ export const api = {
   syncC2ToProject:       (id, pid)       => req('POST',   `/admin/c2/${id}/sync/${pid}`),
   listC2ForProject:      (pid)           => req('GET',    `/admin/c2/for-project/${pid}`),
   getC2LiveSessions:     (pid)           => req('GET',    `/admin/c2/sessions/${pid}`),
+  getC2HostActions:      (pid, hostId)   => req('GET',    `/admin/c2/host-actions/${pid}/${hostId}`),
+  listC2Bofs:            (id, pid)       => req('GET',    `/admin/c2/${id}/bofs/${pid}`),
+  executeC2HostAction:   (pid, data)     => req('POST',   `/admin/c2/execute/${pid}`, data),
+  getC2AgentTasks:       (pid, integrationId, agentId, limit = 30) => req('GET', `/admin/c2/agent-tasks/${pid}?integration_id=${encodeURIComponent(integrationId)}&agent_id=${encodeURIComponent(agentId)}&limit=${encodeURIComponent(limit)}`),
 
   // Bulk actions
   bulkExec:      (pid, data)           => req('POST', `/projects/${pid}/bulk-exec`,                data),

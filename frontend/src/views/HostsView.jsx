@@ -4,6 +4,7 @@ import { HostStatusBadge, SearchBar, FieldInput, Badge, TagEditor } from '../com
 import { NODE_STATUS, OS_ICONS, PORT_SERVICES, serviceColor } from '../constants.js';
 import NmapParser from '../components/NmapParser.jsx';
 import BloodHoundParser from '../components/BloodHoundParser.jsx';
+import C2HostActionsPanel from '../components/C2HostActionsPanel.jsx';
 import { api } from '../api.js';
 import { getCredBadges, getHostBadges, summarizeCreds, HOST_ROLES, normalizeDomain, domainsMatch } from '../utils/hostMeta.js';
 import { useColumnResize } from '../hooks/useColumnResize.js';
@@ -713,6 +714,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
               </div>
               <TagEditor label="Tags" tags={selHost.tags || []} onChange={tags => onUpdate(selHost.id, { tags })} placeholder="nginx, rce" />
               <FieldInput label="Notes" value={selHost.notes || ''} onChange={v => onUpdate(selHost.id, { notes: v })} placeholder="CVE, details..." textarea />
+              <C2HostActionsPanel pid={selectedProject} host={selHost} accent={accent} />
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                   <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Host activity log</div>

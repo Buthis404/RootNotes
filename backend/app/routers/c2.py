@@ -5,6 +5,8 @@ Each integration is stored as an encrypted config in global_settings.
 Sync pulls sessions/agents/creds from the C2 and auto-populates
 hosts, creds, and optionally findings.
 """
+import asyncio
+import re
 import secrets
 from datetime import datetime
 from typing import Any, Optional
@@ -35,6 +37,13 @@ def _require_c2():
 router = APIRouter(prefix="/api/admin/c2", tags=["c2"])
 
 _C2_SETTING_KEY = "c2_integrations"
+
+
+def _visible_integrations_for_pid(integrations: list[dict], pid: str) -> list[dict]:
+    return [
+        i for i in integrations
+        if i.get("enabled") and (not i.get("project_ids") or pid in i.get("project_ids", []))
+    ]
 
 # ── Config storage ────────────────────────────────────────────────────
 
@@ -116,6 +125,19 @@ class C2IntegrationUpdate(BaseModel):
     project_ids: Optional[list[str]] = None
     enabled: Optional[bool] = None
     sync_interval_minutes: Optional[int] = None
+
+
+class C2HostActionRequest(BaseModel):
+    integration_id: str
+    agent_id: str
+    host_id: str
+    mode: str = "command"   # command | bof
+    commandline: str
+    credential_source: str = ""   # rootnotes | c2
+    credential_id: str = ""
+    wait_for_output: bool = True
+    timeout_seconds: int = 12
+    title: str = ""
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────
@@ -488,6 +510,7 @@ async def _adaptix_live_agents(cfg: dict) -> list[dict]:
             "os": (a.get("a_os_desc") or "").strip(),
             "arch": (a.get("a_arch") or "").strip(),
             "process": (a.get("a_process") or "").strip(),
+            "agent_id": a.get("a_id") or "",
             "beacon_id": a.get("a_id") or "",
             "listener": a.get("a_listener") or "",
             "alive": alive,
@@ -495,6 +518,287 @@ async def _adaptix_live_agents(cfg: dict) -> list[dict]:
             "last_seen": a.get("a_last_seen") or "",
         })
     return result
+
+
+async def _adaptix_auth_headers(cfg: dict, client: httpx.AsyncClient) -> dict[str, str]:
+    token = cfg.get("token", "")
+    if not token:
+        login_r = await client.post(
+            f"{cfg['_adaptix_base']}/login",
+            json={"username": cfg.get("username") or "operator", "password": cfg.get("password", ""), "version": ""},
+        )
+        login_r.raise_for_status()
+        token = login_r.json().get("access_token") or login_r.json().get("token") or ""
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _adaptix_base(cfg: dict) -> str:
+    url = cfg["url"].rstrip("/")
+    ep = cfg.get("endpoint", "/endpoint").rstrip("/") or "/endpoint"
+    return f"{url}{ep}"
+
+
+async def _adaptix_fetch_creds(cfg: dict) -> list[dict]:
+    base = _adaptix_base(cfg)
+    local_cfg = {**cfg, "_adaptix_base": base}
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
+        headers = await _adaptix_auth_headers(local_cfg, client)
+        c_r = await client.get(f"{base}/creds/list", headers=headers)
+        c_r.raise_for_status()
+        data = c_r.json()
+        if not isinstance(data, list):
+            return []
+        return data
+
+
+async def _adaptix_fetch_bof_catalog(cfg: dict) -> list[dict]:
+    base = _adaptix_base(cfg)
+    local_cfg = {**cfg, "_adaptix_base": base}
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
+        headers = await _adaptix_auth_headers(local_cfg, client)
+        r = await client.post(f"{base}/axscript/commands", headers=headers, json={})
+        if r.status_code in (404, 405):
+            return []
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+        return _normalize_axscript_catalog(data)
+
+
+def _normalize_c2_cred(raw: dict, integration_id: str) -> dict:
+    return {
+        "id": raw.get("c_creds_id") or raw.get("id") or "",
+        "source": "c2",
+        "integration_id": integration_id,
+        "username": (raw.get("c_username") or "").strip(),
+        "secret": raw.get("c_password") or "",
+        "domain": (raw.get("c_realm") or "").strip(),
+        "host": (raw.get("c_host") or "").strip(),
+        "type": (raw.get("c_type") or "plain").strip(),
+        "label": (raw.get("c_username") or "").strip(),
+    }
+
+
+def _normalize_choice_list(raw) -> list[dict]:
+    values = raw or []
+    if isinstance(values, dict):
+        values = values.get("choices") or values.get("options") or values.get("values") or []
+    result = []
+    for item in values:
+        if isinstance(item, dict):
+            value = item.get("value")
+            if value is None:
+                value = item.get("id") or item.get("name") or item.get("key")
+            label = item.get("label") or item.get("title") or item.get("name") or str(value or "")
+        else:
+            value = item
+            label = str(item)
+        if value is None:
+            continue
+        result.append({"value": str(value), "label": str(label)})
+    return result
+
+
+def _normalize_param_type(raw_type: str, choices: list[dict]) -> str:
+    t = (raw_type or "").strip().lower()
+    if choices:
+        return "choice"
+    if t in ("bool", "boolean", "checkbox", "switch"):
+        return "boolean"
+    if t in ("int", "integer", "number", "float"):
+        return "number"
+    if t in ("select", "enum", "choice", "radio"):
+        return "choice"
+    if t in ("textarea", "multiline", "textblock"):
+        return "textarea"
+    return "text"
+
+
+def _normalize_param(raw: dict, idx: int) -> dict:
+    choices = _normalize_choice_list(raw.get("choices") or raw.get("options") or raw.get("enum") or raw.get("values"))
+    key = raw.get("key") or raw.get("name") or raw.get("id") or raw.get("param") or raw.get("arg") or f"arg_{idx + 1}"
+    label = raw.get("label") or raw.get("title") or raw.get("name") or key
+    raw_type = raw.get("type") or raw.get("input_type") or raw.get("kind") or raw.get("widget") or ""
+    return {
+        "key": str(key),
+        "label": str(label),
+        "type": _normalize_param_type(str(raw_type), choices),
+        "raw_type": str(raw_type),
+        "required": bool(raw.get("required") or raw.get("mandatory")),
+        "default": raw.get("default") if raw.get("default") is not None else raw.get("value"),
+        "placeholder": raw.get("placeholder") or raw.get("example") or "",
+        "description": raw.get("description") or raw.get("help") or raw.get("hint") or "",
+        "choices": choices,
+        "position": idx,
+    }
+
+
+def _extract_command_params(command: dict) -> list[dict]:
+    raw_params = command.get("parameters") or command.get("params") or command.get("args") or command.get("fields") or command.get("options") or []
+    if not isinstance(raw_params, list):
+        return []
+    return [_normalize_param(item if isinstance(item, dict) else {"name": str(item)}, idx) for idx, item in enumerate(raw_params)]
+
+
+def _build_template_from_command(name: str, command: dict, params: list[dict]) -> str:
+    template = command.get("template") or command.get("cmdline") or command.get("commandline") or command.get("usage") or ""
+    template = str(template or "").strip()
+    if template:
+        return template
+    if not params:
+        return name
+    return " ".join([name, *[f"{{{{{param['key'].upper()}}}}}" for param in params]])
+
+
+def _parse_template_placeholders(template: str, params: list[dict]) -> list[dict]:
+    known = {item["key"] for item in params}
+    next_params = list(params)
+    for match in re.findall(r"\{\{([A-Z0-9_]+)\}\}", template or ""):
+        key = match.lower()
+        if key in known:
+            continue
+        next_params.append({
+            "key": key,
+            "label": match,
+            "type": "text",
+            "raw_type": "placeholder",
+            "required": False,
+            "default": "",
+            "placeholder": "",
+            "description": "",
+            "choices": [],
+            "position": len(next_params),
+        })
+        known.add(key)
+    return next_params
+
+
+def _normalize_axscript_catalog(raw_catalog: list[dict]) -> list[dict]:
+    result = []
+    for source_idx, entry in enumerate(raw_catalog or []):
+        source_name = entry.get("Agent") or entry.get("agent_name") or entry.get("Listener") or ""
+        groups = entry.get("Groups") or entry.get("groups") or []
+        for group_idx, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            group_name = group.get("group_name") or group.get("name") or "General"
+            group_desc = group.get("group_description") or group.get("description") or ""
+            script_name = group.get("script_name") or group.get("source") or source_name or ""
+            for cmd_idx, command in enumerate(group.get("commands") or []):
+                if not isinstance(command, dict):
+                    continue
+                name = str(command.get("name") or command.get("cmd") or command.get("title") or command.get("command") or "").strip()
+                if not name:
+                    continue
+                params = _extract_command_params(command)
+                template = _build_template_from_command(name, command, params)
+                params = _parse_template_placeholders(template, params)
+                result.append({
+                    "id": f"{source_idx}:{group_idx}:{cmd_idx}:{name}",
+                    "name": name,
+                    "title": command.get("title") or name,
+                    "group": group_name,
+                    "group_description": group_desc,
+                    "script_name": script_name,
+                    "description": command.get("description") or command.get("help") or group_desc,
+                    "template": template,
+                    "parameters": params,
+                    "raw": command,
+                })
+    return result
+
+
+async def _adaptix_fetch_agent_tasks(cfg: dict, agent_id: str, limit: int = 30) -> list[dict]:
+    base = _adaptix_base(cfg)
+    local_cfg = {**cfg, "_adaptix_base": base}
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
+        headers = await _adaptix_auth_headers(local_cfg, client)
+        task_r = await client.get(f"{base}/agent/task/list", headers=headers, params={"agent_id": agent_id, "limit": limit, "offset": 0})
+        task_r.raise_for_status()
+        tasks = task_r.json()
+        if not isinstance(tasks, list):
+            return []
+        return [{
+            "task_id": item.get("a_task_id") or "",
+            "cmdline": item.get("a_cmdline") or "",
+            "completed": bool(item.get("a_completed")),
+            "text": item.get("a_text") or "",
+            "message": item.get("a_message") or "",
+            "msg_type": item.get("a_msg_type") or "",
+            "start_time": item.get("a_start_time") or "",
+            "finish_time": item.get("a_finish_time") or "",
+            "computer": item.get("a_computer") or "",
+            "user": item.get("a_user") or "",
+            "raw": item,
+        } for item in tasks]
+
+
+def _cred_matches_host(cred: dict, host: models.Host) -> bool:
+    host_ips = set(host.ips or []) | ({host.ip} if host.ip else set())
+    if cred.get("host") and cred.get("host") in host_ips:
+        return True
+    if host.hostname and cred.get("host") == host.hostname:
+        return True
+    host_domain = (host.domain or "").strip().lower()
+    cred_domain = (cred.get("domain") or "").strip().lower()
+    return bool(host_domain and cred_domain and host_domain == cred_domain)
+
+
+def _render_command_with_cred(commandline: str, cred: dict | None, host: models.Host | None) -> str:
+    if not cred:
+        return commandline
+    domain = (cred.get("domain") or "").strip()
+    username = (cred.get("username") or "").strip()
+    secret = cred.get("secret") or ""
+    values = {
+        "{{USER}}": username,
+        "{{USERNAME}}": username,
+        "{{PASS}}": secret,
+        "{{PASSWORD}}": secret,
+        "{{SECRET}}": secret,
+        "{{DOMAIN}}": domain,
+        "{{REALM}}": domain,
+        "{{HOST}}": host.ip if host else "",
+        "{{TARGET}}": host.ip if host else "",
+    }
+    rendered = commandline
+    for key, value in values.items():
+        rendered = rendered.replace(key, value or "")
+    return rendered
+
+
+async def _adaptix_execute(cfg: dict, agent_id: str, commandline: str, wait_for_output: bool = True, timeout_seconds: int = 12) -> dict:
+    base = _adaptix_base(cfg)
+    local_cfg = {**cfg, "_adaptix_base": base}
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=max(30, timeout_seconds + 5)) as client:
+        headers = await _adaptix_auth_headers(local_cfg, client)
+        exec_r = await client.post(f"{base}/agent/command/raw", headers=headers, json={"id": agent_id, "cmdline": commandline})
+        exec_r.raise_for_status()
+        exec_data = exec_r.json() if exec_r.content else {"ok": True}
+        result = {"accepted": bool(exec_data.get("ok", True)), "message": exec_data.get("message") or "", "commandline": commandline, "agent_id": agent_id}
+        if not wait_for_output:
+            return result
+
+        started = datetime.utcnow()
+        latest = None
+        while (datetime.utcnow() - started).total_seconds() < max(3, timeout_seconds):
+            task_r = await client.get(f"{base}/agent/task/list", headers=headers, params={"agent_id": agent_id, "limit": 20, "offset": 0})
+            if task_r.status_code == 200:
+                tasks = task_r.json()
+                if isinstance(tasks, list):
+                    for task in tasks:
+                        if (task.get("a_cmdline") or "").strip() == commandline.strip():
+                            latest = task
+                            if task.get("a_completed"):
+                                result["task"] = task
+                                result["output"] = task.get("a_text") or task.get("a_message") or ""
+                                return result
+            await asyncio.sleep(0.8)
+        if latest:
+            result["task"] = latest
+            result["output"] = latest.get("a_text") or latest.get("a_message") or ""
+        return result
 
 
 async def _cs_live_agents(cfg: dict) -> list[dict]:
@@ -829,13 +1133,221 @@ def list_for_project(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    from ..core.access import check_pid_access
+    check_pid_access(db, pid, user, "hosts.read")
     integrations = _load_integrations(db)
-    visible = [
-        _safe_integration(i) for i in integrations
-        if i.get("enabled")
-        and (not i.get("project_ids") or pid in i.get("project_ids", []))
-    ]
+    visible = [_safe_integration(i) for i in _visible_integrations_for_pid(integrations, pid)]
     return visible
+
+
+@router.get("/{iid}/bofs/{pid}")
+async def list_bofs_for_project(
+    iid: str,
+    pid: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _require_c2()
+    from ..core.access import check_pid_access
+    check_pid_access(db, pid, user, "hosts.read")
+    cfg = next((i for i in _visible_integrations_for_pid(_load_integrations(db), pid) if i.get("id") == iid), None)
+    if not cfg:
+        raise HTTPException(404, "Integration not found")
+    if cfg.get("type") != "adaptix":
+        return []
+    try:
+        return await _adaptix_fetch_bof_catalog(cfg)
+    except Exception as e:
+        logger.warning("Adaptix BOF catalog failed for %s: %s", iid, e)
+        return []
+
+
+@router.get("/agent-tasks/{pid}")
+async def get_agent_tasks(
+    pid: str,
+    integration_id: str,
+    agent_id: str,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _require_c2()
+    from ..core.access import check_pid_access
+    check_pid_access(db, pid, user, "hosts.read")
+    if not integration_id.strip() or not agent_id.strip():
+        raise HTTPException(400, "integration_id and agent_id are required")
+    cfg = next((i for i in _visible_integrations_for_pid(_load_integrations(db), pid) if i.get("id") == integration_id), None)
+    if not cfg:
+        raise HTTPException(404, "Integration not found")
+    if cfg.get("type") != "adaptix":
+        raise HTTPException(400, "Only Adaptix agent tasks are supported right now")
+    try:
+        return await _adaptix_fetch_agent_tasks(cfg, agent_id, max(1, min(limit, 100)))
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch agent tasks: {e}")
+
+
+@router.get("/host-actions/{pid}/{host_id}")
+async def get_host_actions(
+    pid: str,
+    host_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _require_c2()
+    from ..core.access import check_pid_access
+    check_pid_access(db, pid, user, "hosts.read")
+    host = db.query(models.Host).filter(models.Host.id == host_id, models.Host.pid == pid).first()
+    if not host:
+        raise HTTPException(404, "Host not found")
+
+    integrations = _visible_integrations_for_pid(_load_integrations(db), pid)
+    sessions = []
+    c2_creds = []
+    bof_catalog = {}
+    host_ips = set(host.ips or []) | ({host.ip} if host.ip else set())
+    for cfg in integrations:
+        if cfg.get("type") != "adaptix":
+            continue
+        try:
+            agents = await _adaptix_live_agents(cfg)
+            matched = [a for a in agents if a.get("ip") in host_ips]
+            for agent in matched:
+                sessions.append({
+                    "integration_id": cfg["id"],
+                    "integration_name": cfg.get("name") or cfg["type"],
+                    "integration_type": cfg["type"],
+                    "agent_id": agent.get("agent_id") or agent.get("beacon_id") or "",
+                    "beacon_id": agent.get("beacon_id") or "",
+                    "ip": agent.get("ip") or "",
+                    "hostname": agent.get("hostname") or "",
+                    "username": agent.get("username") or "",
+                    "domain": agent.get("domain") or "",
+                    "os": agent.get("os") or "",
+                    "arch": agent.get("arch") or "",
+                    "process": agent.get("process") or "",
+                    "listener": agent.get("listener") or "",
+                    "alive": agent.get("alive", True),
+                    "mark": agent.get("mark") or "",
+                    "last_seen": agent.get("last_seen") or "",
+                })
+            try:
+                creds = await _adaptix_fetch_creds(cfg)
+                c2_creds.extend([_normalize_c2_cred(item, cfg["id"]) for item in creds])
+            except Exception as e:
+                logger.warning("Adaptix creds fetch failed for %s: %s", cfg.get("id"), e)
+            try:
+                bof_catalog[cfg["id"]] = await _adaptix_fetch_bof_catalog(cfg)
+            except Exception:
+                bof_catalog[cfg["id"]] = []
+        except Exception as e:
+            logger.warning("Adaptix host actions failed for %s/%s: %s", cfg.get("id"), host_id, e)
+
+    project_creds = db.query(models.Cred).filter(models.Cred.pid == pid).all()
+    rootnotes_creds = []
+    for cred in project_creds:
+        host_ids = set(cred.host_ids or [])
+        if host.id in host_ids or cred.host == host.ip or (host.hostname and cred.host == host.hostname) or (cred.is_domain and host.domain and (cred.domain or "").strip().lower() == (host.domain or "").strip().lower()):
+            rootnotes_creds.append({
+                "id": cred.id,
+                "source": "rootnotes",
+                "integration_id": "",
+                "username": cred.username,
+                "secret": cred.secret,
+                "domain": cred.domain,
+                "host": cred.host,
+                "type": cred.type,
+                "label": cred.username,
+            })
+
+    filtered_c2_creds = [item for item in c2_creds if _cred_matches_host(item, host)]
+    return {
+        "host_id": host.id,
+        "sessions": sessions,
+        "creds": rootnotes_creds + filtered_c2_creds,
+        "bofs": bof_catalog,
+    }
+
+
+@router.post("/execute/{pid}")
+async def execute_host_action(
+    pid: str,
+    body: C2HostActionRequest,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _require_c2()
+    from ..core.access import check_pid_access
+    check_pid_access(db, pid, user, "command_outputs.create")
+    host = db.query(models.Host).filter(models.Host.id == body.host_id, models.Host.pid == pid).first()
+    if not host:
+        raise HTTPException(404, "Host not found")
+    cfg = next((i for i in _visible_integrations_for_pid(_load_integrations(db), pid) if i.get("id") == body.integration_id), None)
+    if not cfg:
+        raise HTTPException(404, "Integration not found")
+    if cfg.get("type") != "adaptix":
+        raise HTTPException(400, "Only Adaptix execution is supported right now")
+    if not body.agent_id.strip():
+        raise HTTPException(400, "agent_id is required")
+    if not body.commandline.strip():
+        raise HTTPException(400, "commandline is required")
+
+    selected_cred = None
+    if body.credential_id:
+        if body.credential_source == "c2":
+            creds = await _adaptix_fetch_creds(cfg)
+            selected_cred = next((_normalize_c2_cred(item, cfg["id"]) for item in creds if str(item.get("c_creds_id") or item.get("id") or "") == body.credential_id), None)
+        else:
+            cred = db.query(models.Cred).filter(models.Cred.id == body.credential_id, models.Cred.pid == pid).first()
+            if cred:
+                selected_cred = {
+                    "id": cred.id,
+                    "source": "rootnotes",
+                    "username": cred.username,
+                    "secret": cred.secret,
+                    "domain": cred.domain,
+                    "host": cred.host,
+                    "type": cred.type,
+                }
+
+    rendered_command = _render_command_with_cred(body.commandline.strip(), selected_cred, host)
+    title = (body.title or ("Adaptix BOF" if body.mode == "bof" else "Adaptix command")).strip()
+    job = start_job(
+        db, pid, "c2_exec", title,
+        target=host.ip or host.hostname or host.id,
+        command=rendered_command,
+        created_by=user.username or "",
+        connector_key="adaptix",
+        operation="bof_execute" if body.mode == "bof" else "command_execute",
+        related_entity_type="host",
+        related_entity_id=host.id,
+        request_json=body.model_dump(),
+    )
+    try:
+        result = await _adaptix_execute(cfg, body.agent_id.strip(), rendered_command, body.wait_for_output, body.timeout_seconds)
+        output = result.get("output") or result.get("message") or ""
+        finish_job(db, job, status="done", output=output, result=result)
+        activity = models.HostActivity(
+            id=new_id("ha"),
+            pid=pid,
+            host_id=host.id,
+            title=title,
+            activity_type="postex" if body.mode == "command" else "exploit",
+            command=rendered_command,
+            summary=f"Executed via Adaptix on agent {body.agent_id}",
+            output=output,
+            status="done",
+            ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        )
+        db.add(activity)
+        db.commit()
+        bcast(pid, "host_activity", "create", schemas.HostActivity.model_validate(activity).model_dump())
+        log_event(db, pid, user.username or "", "host_activity", "create", f"{title} on {host.ip or host.hostname}", {"host_id": host.id, "integration_id": cfg.get("id")})
+        db.commit()
+        return {"ok": True, "job_id": job.id, "activity_id": activity.id, "result": result, "rendered_command": rendered_command}
+    except Exception as e:
+        finish_job(db, job, status="failed", error_output=str(e))
+        raise HTTPException(400, f"Adaptix execution failed: {e}")
 
 
 def _classify_privilege(username: str) -> str:
@@ -868,11 +1380,7 @@ async def get_live_sessions(
     check_pid_access(db, pid, user, "hosts.read")
 
     integrations = _load_integrations(db)
-    visible = [
-        i for i in integrations
-        if i.get("enabled")
-        and (not i.get("project_ids") or pid in i.get("project_ids", []))
-    ]
+    visible = _visible_integrations_for_pid(integrations, pid)
 
     project_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
     ip_to_host = {h.ip: h for h in project_hosts if h.ip}

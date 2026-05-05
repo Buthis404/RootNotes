@@ -541,7 +541,7 @@ function C2Panel({ pid, accent }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await api.listC2Integrations();
+      const r = pid ? await api.listC2ForProject(pid) : await api.listC2Integrations();
       setIntegrations(r);
     } catch (e) {
       if (e.message?.includes('403') || e.message?.includes('admin')) {
@@ -549,7 +549,7 @@ function C2Panel({ pid, accent }) {
       }
     }
     setLoading(false);
-  }, []);
+  }, [pid]);
 
   useEffect(() => { load(); }, [load]);
 
