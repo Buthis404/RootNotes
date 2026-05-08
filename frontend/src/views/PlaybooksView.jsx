@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 
 const RUN_STATUS = {
@@ -48,6 +48,33 @@ function emptyCondition() {
   return { when: 'success', result_key: '', operator: 'eq', value: '', action: 'stop', target_step: null };
 }
 
+const RESULT_KEYS_BY_CONNECTOR = {
+  'nmap:scan':             ['hosts_found', 'hosts_created', 'hosts_updated'],
+  'nuclei:scan':           ['findings_found', 'findings_created'],
+  'netexec:scan':          ['hosts_found', 'hosts_created', 'hosts_updated'],
+  'netexec:ldap_enum':     ['hosts_found', 'hosts_created', 'hosts_updated'],
+  'netexec:spray_smb':     ['hosts_found', 'hosts_created', 'hosts_updated'],
+  'c2_integration:sync':   ['hosts_found', 'hosts_created', 'hosts_updated', 'creds_created'],
+  'topology:auto_build':   ['hosts_created'],
+  'topology:preview':      ['hosts_created'],
+  'attacker_ssh:exec':     ['exit_code'],
+  'attacker_ssh:bulk_exec':['exit_code'],
+  'attacker_ssh:kerberoast':['exit_code'],
+  'attacker_ssh:asreproast':['exit_code'],
+  'attacker_ssh:ldap_dump': ['exit_code'],
+  'httpx:scan':            ['urls_found', 'hosts_found', 'activities_created'],
+  'ffuf:scan':             ['paths_found', 'findings_created'],
+};
+
+function resultKeysForSteps(steps) {
+  const keys = new Set();
+  for (const s of steps) {
+    const ck = `${s.connector_key}:${s.operation}`;
+    (RESULT_KEYS_BY_CONNECTOR[ck] || []).forEach(k => keys.add(k));
+  }
+  return [...keys];
+}
+
 function PlaybookCard({ playbook, accent, selected, onSelect }) {
   const stepCount = (playbook.steps || []).length;
   return (
@@ -71,7 +98,8 @@ function PlaybookCard({ playbook, accent, selected, onSelect }) {
   );
 }
 
-function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChange, onDelete, disableDelete }) {
+function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChange, onDelete, onDuplicate, onMoveUp, onMoveDown, disableDelete, allSteps }) {
+  const suggestedResultKeys = resultKeysForSteps(allSteps || []);
   const matchingConnectors = connectors.filter(c => c.key === step.connector_key);
   const connector = matchingConnectors[0] || null;
   const operations = connector?.supported_operations?.length ? connector.supported_operations : ['scan'];
@@ -92,7 +120,8 @@ function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChang
   };
   return (
     <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 8, padding: 12 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr 120px', gap: 8, marginBottom: 8 }}>
+      <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Step {stepIndex + 1}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr auto', gap: 8, marginBottom: 8, alignItems: 'center' }}>
         <input value={step.title} onChange={e => onChange({ ...step, title: e.target.value })} placeholder="Step title" style={inp()} />
         <select value={step.connector_key} onChange={e => applyTemplate(e.target.value, '')} style={inp()}>
           {[...new Map(connectors.map(c => [c.key, c])).values()].map(c => <option key={c.key} value={c.key}>{c.title}</option>)}
@@ -101,13 +130,11 @@ function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChang
           <option value="">Select operation</option>
           {operations.map(op => <option key={op} value={op}>{op}</option>)}
         </select>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <select value={step.on_failure || 'stop'} onChange={e => onChange({ ...step, on_failure: e.target.value, on_failure_step: e.target.value === 'jump' ? (step.on_failure_step || Math.min(stepCount, stepIndex + 2)) : null })} style={inp()}>
-            <option value="stop">stop</option>
-            <option value="continue">continue</option>
-            <option value="jump">jump</option>
-          </select>
-          <button onClick={onDelete} disabled={disableDelete} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '0 10px', cursor: disableDelete ? 'default' : 'pointer', color: '#cc2233', fontSize: 11, fontFamily: 'JetBrains Mono', opacity: disableDelete ? 0.5 : 1 }}>Delete</button>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button onClick={onMoveUp} disabled={stepIndex === 0} title="Move up" style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '0 8px', cursor: stepIndex === 0 ? 'default' : 'pointer', color: '#808590', fontSize: 13, opacity: stepIndex === 0 ? 0.3 : 1 }}>↑</button>
+          <button onClick={onMoveDown} disabled={stepIndex >= stepCount - 1} title="Move down" style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '0 8px', cursor: stepIndex >= stepCount - 1 ? 'default' : 'pointer', color: '#808590', fontSize: 13, opacity: stepIndex >= stepCount - 1 ? 0.3 : 1 }}>↓</button>
+          <button onClick={onDuplicate} title="Duplicate step" style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '0 8px', cursor: 'pointer', color: '#808590', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Dup</button>
+          <button onClick={onDelete} disabled={disableDelete} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '0 10px', cursor: disableDelete ? 'default' : 'pointer', color: '#cc2233', fontSize: 11, fontFamily: 'JetBrains Mono', opacity: disableDelete ? 0.5 : 1 }}>Del</button>
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
@@ -193,7 +220,8 @@ function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChang
                 </div>
                 <div>
                   <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Result key</div>
-                  <input value={cond.result_key || ''} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, result_key: e.target.value } : item) })} placeholder="findings_created" style={inp()} />
+                  <input value={cond.result_key || ''} onChange={e => onChange({ ...step, result_conditions: step.result_conditions.map((item, i) => i === idx ? { ...item, result_key: e.target.value } : item) })} placeholder="findings_created" list={`rk-list-${stepIndex}-${idx}`} style={inp()} autoComplete="off" />
+                  <datalist id={`rk-list-${stepIndex}-${idx}`}>{suggestedResultKeys.map(k => <option key={k} value={k} />)}</datalist>
                 </div>
                 <div>
                   <div style={{ fontSize: 8, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Op</div>
@@ -230,6 +258,413 @@ function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChang
   );
 }
 
+function BatchHostSelector({ hosts, batchForm, onChange, accent }) {
+  const allTags = [...new Set(hosts.flatMap(h => h.tags || []))].sort();
+  const allStatuses = [...new Set(hosts.map(h => h.status).filter(Boolean))].sort();
+
+  const filtered = hosts.filter(h => {
+    if (batchForm.host_ids.length > 0) return batchForm.host_ids.includes(h.id);
+    if (batchForm.host_tags.length > 0 && !batchForm.host_tags.some(t => (h.tags || []).includes(t))) return false;
+    if (batchForm.host_status && h.status !== batchForm.host_status) return false;
+    return true;
+  });
+
+  const toggleHost = (id) => onChange(prev => ({
+    ...prev,
+    host_ids: prev.host_ids.includes(id) ? prev.host_ids.filter(x => x !== id) : [...prev.host_ids, id],
+  }));
+
+  const toggleTag = (tag) => onChange(prev => ({
+    ...prev,
+    host_ids: [],
+    host_tags: prev.host_tags.includes(tag) ? prev.host_tags.filter(t => t !== tag) : [...prev.host_tags, tag],
+  }));
+
+  return (
+    <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+        Batch target hosts
+        <span style={{ marginLeft: 8, color: accent, fontWeight: 600 }}>{filtered.length} selected</span>
+      </div>
+
+      {/* Tag filter */}
+      {allTags.length > 0 && (
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: '#404550', marginRight: 2 }}>Tags:</span>
+          {allTags.map(tag => (
+            <button key={tag} onClick={() => toggleTag(tag)}
+              style={{ background: batchForm.host_tags.includes(tag) ? accent + '33' : '#13161f', color: batchForm.host_tags.includes(tag) ? accent : '#6a7080', border: `1px solid ${batchForm.host_tags.includes(tag) ? accent + '66' : '#1e2230'}`, borderRadius: 4, padding: '1px 8px', fontSize: 10, cursor: 'pointer', fontFamily: 'JetBrains Mono' }}
+            >{tag}</button>
+          ))}
+        </div>
+      )}
+
+      {/* Status filter */}
+      {allStatuses.length > 0 && (
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: '#404550', marginRight: 2 }}>Status:</span>
+          {allStatuses.map(s => (
+            <button key={s} onClick={() => onChange(prev => ({ ...prev, host_ids: [], host_status: prev.host_status === s ? '' : s }))}
+              style={{ background: batchForm.host_status === s ? '#f09a3a33' : '#13161f', color: batchForm.host_status === s ? '#f09a3a' : '#6a7080', border: `1px solid ${batchForm.host_status === s ? '#f09a3a66' : '#1e2230'}`, borderRadius: 4, padding: '1px 8px', fontSize: 10, cursor: 'pointer' }}
+            >{s}</button>
+          ))}
+        </div>
+      )}
+
+      {/* Parallelism */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 10, color: '#505560' }}>Parallelism:</span>
+        {[1, 2, 3, 5, 10].map(n => (
+          <button key={n} onClick={() => onChange(prev => ({ ...prev, parallelism: n }))}
+            style={{ background: batchForm.parallelism === n ? '#6fc8f033' : '#13161f', color: batchForm.parallelism === n ? '#6fc8f0' : '#505560', border: `1px solid ${batchForm.parallelism === n ? '#6fc8f066' : '#1e2230'}`, borderRadius: 4, padding: '1px 8px', fontSize: 10, cursor: 'pointer', fontFamily: 'JetBrains Mono' }}
+          >{n}</button>
+        ))}
+        <span style={{ fontSize: 10, color: '#303540' }}>concurrent</span>
+      </div>
+
+      {/* Host list (compact) */}
+      {hosts.length > 0 && (
+        <div style={{ maxHeight: 160, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {hosts.filter(h => {
+            if (batchForm.host_tags.length > 0 && !batchForm.host_tags.some(t => (h.tags || []).includes(t))) return false;
+            if (batchForm.host_status && h.status !== batchForm.host_status) return false;
+            return true;
+          }).map(h => {
+            const checked = batchForm.host_ids.length === 0 || batchForm.host_ids.includes(h.id);
+            return (
+              <div key={h.id} onClick={() => toggleHost(h.id)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 4px', borderRadius: 3, cursor: 'pointer', background: checked && batchForm.host_ids.length > 0 ? accent + '11' : 'transparent' }}>
+                <div style={{ width: 12, height: 12, border: `1px solid ${checked ? accent : '#303540'}`, borderRadius: 2, background: checked ? accent + '33' : 'transparent', flexShrink: 0 }} />
+                <span style={{ fontSize: 10, color: '#a0a8b8', fontFamily: 'JetBrains Mono' }}>{h.ip}</span>
+                {h.hostname && <span style={{ fontSize: 10, color: '#505560' }}>{h.hostname}</span>}
+                {(h.tags || []).map(t => <span key={t} style={{ fontSize: 9, color: '#505560', background: '#13161f', border: '1px solid #1e2230', borderRadius: 3, padding: '0 4px' }}>{t}</span>)}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PickerInput ─────────────────────────────────────────────────────────
+// Text input + inline dropdown of selectable options from project data.
+function PickerInput({ value, onChange, placeholder, label, options, type = 'text' }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', gap: 0 }}>
+        <input
+          type={type}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          style={{ ...inp(), borderRadius: options?.length ? '5px 0 0 5px' : 5, flex: 1 }}
+        />
+        {options?.length > 0 && (
+          <button
+            onClick={() => setOpen(v => !v)}
+            title="Pick from project data"
+            style={{ background: open ? '#1e2230' : '#13161f', border: '1px solid #2a2d35', borderLeft: 'none', borderRadius: '0 5px 5px 0', padding: '0 8px', cursor: 'pointer', color: '#606570', fontSize: 10, flexShrink: 0 }}
+          >▾</button>
+        )}
+      </div>
+      {open && options?.length > 0 && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, marginTop: 2, maxHeight: 220, overflowY: 'auto', boxShadow: '0 8px 24px #00000099' }}>
+          {options.map((opt, i) => (
+            <div
+              key={i}
+              onClick={() => { onChange(opt.value); setOpen(false); }}
+              style={{ padding: '7px 12px', cursor: 'pointer', borderBottom: i < options.length - 1 ? '1px solid #1a1c22' : 'none' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#ffffff08'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <div style={{ fontSize: 11, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>{opt.value}</div>
+              {opt.label && <div style={{ fontSize: 9, color: '#505560', marginTop: 1 }}>{opt.label}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── CredPicker ───────────────────────────────────────────────────────────
+// Button that opens a dropdown to pick a credential and fill multiple fields.
+function CredPicker({ creds, onPick, accent }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  if (!creds?.length) return null;
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(v => !v)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '5px 10px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>
+        From creds ▾
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 100, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, marginTop: 2, minWidth: 280, maxHeight: 280, overflowY: 'auto', boxShadow: '0 8px 24px #00000099' }}>
+          {creds.map((c, i) => (
+            <div
+              key={c.id}
+              onClick={() => { onPick(c); setOpen(false); }}
+              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: i < creds.length - 1 ? '1px solid #1a1c22' : 'none' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#ffffff08'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <div style={{ fontSize: 11, color: '#c8cdd6', fontFamily: 'JetBrains Mono', fontWeight: 600 }}>
+                {c.domain ? `${c.domain}\\` : ''}{c.username}
+              </div>
+              <div style={{ fontSize: 9, color: '#505560', marginTop: 1, display: 'flex', gap: 8 }}>
+                <span style={{ color: c.type === 'hash' || c.type === 'ntlm' ? '#c07af0' : '#5b8af5' }}>{c.type}</span>
+                {c.service && <span>{c.service}</span>}
+                {c.tags?.length > 0 && <span>{c.tags.join(', ')}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const CRON_PRESETS = [
+  { label: 'Every hour',  value: '0 * * * *' },
+  { label: 'Every 6h',   value: '0 */6 * * *' },
+  { label: 'Daily 2am',  value: '0 2 * * *' },
+  { label: 'Mon 8am',    value: '0 8 * * 1' },
+];
+
+function ScheduledTab({ selectedProject, accent, playbooks, hosts, creds, scopes }) {
+  const [schedules, setSchedules] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [form, setForm] = useState({ playbook_id: '', title: '', cron_expr: '0 * * * *', enabled: true, body_json: {} });
+  const [creating, setCreating] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    if (!selectedProject) return;
+    setLoading(true);
+    try {
+      const data = await api.listSchedules(selectedProject);
+      setSchedules(Array.isArray(data) ? data : []);
+    } catch (e) {
+      setError(e.message || 'Failed to load schedules');
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { load(); }, [selectedProject]);
+
+  const save = async () => {
+    if (!form.playbook_id) { setError('Select a playbook'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      const data = await api.createSchedule({ ...form, pid: selectedProject });
+      setSchedules(prev => [data, ...prev]);
+      setCreating(false);
+      setForm({ playbook_id: '', title: '', cron_expr: '0 * * * *', enabled: true, body_json: {} });
+    } catch (e) {
+      setError(e.message || 'Failed to create schedule');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggle = async (sched) => {
+    try {
+      const updated = await api.updateSchedule(sched.id, { enabled: !sched.enabled });
+      setSchedules(prev => prev.map(s => s.id === sched.id ? updated : s));
+    } catch (e) { setError(e.message); }
+  };
+
+  const del = async (id) => {
+    if (!window.confirm('Delete schedule?')) return;
+    try {
+      await api.deleteSchedule(id);
+      setSchedules(prev => prev.filter(s => s.id !== id));
+    } catch (e) { setError(e.message); }
+  };
+
+  const trigger = async (id) => {
+    try {
+      await api.triggerSchedule(id);
+    } catch (e) { setError(e.message); }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ fontSize: 13, color: '#c8cfe0', fontWeight: 600 }}>Scheduled Playbooks</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={load} style={toolbarBtn(accent, false)}>Refresh</button>
+          <button onClick={() => { setCreating(true); setError(''); }} style={toolbarBtn(accent, true)}>New schedule</button>
+        </div>
+      </div>
+      {error && <div style={{ background: '#1a0808', border: '1px solid #3a1010', borderRadius: 6, padding: '8px 12px', color: '#f87171', fontSize: 12 }}>{error}</div>}
+
+      {creating && (
+        <div style={{ background: '#0d0f14', border: `1px solid ${accent}44`, borderRadius: 10, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 11, color: accent, fontWeight: 600, marginBottom: 4 }}>New Schedule</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 10, color: '#606570', marginBottom: 4 }}>Playbook</div>
+              <select value={form.playbook_id} onChange={e => setForm(p => ({ ...p, playbook_id: e.target.value }))} style={{ ...inp(), width: '100%' }}>
+                <option value="">Select playbook…</option>
+                {playbooks.map(pb => <option key={pb.id} value={pb.id}>{pb.title}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: '#606570', marginBottom: 4 }}>Label</div>
+              <input value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))} placeholder="Optional label" style={inp()} />
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: '#606570', marginBottom: 4 }}>Cron expression <span style={{ color: '#404550' }}>minute hour dom month dow</span></div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input value={form.cron_expr} onChange={e => setForm(p => ({ ...p, cron_expr: e.target.value }))} placeholder="0 * * * *" style={{ ...inp(), flex: 1 }} />
+              <div style={{ display: 'flex', gap: 4 }}>
+                {CRON_PRESETS.map(p => (
+                  <button key={p.value} onClick={() => setForm(prev => ({ ...prev, cron_expr: p.value }))} style={{ ...toolbarBtn(accent, form.cron_expr === p.value), fontSize: 10, padding: '4px 8px' }}>{p.label}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 10, color: '#606570', marginBottom: 4 }}>Target</div>
+              <PickerInput
+                value={form.body_json?.target || ''}
+                onChange={v => setForm(p => ({ ...p, body_json: { ...p.body_json, target: v } }))}
+                placeholder="192.168.1.0/24"
+                options={[
+                  ...(hosts || []).filter(h => !h.is_attacker).map(h => ({ value: h.ip, label: h.hostname || h.os || '' })),
+                  ...(scopes || []).filter(s => s.in_scope && ['cidr','hostname'].includes(s.scope_type)).map(s => ({ value: s.value, label: `scope` })),
+                ]}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: '#606570', marginBottom: 4 }}>Target URL</div>
+              <PickerInput
+                value={form.body_json?.target_url || ''}
+                onChange={v => setForm(p => ({ ...p, body_json: { ...p.body_json, target_url: v } }))}
+                placeholder="https://example.com"
+                options={[
+                  ...(hosts || []).filter(h => !h.is_attacker && h.tags?.includes('web')).map(h => ({ value: `https://${h.hostname || h.ip}`, label: h.hostname || h.ip })),
+                  ...(scopes || []).filter(s => s.in_scope && s.scope_type === 'url').map(s => ({ value: s.value, label: 'scope' })),
+                ]}
+              />
+            </div>
+          </div>
+          <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px' }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>Auth / AD credentials <span style={{ color: '#303540' }}>(optional)</span></span>
+              <CredPicker accent={accent} creds={creds || []} onPick={c => setForm(p => ({
+                ...p,
+                body_json: {
+                  ...p.body_json,
+                  username: c.username.includes('\\') ? c.username.split('\\')[1] : c.username,
+                  domain: c.domain || (c.username.includes('\\') ? c.username.split('\\')[0] : ''),
+                  password: (c.type === 'plain' || c.type === 'token') ? (c.secret || '') : '',
+                  hash: (c.type === 'hash' || c.type === 'ntlm') ? (c.secret || '') : '',
+                },
+              }))} />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Domain</div>
+                <PickerInput
+                  value={form.body_json?.domain || ''}
+                  onChange={v => setForm(p => ({ ...p, body_json: { ...p.body_json, domain: v } }))}
+                  placeholder="CORP"
+                  options={[...new Set((creds || []).filter(c => c.domain).map(c => c.domain))].map(d => ({ value: d }))}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Username</div>
+                <PickerInput
+                  value={form.body_json?.username || ''}
+                  onChange={v => setForm(p => ({ ...p, body_json: { ...p.body_json, username: v } }))}
+                  placeholder="administrator"
+                  options={(creds || []).map(c => ({ value: c.username.includes('\\') ? c.username.split('\\')[1] : c.username, label: c.domain || c.type }))}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Password</div>
+                <input
+                  type="password"
+                  value={form.body_json?.password || ''}
+                  onChange={e => setForm(p => ({ ...p, body_json: { ...p.body_json, password: e.target.value } }))}
+                  placeholder="••••••••"
+                  style={inp()}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>NTLM Hash</div>
+                <PickerInput
+                  value={form.body_json?.hash || ''}
+                  onChange={v => setForm(p => ({ ...p, body_json: { ...p.body_json, hash: v } }))}
+                  placeholder="aad3b435..."
+                  options={(creds || []).filter(c => c.type === 'hash' || c.type === 'ntlm').map(c => ({ value: c.secret || '', label: c.username }))}
+                />
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => setCreating(false)} style={toolbarBtn('#808590', false)}>Cancel</button>
+            <button onClick={save} disabled={saving} style={toolbarBtn(accent, true)}>{saving ? 'Saving…' : 'Create'}</button>
+          </div>
+        </div>
+      )}
+
+      {loading ? <div style={{ color: '#505560', fontSize: 12 }}>Loading…</div> : schedules.length === 0 ? (
+        <div style={{ color: '#505560', fontSize: 12, padding: '20px 0', textAlign: 'center' }}>No scheduled playbooks. Create one to automate execution.</div>
+      ) : (
+        <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 10, overflow: 'hidden' }}>
+          {schedules.map((sched, i) => (
+            <div key={sched.id} style={{ padding: '12px 16px', borderBottom: i < schedules.length - 1 ? '1px solid #14161b' : 'none', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <span style={{ fontSize: 12, color: '#c8cdd6', fontWeight: 600 }}>{sched.title || playbooks.find(p => p.id === sched.playbook_id)?.title || sched.playbook_id}</span>
+                  <span style={{ fontSize: 9, color: sched.enabled ? '#39d353' : '#606570', background: sched.enabled ? '#39d35318' : '#13161f', border: `1px solid ${sched.enabled ? '#39d35333' : '#1e2230'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{sched.enabled ? 'active' : 'paused'}</span>
+                </div>
+                <div style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                  <span style={{ color: '#808590' }}>{sched.cron_expr}</span>
+                  {sched.body_json?.target && <span>target: {sched.body_json.target}</span>}
+                  {sched.body_json?.username && <span>user: {sched.body_json.domain ? `${sched.body_json.domain}\\` : ''}{sched.body_json.username}</span>}
+                  {sched.next_run_at && <span>next: {sched.next_run_at.slice(0, 16)}</span>}
+                  {sched.last_run_at && <span>last: {sched.last_run_at.slice(0, 16)}</span>}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => trigger(sched.id)} style={{ ...toolbarBtn(accent, false), padding: '4px 10px', fontSize: 10 }}>▶ Run now</button>
+                <button onClick={() => toggle(sched)} style={{ ...toolbarBtn(sched.enabled ? '#f09a3a' : '#39d353', false), padding: '4px 10px', fontSize: 10 }}>{sched.enabled ? 'Pause' : 'Enable'}</button>
+                <button onClick={() => del(sched.id)} style={{ ...toolbarBtn('#cc2233', false), padding: '4px 10px', fontSize: 10 }}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [playbooks, setPlaybooks] = useState([]);
   const [runs, setRuns] = useState([]);
@@ -244,21 +679,35 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [editingMode, setEditingMode] = useState(false);
   const [editor, setEditor] = useState(emptyPlaybook());
   const [form, setForm] = useState({ target: '', target_url: '', flags: '-sV -sC -T4 --open', severity: 'critical,high,medium', keep_manual_positions: true, create_missing_networks: true });
+  const [expandedRunId, setExpandedRunId] = useState(null);
+  const [runMode, setRunMode] = useState('single'); // 'single' | 'batch'
+  const [batchForm, setBatchForm] = useState({ host_ids: [], host_tags: [], host_status: '', parallelism: 3 });
+  const [hosts, setHosts] = useState([]);
+  const [creds, setCreds] = useState([]);
+  const [scopes, setScopes] = useState([]);
+  const [batchResult, setBatchResult] = useState(null);
+  const [activeTab, setActiveTab] = useState('playbooks'); // 'playbooks' | 'scheduled'
 
   const load = useCallback(async () => {
     if (!selectedProject) return;
     setLoading(true);
     try {
-      const [pb, runData, connectorData, templateData] = await Promise.all([
+      const [pb, runData, connectorData, templateData, hostData, credData, scopeData] = await Promise.all([
         api.listPlaybooks(),
         api.listPlaybookRuns(selectedProject, { limit: 100 }),
         api.listConnectors().catch(() => ({ connectors: [] })),
         api.listPlaybookStepTemplates().catch(() => ({ templates: [] })),
+        api.getHosts(selectedProject).catch(() => []),
+        api.getCreds(selectedProject).catch(() => []),
+        api.getScopes(selectedProject).catch(() => []),
       ]);
       setPlaybooks(pb.playbooks || []);
       setRuns(runData.runs || []);
       setConnectors(connectorData.connectors || []);
       setStepTemplates(templateData.templates || []);
+      setHosts(Array.isArray(hostData) ? hostData : []);
+      setCreds(Array.isArray(credData) ? credData : []);
+      setScopes(Array.isArray(scopeData) ? scopeData : []);
       setSelectedPlaybookId(prev => prev || pb.playbooks?.[0]?.id || '');
     } catch (e) {
       setError(e.message || 'Failed to load playbooks');
@@ -269,14 +718,18 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const hasActiveRuns = useMemo(() => runs.some(run => run.status === 'queued' || run.status === 'running'), [runs]);
   useEffect(() => {
-    if (!hasActiveRuns || !selectedProject) return;
-    const iv = setInterval(() => {
-      api.listPlaybookRuns(selectedProject, { limit: 100 }).then(data => setRuns(data.runs || [])).catch(() => {});
-    }, 3000);
-    return () => clearInterval(iv);
-  }, [hasActiveRuns, selectedProject]);
+    const handler = (e) => {
+      const { action, data } = e.detail;
+      setRuns(prev => {
+        if (action === 'create') return prev.some(r => r.id === data.id) ? prev : [data, ...prev];
+        if (action === 'update') return prev.map(r => r.id === data.id ? data : r);
+        return prev;
+      });
+    };
+    window.addEventListener('rt:playbook_run', handler);
+    return () => window.removeEventListener('rt:playbook_run', handler);
+  }, []);
 
   const selected = playbooks.find(p => p.id === selectedPlaybookId) || null;
 
@@ -360,6 +813,37 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
     }
   };
 
+  const batchRunSelected = async () => {
+    if (!selectedProject || !selected) return;
+    setRunning(true);
+    setError('');
+    setBatchResult(null);
+    try {
+      const payload = {
+        ...batchForm,
+        target_url: form.target_url,
+        flags: form.flags,
+        severity: form.severity,
+        keep_manual_positions: form.keep_manual_positions,
+        create_missing_networks: form.create_missing_networks,
+        username: form.username || '',
+        password: form.password || '',
+        domain: form.domain || '',
+        hash: form.hash || '',
+      };
+      const res = await api.batchRunPlaybook(selectedProject, selected.id, payload);
+      setBatchResult({ batchId: res.batch_id, total: res.total });
+      if (res.runs) setRuns(prev => {
+        const newIds = new Set(res.runs.map(r => r.id));
+        return [...res.runs, ...prev.filter(r => !newIds.has(r.id))];
+      });
+    } catch (e) {
+      setError(e.message || 'Failed to start batch run');
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const cancelRun = async (runId) => {
     try {
       const updated = await api.cancelPlaybookRun(selectedProject, runId);
@@ -389,15 +873,23 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={load} style={toolbarBtn(accent, false)}>Refresh</button>
-          <button onClick={startCreate} style={toolbarBtn(accent, true)}>New custom playbook</button>
+          {activeTab === 'playbooks' && <button onClick={startCreate} style={toolbarBtn(accent, true)}>New custom playbook</button>}
         </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #1e2029', paddingBottom: 0 }}>
+        {[{ id: 'playbooks', label: 'Playbooks' }, { id: 'scheduled', label: 'Scheduled' }].map(t => (
+          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ background: 'transparent', border: 'none', borderBottom: activeTab === t.id ? `2px solid ${accent}` : '2px solid transparent', padding: '6px 14px', cursor: 'pointer', color: activeTab === t.id ? accent : '#606570', fontSize: 12, fontFamily: 'JetBrains Mono', marginBottom: -1 }}>{t.label}</button>
+        ))}
       </div>
 
       {error && <div style={{ background: '#1a0808', border: '1px solid #3a1010', borderRadius: 6, padding: '10px 12px', color: '#f87171', fontSize: 12 }}>{error}</div>}
       {editingMode && validation.errors.length > 0 && <div style={{ background: '#1a0808', border: '1px solid #3a1010', borderRadius: 6, padding: '10px 12px', color: '#f87171', fontSize: 12, lineHeight: 1.6 }}>{validation.errors.map((item, idx) => <div key={idx}>{item}</div>)}</div>}
       {editingMode && validation.warnings.length > 0 && <div style={{ background: '#1a1408', border: '1px solid #4a3410', borderRadius: 6, padding: '10px 12px', color: '#f09a3a', fontSize: 12, lineHeight: 1.6 }}>{validation.warnings.map((item, idx) => <div key={idx}>{item}</div>)}</div>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, minHeight: 0, alignItems: 'start' }}>
+      {activeTab === 'scheduled' && <ScheduledTab selectedProject={selectedProject} accent={accent} playbooks={playbooks} hosts={hosts} creds={creds} scopes={scopes} />}
+
+      {activeTab === 'playbooks' && <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, minHeight: 0, alignItems: 'start' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, position: 'sticky', top: 0 }}>
           {(playbooks || []).map(playbook => <PlaybookCard key={playbook.id} playbook={playbook} accent={accent} selected={selectedPlaybookId === playbook.id && !editingMode} onSelect={(id) => { setSelectedPlaybookId(id); setEditingMode(false); }} />)}
         </div>
@@ -438,8 +930,27 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                       templates={stepTemplates}
                       stepCount={editor.steps.length}
                       stepIndex={idx}
+                      allSteps={editor.steps}
                       onChange={(next) => setEditor(prev => ({ ...prev, steps: prev.steps.map((item, i) => i === idx ? next : item) }))}
                       onDelete={() => setEditor(prev => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))}
+                      onDuplicate={() => setEditor(prev => {
+                        const copy = JSON.parse(JSON.stringify(prev.steps[idx]));
+                        const next = [...prev.steps];
+                        next.splice(idx + 1, 0, copy);
+                        return { ...prev, steps: next };
+                      })}
+                      onMoveUp={() => setEditor(prev => {
+                        if (idx === 0) return prev;
+                        const next = [...prev.steps];
+                        [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                        return { ...prev, steps: next };
+                      })}
+                      onMoveDown={() => setEditor(prev => {
+                        if (idx >= prev.steps.length - 1) return prev;
+                        const next = [...prev.steps];
+                        [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                        return { ...prev, steps: next };
+                      })}
                       disableDelete={editor.steps.length <= 1}
                     />
                   ))}
@@ -473,16 +984,55 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Target</div>
-                    <input value={form.target} onChange={e => setForm(prev => ({ ...prev, target: e.target.value }))} placeholder="10.0.0.0/24" style={inp()} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Target URL</div>
-                    <input value={form.target_url} onChange={e => setForm(prev => ({ ...prev, target_url: e.target.value }))} placeholder="https://target.example" style={inp()} />
-                  </div>
+                {/* Run mode toggle */}
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {['single', 'batch'].map(mode => (
+                    <button key={mode} onClick={() => setRunMode(mode)} style={{ background: runMode === mode ? accent + '33' : '#13161f', color: runMode === mode ? accent : '#6a7080', border: `1px solid ${runMode === mode ? accent + '66' : '#1e2230'}`, borderRadius: 4, padding: '3px 14px', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}>
+                      {mode === 'single' ? 'Single run' : 'Batch run'}
+                    </button>
+                  ))}
                 </div>
+
+                {runMode === 'single' ? (
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                      <div>
+                        <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Target</div>
+                        <PickerInput
+                          value={form.target}
+                          onChange={v => setForm(prev => ({ ...prev, target: v }))}
+                          placeholder="10.0.0.0/24"
+                          options={[
+                            ...hosts.filter(h => !h.is_attacker).map(h => ({ value: h.ip, label: (h.hostname ? `${h.hostname} · ` : '') + (h.os || '') + (h.tags?.length ? ' [' + h.tags.join(',') + ']' : '') })),
+                            ...scopes.filter(s => s.in_scope && ['cidr','hostname'].includes(s.scope_type)).map(s => ({ value: s.value, label: `scope · ${s.description || s.scope_type}` })),
+                          ]}
+                        />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Target URL</div>
+                        <PickerInput
+                          value={form.target_url}
+                          onChange={v => setForm(prev => ({ ...prev, target_url: v }))}
+                          placeholder="https://target.example"
+                          options={[
+                            ...hosts.filter(h => !h.is_attacker && (h.tags?.includes('web') || h.ports?.some(p => ['80','443','8080','8443'].includes(String(p).split('/')[0])))).map(h => ({ value: `http${h.tags?.includes('web') && h.ports?.some(p => ['443','8443'].includes(String(p).split('/')[0])) ? 's' : ''}://${h.hostname || h.ip}`, label: h.hostname || h.ip })),
+                            ...scopes.filter(s => s.in_scope && s.scope_type === 'url').map(s => ({ value: s.value, label: `scope · ${s.description || ''}` })),
+                          ]}
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <BatchHostSelector hosts={hosts} batchForm={batchForm} onChange={setBatchForm} accent={accent} />
+                    {batchResult && (
+                      <div style={{ background: '#0a1a0a', border: '1px solid #39d35344', borderRadius: 6, padding: '8px 12px', fontSize: 11, color: '#39d353', fontFamily: 'JetBrains Mono' }}>
+                        Batch started: {batchResult.total} runs · id: {batchResult.batchId}
+                      </div>
+                    )}
+                  </>
+                )}
+
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div>
                     <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Nmap flags</div>
@@ -493,11 +1043,62 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                     <input value={form.severity} onChange={e => setForm(prev => ({ ...prev, severity: e.target.value }))} style={inp()} />
                   </div>
                 </div>
+
+                {/* AD / Auth fields */}
+                <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span>Auth / AD credentials <span style={{ color: '#303540' }}>(optional)</span></span>
+                    <CredPicker accent={accent} creds={creds} onPick={c => setForm(prev => ({
+                      ...prev,
+                      username: c.username.includes('\\') ? c.username.split('\\')[1] : c.username,
+                      domain: c.domain || (c.username.includes('\\') ? c.username.split('\\')[0] : ''),
+                      password: (c.type === 'plain' || c.type === 'token') ? (c.secret || '') : '',
+                      hash: (c.type === 'hash' || c.type === 'ntlm') ? (c.secret || '') : '',
+                    }))} />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Domain</div>
+                      <PickerInput
+                        value={form.domain || ''}
+                        onChange={v => setForm(prev => ({ ...prev, domain: v }))}
+                        placeholder="CORP"
+                        options={[...new Set(creds.filter(c => c.domain).map(c => c.domain))].map(d => ({ value: d }))}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Username</div>
+                      <PickerInput
+                        value={form.username || ''}
+                        onChange={v => setForm(prev => ({ ...prev, username: v }))}
+                        placeholder="administrator"
+                        options={creds.map(c => ({ value: c.username.includes('\\') ? c.username.split('\\')[1] : c.username, label: c.domain ? `${c.domain} · ${c.type}` : c.type }))}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Password</div>
+                      <input type="password" value={form.password || ''} onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))} placeholder="••••••••" style={inp()} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>NTLM Hash</div>
+                      <PickerInput
+                        value={form.hash || ''}
+                        onChange={v => setForm(prev => ({ ...prev, hash: v }))}
+                        placeholder="aad3b435b51404eeaad3b435b51404ee:..."
+                        options={creds.filter(c => c.type === 'hash' || c.type === 'ntlm').map(c => ({ value: c.secret || '', label: `${c.username} · ${c.type}` }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <button onClick={() => setForm(prev => ({ ...prev, keep_manual_positions: !prev.keep_manual_positions }))} style={toggleBtn(form.keep_manual_positions, accent)}>{form.keep_manual_positions ? 'Keep manual positions' : 'Ignore manual positions'}</button>
                   <button onClick={() => setForm(prev => ({ ...prev, create_missing_networks: !prev.create_missing_networks }))} style={toggleBtn(form.create_missing_networks, accent)}>{form.create_missing_networks ? 'Create missing networks' : 'No auto-create'}</button>
                 </div>
-                <button onClick={runSelected} disabled={running} style={{ background: running ? '#1a1c22' : accent, border: 'none', borderRadius: 5, padding: '8px 16px', cursor: running ? 'not-allowed' : 'pointer', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{running ? 'Starting...' : 'Run playbook'}</button>
+                {runMode === 'single'
+                  ? <button onClick={runSelected} disabled={running} style={{ background: running ? '#1a1c22' : accent, border: 'none', borderRadius: 5, padding: '8px 16px', cursor: running ? 'not-allowed' : 'pointer', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{running ? 'Starting...' : 'Run playbook'}</button>
+                  : <button onClick={batchRunSelected} disabled={running} style={{ background: running ? '#1a1c22' : '#f09a3a', border: 'none', borderRadius: 5, padding: '8px 16px', cursor: running ? 'not-allowed' : 'pointer', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{running ? 'Starting...' : `Run on ${batchForm.host_ids.length > 0 ? batchForm.host_ids.length : 'filtered'} hosts`}</button>
+                }
               </div>
             )}
           </div>
@@ -509,43 +1110,89 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
             </div>
             {loading ? <div style={{ padding: 16, color: '#505560', fontSize: 12 }}>Loading...</div> : runs.length === 0 ? <div style={{ padding: 16, color: '#505560', fontSize: 12 }}>No playbook runs yet.</div> : (
               <div>
-                {runs.map((run, i) => (
-                  <div key={run.id} style={{ padding: '12px 16px', borderBottom: i < runs.length - 1 ? '1px solid #14161b' : 'none' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 600 }}>{run.title}</span>
-                      <StatusBadge status={run.status} />
-                      <span style={{ fontSize: 10, color: '#6fc8f0', fontFamily: 'JetBrains Mono' }}>{run.playbook_id}</span>
-                    </div>
-                    <div style={{ fontSize: 10, color: '#606570', display: 'flex', gap: 12, flexWrap: 'wrap', fontFamily: 'JetBrains Mono', marginBottom: 6 }}>
-                      <span>run: {run.id}</span>
-                      {run.target && <span>target: {run.target}</span>}
-                      <span>jobs: {(run.jobs_json || []).length}</span>
-                      <span>by: {run.created_by || '—'}</span>
-                      <span>created: {run.created_at?.slice(0, 16) || '—'}</span>
-                    </div>
-                    {!!(run.jobs_json || []).length && (
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                        {(run.jobs_json || []).map(job => <button key={job.id} onClick={() => onNavigate?.('jobs')} style={{ background: '#13161f', border: '1px solid #1e2230', borderRadius: 4, padding: '2px 7px', cursor: 'pointer', color: '#a0a8b8', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{job.title} · {job.status}</button>)}
+                {runs.map((run, i) => {
+                  const isExpanded = expandedRunId === run.id;
+                  const duration = run.started_at && run.finished_at
+                    ? (() => { const s = new Date(run.started_at), f = new Date(run.finished_at); const sec = Math.round((f - s) / 1000); return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`; })()
+                    : run.started_at && !run.finished_at ? 'running…' : null;
+                  const resultKeys = Object.entries(run.result_json || {}).filter(([k]) => !['completed_jobs', 'failed_jobs', 'cancelled_jobs'].includes(k));
+                  return (
+                    <div key={run.id} style={{ borderBottom: i < runs.length - 1 ? '1px solid #14161b' : 'none' }}>
+                      <div
+                        onClick={() => setExpandedRunId(prev => prev === run.id ? null : run.id)}
+                        style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }}
+                        onMouseEnter={e => e.currentTarget.style.background = '#ffffff04'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 10, color: isExpanded ? accent : '#505560', fontFamily: 'JetBrains Mono', flexShrink: 0 }}>{isExpanded ? '▾' : '▸'}</span>
+                          <span style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 600 }}>{run.title}</span>
+                          <StatusBadge status={run.status} />
+                          {duration && <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>⏱ {duration}</span>}
+                          {run.request_json?.batch_id && <span style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>batch</span>}
+                        </div>
+                        <div style={{ fontSize: 10, color: '#606570', display: 'flex', gap: 12, flexWrap: 'wrap', fontFamily: 'JetBrains Mono', paddingLeft: 18 }}>
+                          {run.target && <span>target: {run.target}</span>}
+                          <span>{(run.jobs_json || []).length} step{(run.jobs_json || []).length === 1 ? '' : 's'}</span>
+                          <span>by: {run.created_by || '—'}</span>
+                          <span>{run.created_at?.slice(0, 16) || '—'}</span>
+                        </div>
                       </div>
-                    )}
-                    {(run.result_json?.completed_jobs?.length > 0 || run.error_output) && (
-                      <div style={{ fontSize: 10, color: run.error_output ? '#f87171' : '#808590', lineHeight: 1.6, fontFamily: 'JetBrains Mono', marginBottom: 8 }}>
-                        {run.result_json?.completed_jobs?.length > 0 && <div>completed jobs: {run.result_json.completed_jobs.join(', ')}</div>}
-                        {run.error_output && <div>{run.error_output}</div>}
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      {(run.status === 'queued' || run.status === 'running') && <button onClick={() => cancelRun(run.id)} style={toolbarBtn('#f09a3a', false)}>Cancel run</button>}
-                      {run.status !== 'queued' && run.status !== 'running' && <button onClick={() => rerun(run.id)} style={toolbarBtn(accent, false)}>Rerun</button>}
-                      {!!(run.jobs_json || []).length && <button onClick={() => onNavigate?.('jobs')} style={toolbarBtn('#5b8af5', false)}>Open Jobs</button>}
+
+                      {isExpanded && (
+                        <div style={{ padding: '0 16px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                          <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 8, overflow: 'hidden' }}>
+                            <div style={{ padding: '8px 12px', borderBottom: '1px solid #14161b', fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Steps</div>
+                            {(run.jobs_json || []).map((job, idx) => (
+                              <div key={job.id} style={{ padding: '8px 12px', borderBottom: idx < (run.jobs_json || []).length - 1 ? '1px solid #12141a' : 'none', display: 'flex', alignItems: 'center', gap: 10 }}>
+                                <div style={{ width: 20, height: 20, borderRadius: '50%', background: '#13161f', border: `1px solid ${accent}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent, fontSize: 9, fontFamily: 'JetBrains Mono', fontWeight: 700, flexShrink: 0 }}>{idx + 1}</div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: 11, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.title}</div>
+                                  <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginTop: 2 }}>{job.id}</div>
+                                </div>
+                                <StatusBadge status={job.status} />
+                                <button onClick={() => onNavigate?.('jobs', { playbookRunId: run.id })} style={{ background: 'transparent', border: '1px solid #1e2230', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#5b8af5', fontSize: 10, fontFamily: 'JetBrains Mono', flexShrink: 0 }}>View</button>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#606570' }}>
+                            {run.started_at && <div><span style={{ color: '#404550' }}>started: </span>{run.started_at.slice(0, 16)}</div>}
+                            {run.finished_at && <div><span style={{ color: '#404550' }}>finished: </span>{run.finished_at.slice(0, 16)}</div>}
+                            <div><span style={{ color: '#404550' }}>run id: </span>{run.id}</div>
+                            <div><span style={{ color: '#404550' }}>playbook: </span>{run.playbook_id}</div>
+                          </div>
+
+                          {resultKeys.length > 0 && (
+                            <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 12px', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                              {resultKeys.map(([k, v]) => (
+                                <div key={k} style={{ fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                                  <span style={{ color: '#404550' }}>{k}: </span>
+                                  <span style={{ color: typeof v === 'number' && v > 0 ? accent : '#808590' }}>{String(v)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {run.error_output && (
+                            <div style={{ background: '#130808', border: '1px solid #3a1010', borderRadius: 6, padding: '8px 12px', fontSize: 10, color: '#f87171', fontFamily: 'JetBrains Mono', lineHeight: 1.6 }}>{run.error_output}</div>
+                          )}
+
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            {(run.status === 'queued' || run.status === 'running') && <button onClick={() => cancelRun(run.id)} style={toolbarBtn('#f09a3a', false)}>Cancel run</button>}
+                            {run.status !== 'queued' && run.status !== 'running' && <button onClick={() => rerun(run.id)} style={toolbarBtn(accent, false)}>Rerun</button>}
+                            {!!(run.jobs_json || []).length && <button onClick={() => onNavigate?.('jobs', { playbookRunId: run.id })} style={toolbarBtn('#5b8af5', false)}>Open Jobs</button>}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

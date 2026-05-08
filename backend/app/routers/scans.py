@@ -159,7 +159,7 @@ async def run_nmap_scan(
         request_json=body.model_dump(),
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None, lambda: run_ssh_command(ssh_config, cmd, body.timeout_seconds)
     )
@@ -305,7 +305,7 @@ async def run_nuclei_scan(
         request_json=body.model_dump(),
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None, lambda: run_ssh_command(ssh_config, cmd, body.timeout_seconds)
     )
@@ -460,7 +460,7 @@ async def run_cme_scan(
         request_json=body.model_dump(),
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None, lambda: run_ssh_command(ssh_config, cmd, body.timeout_seconds)
     )
@@ -546,4 +546,272 @@ async def run_cme_scan(
         "creds_created": created_creds,
         "stdout": result.get("stdout", "")[:5000],
         "stderr": result.get("stderr", ""),
+    }
+
+
+# ── httpx ─────────────────────────────────────────────────────────────
+
+class HttpxScanBody(BaseModel):
+    target: str
+    flags: str = "-title -status-code -tech-detect -follow-redirects"
+    timeout_seconds: int = 120
+    target_id: Optional[str] = None
+
+
+def _parse_httpx_jsonl(text: str) -> list[dict]:
+    results = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        url = obj.get("url") or obj.get("input") or ""
+        status = obj.get("status-code") or obj.get("status_code") or 0
+        title = obj.get("title") or ""
+        tech = obj.get("tech") or obj.get("technologies") or []
+        if isinstance(tech, str):
+            tech = [t.strip() for t in tech.split(",") if t.strip()]
+        webserver = obj.get("webserver") or obj.get("web-server") or ""
+        host = obj.get("host") or obj.get("input") or ""
+        # Normalise host: strip protocol
+        for prefix in ("https://", "http://"):
+            if host.startswith(prefix):
+                host = host[len(prefix):]
+        host = host.split("/")[0].split(":")[0]
+        port_str = obj.get("port") or ""
+        try:
+            port = int(port_str)
+        except (ValueError, TypeError):
+            port = 80
+        results.append({
+            "url": url,
+            "host": host,
+            "port": port,
+            "status": int(status) if status else 0,
+            "title": title,
+            "tech": tech,
+            "webserver": webserver,
+        })
+    return results
+
+
+@router.post("/httpx")
+async def run_httpx(
+    pid: str,
+    body: HttpxScanBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _require_attacker_ssh()
+    check_pid_access(db, pid, current_user)
+    ssh_config = _get_ssh_config(pid, body.target_id)
+    username = current_user.username
+    target = body.target.strip()
+
+    flags = body.flags or "-title -status-code -tech-detect -follow-redirects"
+    cmd = f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1"
+
+    job = start_job(
+        db, pid, "httpx", f"httpx: {target}",
+        target=target, command=cmd, created_by=username,
+        connector_key="httpx", operation="scan",
+        related_entity_type="project", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: run_ssh_command(ssh_config, cmd, body.timeout_seconds)
+    )
+
+    stdout = result.get("stdout", "")
+    parsed = _parse_httpx_jsonl(stdout)
+
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    hosts_found = len({r["host"] for r in parsed if r["host"]})
+    urls_found = len(parsed)
+    activities_created = 0
+
+    for r in parsed:
+        h_ip = r["host"]
+        if not h_ip:
+            continue
+        existing = db.query(models.Host).filter(models.Host.pid == pid, models.Host.ip == h_ip).first()
+        if not existing:
+            existing = db.query(models.Host).filter(models.Host.pid == pid, models.Host.hostname == h_ip).first()
+        if not existing:
+            existing = models.Host(
+                id=new_id("hst"), pid=pid,
+                ip=h_ip, hostname="",
+                os="", status="up",
+                ports=[r["port"]] if r["port"] else [],
+                services=["http"] if r["port"] in (80, 8080) else ["https"],
+                tags=["httpx"],
+                import_source="httpx",
+            )
+            db.add(existing)
+        else:
+            if r["port"] and r["port"] not in (existing.ports or []):
+                existing.ports = list(set((existing.ports or []) + [r["port"]]))
+            svc = "http" if r["port"] in (80, 8080) else "https"
+            if svc not in (existing.services or []):
+                existing.services = list(set((existing.services or []) + [svc]))
+
+        tech_str = ", ".join(r["tech"]) if r["tech"] else ""
+        summary = f"[{r['status']}] {r['url']}"
+        if r["title"]:
+            summary += f" | {r['title']}"
+        if tech_str:
+            summary += f" | tech: {tech_str}"
+
+        activity = models.HostActivity(
+            id=new_id("hact"), pid=pid,
+            host_id=existing.id,
+            title=f"httpx: {r['url']}",
+            activity_type="recon",
+            command=cmd,
+            summary=summary,
+            output=json.dumps(r),
+            status="done",
+            ts=ts,
+        )
+        db.add(activity)
+        activities_created += 1
+
+    log_event(db, pid, username, "scan", "httpx", f"httpx: {target} → {urls_found} URLs, {hosts_found} hosts", {"target": target})
+    db.commit()
+
+    job_status = "done" if result.get("ok") else "failed"
+    finish_job(db, job, status=job_status,
+               output=stdout[:20000] if stdout else "",
+               error_output=result.get("stderr", ""),
+               result={"urls_found": urls_found, "hosts_found": hosts_found, "activities_created": activities_created})
+
+    return {
+        "ok": result.get("ok", False),
+        "job_id": job.id,
+        "target": target,
+        "urls_found": urls_found,
+        "hosts_found": hosts_found,
+        "activities_created": activities_created,
+    }
+
+
+# ── ffuf ──────────────────────────────────────────────────────────────
+
+class FfufScanBody(BaseModel):
+    target_url: str
+    wordlist: str = "/usr/share/seclists/Discovery/Web-Content/common.txt"
+    extensions: str = ""
+    flags: str = "-mc 200,204,301,302,307,401,403,405"
+    timeout_seconds: int = 300
+    target_id: Optional[str] = None
+
+
+def _parse_ffuf_json(text: str) -> list[dict]:
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("{") and '"results"' in line:
+            try:
+                obj = json.loads(line)
+                return obj.get("results") or []
+            except json.JSONDecodeError:
+                pass
+    # Try full JSON (ffuf -o /dev/stdout -of json)
+    try:
+        obj = json.loads(text)
+        return obj.get("results") or []
+    except json.JSONDecodeError:
+        pass
+    return []
+
+
+@router.post("/ffuf")
+async def run_ffuf(
+    pid: str,
+    body: FfufScanBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _require_attacker_ssh()
+    check_pid_access(db, pid, current_user)
+    ssh_config = _get_ssh_config(pid, body.target_id)
+    username = current_user.username
+    target_url = body.target_url.strip().rstrip("/")
+
+    ext_flag = f"-e {body.extensions}" if body.extensions.strip() else ""
+    url = f"{target_url}/FUZZ"
+    cmd = f"ffuf -u '{url}' -w '{body.wordlist}' {ext_flag} {body.flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+
+    job = start_job(
+        db, pid, "ffuf", f"ffuf: {target_url}",
+        target=target_url, command=cmd, created_by=username,
+        connector_key="ffuf", operation="scan",
+        related_entity_type="project", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: run_ssh_command(ssh_config, cmd, body.timeout_seconds)
+    )
+
+    stdout = result.get("stdout", "")
+    parsed = _parse_ffuf_json(stdout)
+
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    paths_found = len(parsed)
+    findings_created = 0
+
+    for r in parsed:
+        status = r.get("status") or 0
+        path = r.get("input", {}).get("FUZZ") or r.get("url") or ""
+        full_url = r.get("url") or f"{target_url}/{path}"
+        length = r.get("length") or 0
+        words = r.get("words") or 0
+
+        severity = "info"
+        if status in (200, 204):
+            severity = "low"
+        if status in (401, 403):
+            severity = "info"
+        if path and any(kw in path.lower() for kw in ("admin", "config", "backup", "secret", ".env", "passwd")):
+            severity = "medium"
+
+        existing = db.query(models.Finding).filter(
+            models.Finding.pid == pid,
+            models.Finding.title == f"ffuf: {full_url}",
+        ).first()
+        if not existing:
+            finding = models.Finding(
+                id=new_id("fnd"),
+                pid=pid,
+                title=f"ffuf: {full_url}",
+                severity=severity,
+                description=f"HTTP {status} — size {length} bytes / {words} words",
+                proof=f"URL: {full_url}\nStatus: {status}\nSize: {length}\nWords: {words}",
+                status="open",
+                ts=ts,
+            )
+            db.add(finding)
+            findings_created += 1
+
+    log_event(db, pid, username, "scan", "ffuf", f"ffuf: {target_url} → {paths_found} paths, {findings_created} findings", {"target": target_url})
+    db.commit()
+
+    job_status = "done" if result.get("ok") else "failed"
+    finish_job(db, job, status=job_status,
+               output=stdout[:20000] if stdout else "",
+               error_output=result.get("stderr", ""),
+               result={"paths_found": paths_found, "findings_created": findings_created})
+
+    return {
+        "ok": result.get("ok", False),
+        "job_id": job.id,
+        "target_url": target_url,
+        "paths_found": paths_found,
+        "findings_created": findings_created,
     }

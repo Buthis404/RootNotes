@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { toastError } from '../components/Toast.jsx';
 import Icon from '../components/Icon.jsx';
 import MdEditor from '../components/MdEditor.jsx';
 import { PhaseTag, Btn, SearchBar } from '../components/UI.jsx';
@@ -240,7 +241,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
       if (err.status === 409) {
         setConflictNote(err.serverNote);
       } else {
-        alert(`Save error: ${err.message}`);
+        toastError(`Save error: ${err.message}`);
       }
     }
   };
@@ -270,7 +271,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
         setEditing(true);
       }
     } catch (err) {
-      alert(`Upload error: ${err.message}`);
+      toastError(`Upload error: ${err.message}`);
     } finally {
       setUploading(false);
     }

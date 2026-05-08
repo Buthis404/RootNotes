@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import re
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -235,12 +236,10 @@ class Network(BaseModel):
 
     @classmethod
     def from_orm_obj(cls, obj):
-        import json as _json
-
         def _parse(val):
             if isinstance(val, str):
                 try:
-                    return _json.loads(val)
+                    return json.loads(val)
                 except Exception:
                     return []
             return val or []
@@ -342,6 +341,7 @@ class NetworkRegionCreate(BaseModel):
     note: str = ""
     fill: Optional[str] = None
     stroke: Optional[str] = None
+    zone_type: Optional[str] = None  # dmz|internal|external|custom
     client_mutation_id: Optional[str] = None
 
 
@@ -354,6 +354,7 @@ class NetworkRegionUpdate(BaseModel):
     note: Optional[str] = None
     fill: Optional[str] = None
     stroke: Optional[str] = None
+    zone_type: Optional[str] = None
     client_mutation_id: Optional[str] = None
 
 
@@ -697,4 +698,89 @@ class CustomSnippet(CustomSnippetBase):
     id: str
     created_at: str = ""
     is_custom: bool = False
+    model_config = {"from_attributes": True}
+
+
+# ── Scheduled Playbooks ───────────────────────────────────────────────
+class ScheduledPlaybookCreate(BaseModel):
+    pid: str
+    playbook_id: str
+    title: str = ""
+    cron_expr: str = "0 * * * *"
+    enabled: bool = True
+    body_json: Any = {}
+
+
+class ScheduledPlaybookUpdate(BaseModel):
+    title: Optional[str] = None
+    cron_expr: Optional[str] = None
+    enabled: Optional[bool] = None
+    body_json: Optional[Any] = None
+
+
+class ScheduledPlaybook(BaseModel):
+    id: str
+    pid: str
+    playbook_id: str
+    title: str
+    cron_expr: str
+    enabled: bool
+    body_json: Any
+    last_run_at: str
+    next_run_at: str
+    created_by: str
+    created_at: str
+    model_config = {"from_attributes": True}
+
+
+# ── Project Domains ───────────────────────────────────────────────────
+class ProjectDomainCreate(BaseModel):
+    pid: str
+    name: str
+    aliases: List[str] = []
+    notes: str = ""
+
+
+class ProjectDomainUpdate(BaseModel):
+    name: Optional[str] = None
+    aliases: Optional[List[str]] = None
+    notes: Optional[str] = None
+
+
+class ProjectDomain(BaseModel):
+    id: str
+    pid: str
+    name: str
+    aliases: List[str]
+    notes: str
+    created_at: str
+    model_config = {"from_attributes": True}
+
+
+# ── Knowledge Base ────────────────────────────────────────────────────
+class KBArticleCreate(BaseModel):
+    pid: Optional[str] = None
+    title: str
+    content: str = ""
+    category: str = "General"
+    tags: List[str] = []
+
+
+class KBArticleUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class KBArticle(BaseModel):
+    id: str
+    pid: Optional[str] = None
+    title: str
+    content: str
+    category: str
+    tags: List[str]
+    created_by: str
+    created_at: str
+    updated_at: str
     model_config = {"from_attributes": True}

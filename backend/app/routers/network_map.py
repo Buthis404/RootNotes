@@ -414,6 +414,7 @@ def create_network_region(pid: str, body: schemas.NetworkRegionCreate, request: 
         "note": body.note,
         "fill": body.fill,
         "stroke": body.stroke,
+        "zone_type": body.zone_type,
         "updated_at": _now(),
         "version": 1,
     }

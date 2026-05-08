@@ -184,4 +184,7 @@ export function applySyncEvent(msg, ctx) {
       setHostActivities(prev => prev.filter(x => x.pid !== data.id));
     }
   }
+  if (entity === 'playbook_run') {
+    window.dispatchEvent(new CustomEvent('rt:playbook_run', { detail: { action, data } }));
+  }
 }

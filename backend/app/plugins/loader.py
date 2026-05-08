@@ -77,6 +77,22 @@ def _register_builtin_modules():
                 supported_operations=["scan", "enumerate"],
                 creates_entities=["host", "cred", "job"],
             ),
+            ToolConnector(
+                key="httpx",
+                title="httpx",
+                category="scan",
+                description="Fast HTTP probe — discovers live web services, titles, technologies",
+                supported_operations=["scan"],
+                creates_entities=["host", "host_activity", "job"],
+            ),
+            ToolConnector(
+                key="ffuf",
+                title="ffuf",
+                category="scan",
+                description="Web content discovery via fuzzing — finds hidden paths and endpoints",
+                supported_operations=["scan"],
+                creates_entities=["finding", "job"],
+            ),
         ],
     )
     registry.register(nmap_module)

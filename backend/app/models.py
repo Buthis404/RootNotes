@@ -347,3 +347,44 @@ class CustomPlaybook(Base):
     created_by = Column(String, nullable=False, default="")
     created_at = Column(String, nullable=False)
     updated_at = Column(String, nullable=False)
+
+
+class ScheduledPlaybook(Base):
+    __tablename__ = "scheduled_playbooks"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    playbook_id = Column(String, nullable=False)
+    title = Column(String, nullable=False, default="")
+    cron_expr = Column(String, nullable=False, default="0 * * * *")
+    enabled = Column(Boolean, nullable=False, default=True)
+    body_json = Column(JSONB, nullable=False, default=dict)
+    last_run_at = Column(String, nullable=False, default="")
+    next_run_at = Column(String, nullable=False, default="")
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+
+
+class ProjectDomain(Base):
+    __tablename__ = "project_domains"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String, nullable=False)
+    aliases = Column(ARRAY(String), nullable=False, default=[])
+    notes = Column(Text, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+
+
+class KBArticle(Base):
+    __tablename__ = "kb_articles"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)  # null = global
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False, default="")
+    category = Column(String, nullable=False, default="General")
+    tags = Column(ARRAY(String), nullable=False, default=[])
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False)

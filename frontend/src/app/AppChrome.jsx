@@ -9,7 +9,7 @@ export function NavTab({ tab, active, onClick, accent, badge, expanded }) {
   const [hov, setHov] = useState(false);
   return (
     <button onClick={onClick} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} title={tab.label}
-      style={{ width: '100%', padding: expanded ? '12px 14px' : '14px 0', border: 'none', cursor: 'pointer', background: active ? `${accent}18` : hov ? '#ffffff08' : 'transparent', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', display: 'flex', flexDirection: expanded ? 'row' : 'column', alignItems: 'center', justifyContent: expanded ? 'flex-start' : 'center', gap: expanded ? 10 : 6, transition: 'all .15s', position: 'relative' }}>
+      style={{ width: '100%', padding: '12px 14px', border: 'none', cursor: 'pointer', background: active ? `${accent}18` : hov ? '#ffffff08' : 'transparent', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', display: 'flex', flexDirection: expanded ? 'row' : 'column', alignItems: 'center', justifyContent: expanded ? 'flex-start' : 'center', gap: 10, transition: 'all .15s', position: 'relative' }}>
       <Icon name={tab.icon} size={20} color={active ? accent : hov ? '#9098a8' : '#404550'} />
       {expanded && <span style={{ fontSize: 10, color: active ? accent : hov ? '#9098a8' : '#606570', letterSpacing: '0.04em', textTransform: 'uppercase', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{tab.label}</span>}
       {badge > 0 && <span style={{ position: 'absolute', top: 10, right: 10, background: accent, color: '#fff', fontSize: 9, fontWeight: 700, borderRadius: '50%', width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{badge > 9 ? '9+' : badge}</span>}

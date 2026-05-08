@@ -171,4 +171,17 @@ def finish_job(
     db.commit()
     db.refresh(job)
     bcast(job.pid, "job", "update", _job_dict(job))
+
+    # Notify on terminal status
+    if status in ("done", "failed"):
+        try:
+            from ..core.notifications import dispatch_sync
+            title = f"Job {status}: {job.title or job.type}"
+            body_text = f"Target: {job.target}" if job.target else f"Project: {job.pid}"
+            if status == "failed" and error_output:
+                body_text += f"\nError: {error_output[:200]}"
+            dispatch_sync(db, f"job_{status}", title, body_text, {"job_id": job.id, "pid": job.pid})
+        except Exception:
+            pass
+
     return job

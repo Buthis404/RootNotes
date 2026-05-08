@@ -20,6 +20,9 @@ services:
     build: ./backend
     container_name: rtnotes_backend
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       DATABASE_URL: postgresql://${DB_USER:-rtnotes}:${DB_PASSWORD:-rtnotes_secret}@db:5432/${DB_NAME:-rtnotes}
       UPLOAD_ROOT: /data/uploads

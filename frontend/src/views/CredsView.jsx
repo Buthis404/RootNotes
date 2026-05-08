@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
+import { toastError } from '../components/Toast.jsx';
 import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
 import { Badge, CredTypeBadge, SearchBar, FieldInput, TagEditor } from '../components/UI.jsx';
@@ -346,7 +347,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      alert(e.message || 'Failed to export credentials CSV');
+      toastError(e.message || 'Failed to export credentials CSV');
     }
   };
 

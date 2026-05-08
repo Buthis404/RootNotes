@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+
+
 import Icon from '../components/Icon.jsx';
 
 const NODE_TYPES = {
@@ -191,10 +193,107 @@ function PathNameEditor({ path, onSave }) {
   );
 }
 
+// ── Attack Path Graph ─────────────────────────────────────────────────
+function AttackPathGraph({ steps, accent }) {
+  if (!steps || steps.length === 0) {
+    return <div style={{ padding: 40, textAlign: 'center', color: '#404550', fontSize: 12 }}>No steps to visualize</div>;
+  }
+
+  const COLS = 4;
+  const NODE_W = 160, NODE_H = 80, GAP_X = 60, GAP_Y = 80;
+  const sorted = [...steps].sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
+
+  const positions = sorted.map((_, i) => {
+    const row = Math.floor(i / COLS);
+    const col = i % COLS;
+    return { x: col * (NODE_W + GAP_X) + 20, y: row * (NODE_H + GAP_Y) + 20 };
+  });
+
+  const totalRows = Math.ceil(sorted.length / COLS);
+  const svgW = Math.min(sorted.length, COLS) * (NODE_W + GAP_X) + 40;
+  const svgH = totalRows * (NODE_H + GAP_Y) + 40;
+
+  const edges = sorted.slice(0, -1).map((_, i) => {
+    const from = positions[i];
+    const to = positions[i + 1];
+    const fromRow = Math.floor(i / COLS);
+    const toRow = Math.floor((i + 1) / COLS);
+
+    if (fromRow === toRow) {
+      return {
+        d: `M ${from.x + NODE_W} ${from.y + NODE_H / 2} L ${to.x} ${to.y + NODE_H / 2}`,
+        key: i,
+      };
+    } else {
+      const midX = from.x + NODE_W + GAP_X / 2;
+      const midY = from.y + NODE_H / 2;
+      const nextY = to.y + NODE_H / 2;
+      return {
+        d: `M ${from.x + NODE_W} ${midY} L ${midX} ${midY} L ${midX} ${nextY} L ${to.x} ${nextY}`,
+        key: i,
+      };
+    }
+  });
+
+  return (
+    <div style={{ overflowX: 'auto', overflowY: 'auto', padding: 16 }}>
+      <svg width={svgW} height={svgH} style={{ display: 'block' }}>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#404550" />
+          </marker>
+        </defs>
+
+        {edges.map(e => (
+          <path key={e.key} d={e.d} stroke="#2a2d35" strokeWidth="1.5" fill="none" markerEnd="url(#arrow)" />
+        ))}
+
+        {sorted.map((step, i) => {
+          const pos = positions[i];
+          const nt = NODE_TYPES[step.node_type] || NODE_TYPES.host;
+          const color = nt.color;
+          return (
+            <g key={step.id} transform={`translate(${pos.x}, ${pos.y})`}>
+              <rect width={NODE_W} height={NODE_H} rx="8" ry="8"
+                fill="#0e1016" stroke={color} strokeWidth="1.5" />
+              <rect x={NODE_W - 22} y={0} width={22} height={18} rx="0" fill={color + '33'} />
+              <text x={NODE_W - 11} y={13} textAnchor="middle" fill={color} fontSize="10" fontFamily="JetBrains Mono">
+                {i + 1}
+              </text>
+              <text x={NODE_W / 2} y={32} textAnchor="middle" fill="#e0e4ec" fontSize="12" fontWeight="600" fontFamily="Space Grotesk">
+                {(step.label || nt.label).slice(0, 20)}
+              </text>
+              {step.sublabel && (
+                <text x={NODE_W / 2} y={46} textAnchor="middle" fill="#808590" fontSize="10" fontFamily="JetBrains Mono">
+                  {step.sublabel.slice(0, 22)}
+                </text>
+              )}
+              {step.technique && (
+                <text x={NODE_W / 2} y={62} textAnchor="middle" fill={color} fontSize="9" fontFamily="JetBrains Mono">
+                  {step.technique.slice(0, 24)}
+                </text>
+              )}
+              {step.mitre_id && (
+                <g>
+                  <rect x={8} y={NODE_H - 18} width={50} height={13} rx="3" fill={color + '22'} />
+                  <text x={33} y={NODE_H - 8} textAnchor="middle" fill={color} fontSize="9" fontFamily="JetBrains Mono">
+                    {step.mitre_id}
+                  </text>
+                </g>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 // ── Main view ─────────────────────────────────────────────────────────
 export default function AttackPathView({ attackPaths, attackSteps, onCreatePath, onUpdatePath, onDeletePath, onCreateStep, onUpdateStep, onDeleteStep, selectedProject, accent }) {
   const [activePath, setActivePath] = useState(null);
   const [modal, setModal] = useState(null); // null | { mode:'new'|'edit', step }
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'graph'
   const chainRef = useRef();
 
   const paths = attackPaths.filter(p => p.pid === selectedProject);
@@ -261,6 +360,16 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
         <Icon name="attackpath" size={16} color={accent} />
         <div style={{ fontSize: 11, color: '#404550', fontFamily: 'Space Grotesk', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Attack Path</div>
         <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', gap: 4, background: '#13151c', borderRadius: 6, padding: 2 }}>
+          {['list', 'graph'].map(m => (
+            <button key={m} onClick={() => setViewMode(m)}
+              style={{ padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.08em',
+                background: viewMode === m ? accent + '22' : 'transparent',
+                color: viewMode === m ? accent : '#606570' }}>
+              {m}
+            </button>
+          ))}
+        </div>
         <button onClick={handleCreatePath}
           style={{ background: accent + '18', border: `1px solid ${accent}44`, borderRadius: 6, padding: '6px 14px', cursor: 'pointer', color: accent, fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 }}>
           <Icon name="plus" size={11} color={accent} /> New path
@@ -314,50 +423,57 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
               </span>
             </div>
 
-            {/* Chain */}
-            <div ref={chainRef} style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '20px 24px 24px', display: 'flex', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 0, minHeight: 140 }}>
-                {steps.length === 0 ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 16, color: '#404550' }}>
-                    <div style={{ fontSize: 11, color: '#353840', fontFamily: 'JetBrains Mono' }}>← add first step</div>
-                  </div>
-                ) : (
-                  steps.map((step, i) => (
-                    <div key={step.id} style={{ display: 'flex', alignItems: 'center' }}>
-                      {i > 0 && (
-                        <Connector
-                          technique={step.technique}
-                          mitre_id={step.mitre_id}
-                        />
-                      )}
-                      <NodeCard
-                        step={step}
-                        accent={accent}
-                        canLeft={i > 0}
-                        canRight={i < steps.length - 1}
-                        onEdit={s => setModal({ mode: 'edit', step: s })}
-                        onDelete={async id => { if (confirm('Delete step?')) await onDeleteStep(id); }}
-                        onMoveLeft={handleMoveLeft}
-                        onMoveRight={handleMoveRight}
-                      />
+            {/* Chain / Graph */}
+            {viewMode === 'list' && (
+              <div ref={chainRef} style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '20px 24px 24px', display: 'flex', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 0, minHeight: 140 }}>
+                  {steps.length === 0 ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 16, color: '#404550' }}>
+                      <div style={{ fontSize: 11, color: '#353840', fontFamily: 'JetBrains Mono' }}>← add first step</div>
                     </div>
-                  ))
-                )}
+                  ) : (
+                    steps.map((step, i) => (
+                      <div key={step.id} style={{ display: 'flex', alignItems: 'center' }}>
+                        {i > 0 && (
+                          <Connector
+                            technique={step.technique}
+                            mitre_id={step.mitre_id}
+                          />
+                        )}
+                        <NodeCard
+                          step={step}
+                          accent={accent}
+                          canLeft={i > 0}
+                          canRight={i < steps.length - 1}
+                          onEdit={s => setModal({ mode: 'edit', step: s })}
+                          onDelete={async id => { if (confirm('Delete step?')) await onDeleteStep(id); }}
+                          onMoveLeft={handleMoveLeft}
+                          onMoveRight={handleMoveRight}
+                        />
+                      </div>
+                    ))
+                  )}
 
-                {/* Add step button */}
-                {steps.length > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <Connector technique="" mitre_id="" />
-                  </div>
-                )}
-                <button onClick={() => setModal({ mode: 'new', step: null })}
-                  style={{ width: 56, height: 56, borderRadius: '50%', background: accent + '14', border: `1.5px dashed ${accent}55`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all .15s' }}
-                  onMouseEnter={e => { e.currentTarget.style.background = accent + '28'; e.currentTarget.style.borderColor = accent; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = accent + '14'; e.currentTarget.style.borderColor = accent + '55'; }}>
-                  <Icon name="plus" size={18} color={accent} />
-                </button>
+                  {/* Add step button */}
+                  {steps.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                      <Connector technique="" mitre_id="" />
+                    </div>
+                  )}
+                  <button onClick={() => setModal({ mode: 'new', step: null })}
+                    style={{ width: 56, height: 56, borderRadius: '50%', background: accent + '14', border: `1.5px dashed ${accent}55`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all .15s' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = accent + '28'; e.currentTarget.style.borderColor = accent; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = accent + '14'; e.currentTarget.style.borderColor = accent + '55'; }}>
+                    <Icon name="plus" size={18} color={accent} />
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
+            {viewMode === 'graph' && (
+              <div style={{ flex: 1, overflow: 'auto' }}>
+                <AttackPathGraph steps={steps} accent={accent} />
+              </div>
+            )}
 
             {/* Legend */}
             <div style={{ padding: '10px 24px', borderTop: '1px solid #13151c', display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>

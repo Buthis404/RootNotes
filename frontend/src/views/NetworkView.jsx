@@ -144,6 +144,25 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
         {selectedRegion ? <>
           <CommitFieldInput label="Subnet name" value={selectedRegion.label || ''} onCommit={(v) => updateRegion(selectedRegion.id, { label: v })} placeholder="10.10.10.0/24" />
           <CommitFieldInput label="Short note" value={selectedRegion.note || ''} onCommit={(v) => updateRegion(selectedRegion.id, { note: v })} placeholder="VPN segment" textarea />
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Trust Zone</div>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {[
+                { id: null,       label: 'None',     fill: '#5b8af522', stroke: '#5b8af5' },
+                { id: 'internal', label: 'Internal',  fill: '#39d35322', stroke: '#39d353' },
+                { id: 'dmz',      label: 'DMZ',       fill: '#f09a3a22', stroke: '#f09a3a' },
+                { id: 'external', label: 'External',  fill: '#cc223322', stroke: '#cc2233' },
+                { id: 'custom',   label: 'Custom',    fill: '#a05cff22', stroke: '#a05cff' },
+              ].map(z => {
+                const active = (selectedRegion.zone_type || null) === z.id;
+                return (
+                  <button key={z.id ?? 'none'} onClick={() => {
+                    updateRegion(selectedRegion.id, { zone_type: z.id, fill: z.fill, stroke: z.stroke });
+                  }} style={{ background: active ? z.stroke + '22' : 'transparent', border: `1px solid ${active ? z.stroke : '#2a2d35'}`, borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: active ? z.stroke : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{z.label}</button>
+                );
+              })}
+            </div>
+          </div>
           <div style={{ display: 'flex', gap: 10 }}>
             <div style={{ flex: 1 }}><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase' }}>Fill</div><input type="color" value={(selectedRegion.fill || '#5b8af522').slice(0, 7)} onChange={e => updateRegion(selectedRegion.id, { fill: e.target.value + '22' })} style={{ width: '100%', height: 34, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4 }} /></div>
             <div style={{ flex: 1 }}><div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase' }}>Outline</div><input type="color" value={selectedRegion.stroke || '#5b8af5'} onChange={e => updateRegion(selectedRegion.id, { stroke: e.target.value })} style={{ width: '100%', height: 34, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4 }} /></div>
@@ -1090,7 +1109,8 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
               {regions.map(region => <g key={region.id} transform={`translate(${region.x},${region.y})`} onMouseDown={(e) => onRegionMouseDown(e, region.id)} onContextMenu={(e) => onRegionContextMenu(e, region.id)} style={{ cursor: regionEditMode && selectedRegionId === region.id ? 'move' : 'default' }}>
                 <rect x="0" y="0" width={region.w} height={region.h} rx="12" fill={region.fill || '#5b8af522'} stroke={region.stroke || '#5b8af5'} strokeWidth={selectedRegionId === region.id ? 2.5 : 1.5} strokeDasharray={selectedRegionId === region.id ? '8 4' : undefined} />
                 <text x="14" y="22" fontSize="12" fill={region.stroke || '#5b8af5'} fontFamily="Space Grotesk" fontWeight="700" style={{ pointerEvents: 'none' }}>{region.label}</text>
-                {region.note ? <text x="14" y="38" fontSize="9" fill="#c8cdd6" fontFamily="JetBrains Mono" style={{ pointerEvents: 'none' }}>{region.note}</text> : null}
+                {region.zone_type && <text x="14" y="36" fontSize="9" fill={region.stroke || '#5b8af5'} fontFamily="JetBrains Mono" fontWeight="600" style={{ pointerEvents: 'none', opacity: 0.8 }}>[{region.zone_type.toUpperCase()}]</text>}
+                {region.note ? <text x="14" y={region.zone_type ? 48 : 38} fontSize="9" fill="#c8cdd6" fontFamily="JetBrains Mono" style={{ pointerEvents: 'none' }}>{region.note}</text> : null}
                 {selectedRegionId === region.id && regionEditMode && ['nw','ne','sw','se'].map(corner => {
                   const pos = {
                     nw: { x: 0, y: 0 },

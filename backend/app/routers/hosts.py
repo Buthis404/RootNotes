@@ -1,4 +1,5 @@
 import ipaddress
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -126,8 +127,6 @@ def _expand_ips(text: str) -> list[str]:
                 pass
     return ips
 
-
-import re as re  # noqa: E402
 
 
 @router.post("/bulk", status_code=201)

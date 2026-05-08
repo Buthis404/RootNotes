@@ -160,6 +160,109 @@ with engine.begin() as conn:
         )
     """))
     conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS import_source TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS scheduled_playbooks (
+            id TEXT PRIMARY KEY,
+            pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            playbook_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            cron_expr TEXT NOT NULL DEFAULT '0 * * * *',
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            body_json JSONB NOT NULL DEFAULT '{}',
+            last_run_at TEXT NOT NULL DEFAULT '',
+            next_run_at TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_scheduled_playbooks_pid ON scheduled_playbooks(pid)"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS project_domains (
+            id TEXT PRIMARY KEY,
+            pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            aliases TEXT[] NOT NULL DEFAULT '{}',
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_project_domains_pid ON project_domains(pid)"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS kb_articles (
+            id TEXT PRIMARY KEY,
+            pid TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT 'General',
+            tags TEXT[] NOT NULL DEFAULT '{}',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_kb_articles_pid ON kb_articles(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_hosts_pid ON hosts(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts(ip)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_creds_pid ON creds(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_notes_pid ON notes(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_notes_ts ON notes(ts DESC)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_findings_pid ON findings(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_loots_pid ON loots(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_host_activities_pid ON host_activities(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_host_activities_host_id ON host_activities(host_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_cred_host_notes_cred_id ON cred_host_notes(cred_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_cred_host_notes_host_id ON cred_host_notes(host_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_attack_steps_path_id ON attack_steps(path_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_timeline_events_pid ON timeline_events(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_timeline_events_ts ON timeline_events(ts DESC)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_checklist_items_pid ON checklist_items(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_scopes_pid ON scopes(pid)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_objectives_pid ON objectives(pid)"))
+
+
+# ── Scheduled playbooks background task ──────────────────────────────
+async def _scheduled_playbooks_loop():
+    """Check and fire scheduled playbooks every minute."""
+    await asyncio.sleep(60)  # let app fully start
+    while True:
+        try:
+            from .core.cron_utils import cron_matches, next_run
+            from .routers.playbooks import _launch_playbook_run
+            db = SessionLocal()
+            try:
+                now = datetime.utcnow().replace(second=0, microsecond=0)
+                scheds = db.query(models.ScheduledPlaybook).filter(
+                    models.ScheduledPlaybook.enabled == True
+                ).all()
+                for sched in scheds:
+                    if not sched.next_run_at:
+                        continue
+                    try:
+                        nr = datetime.strptime(sched.next_run_at, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        continue
+                    if now >= nr:
+                        # Launch
+                        run_id = await _launch_playbook_run(
+                            pid=sched.pid,
+                            playbook_id=sched.playbook_id,
+                            body_dict=sched.body_json or {},
+                            created_by="scheduler",
+                        )
+                        sched.last_run_at = now.strftime("%Y-%m-%d %H:%M:%S")
+                        try:
+                            sched.next_run_at = next_run(sched.cron_expr, after=now).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            sched.next_run_at = ""
+                        db.commit()
+                        logger.info("[scheduler] Fired schedule %s → run %s", sched.id, run_id)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[scheduler] loop error: %s", e)
+        await asyncio.sleep(60)
 
 
 # ── C2 auto-sync background task ─────────────────────────────────────
@@ -273,14 +376,17 @@ async def lifespan(app: FastAPI):
 
     init_plugins(app)
 
-    # Start C2 auto-sync background task
-    task = asyncio.create_task(_c2_auto_sync_loop())
+    # Start background tasks
+    task_c2 = asyncio.create_task(_c2_auto_sync_loop())
+    task_scheduler = asyncio.create_task(_scheduled_playbooks_loop())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    task_c2.cancel()
+    task_scheduler.cancel()
+    for t in (task_c2, task_scheduler):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────
@@ -345,8 +451,8 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
                 elif msg.get("type") == "blur":
                     manager.set_focus(ws, None)
                 await manager.broadcast_presence(pid)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("WebSocket message parse error for pid=%s: %s", pid, e)
     except WebSocketDisconnect:
         manager.disconnect(ws, pid)
         await manager.broadcast_presence(pid)
@@ -354,12 +460,12 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
 
 # ── Health & presence ─────────────────────────────────────────────────
 @app.get("/health")
-def health():
+async def health():
     return {"status": "ok"}
 
 
 @app.get("/api/presence")
-def get_global_presence():
+async def get_global_presence():
     return {"online": manager.get_all_online()}
 
 
@@ -381,7 +487,9 @@ from .routers import (
     activities, attack_paths, loots, scopes,
     cred_host_notes, search, templates, import_export, topology, members,
     system_modules, attacker_exec, export, project_templates,
-    scans, webhooks, c2, jobs, bulk_actions, playbooks,
+    scans, webhooks, c2, jobs, bulk_actions, playbooks, notifications,
+    scheduled_playbooks, domains,
+    ai, import_scanners, attack_graph, kb,
 )
 
 app.include_router(auth.router)
@@ -416,3 +524,10 @@ app.include_router(c2.router)
 app.include_router(jobs.router)
 app.include_router(bulk_actions.router)
 app.include_router(playbooks.router)
+app.include_router(notifications.router)
+app.include_router(scheduled_playbooks.router)
+app.include_router(domains.router)
+app.include_router(ai.router)
+app.include_router(import_scanners.router)
+app.include_router(attack_graph.router)
+app.include_router(kb.router)

@@ -250,6 +250,7 @@ export const api = {
   updateCustomPlaybook: (id, data) => req('PATCH', `/playbooks/custom/${id}`, data),
   deleteCustomPlaybook: (id) => req('DELETE', `/playbooks/custom/${id}`),
   runPlaybook: (pid, playbookId, data) => req('POST', `/projects/${pid}/playbooks/${encodeURIComponent(playbookId)}/run`, data),
+  batchRunPlaybook: (pid, playbookId, data) => req('POST', `/projects/${pid}/playbooks/${encodeURIComponent(playbookId)}/batch-run`, data),
   listPlaybookRuns: (pid, params = {}) => {
     const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v != null))).toString();
     return req('GET', `/projects/${pid}/playbook-runs${qs ? `?${qs}` : ''}`);
@@ -257,4 +258,42 @@ export const api = {
   getPlaybookRun: (pid, runId) => req('GET', `/projects/${pid}/playbook-runs/${runId}`),
   cancelPlaybookRun: (pid, runId) => req('POST', `/projects/${pid}/playbook-runs/${runId}/cancel`),
   rerunPlaybookRun: (pid, runId) => req('POST', `/projects/${pid}/playbook-runs/${runId}/rerun`),
+
+  // Notifications
+  getNotificationConfig:  ()      => req('GET',  '/notifications/config'),
+  saveNotificationConfig: (data)  => req('PUT',  '/notifications/config', data),
+  testNotification:       ()      => req('POST', '/notifications/test'),
+  getTelegramChatIds:     ()      => req('GET',  '/notifications/telegram/chat-id'),
+
+  // Scheduled playbooks
+  listSchedules:    (pid)           => req('GET',    `/scheduled-playbooks?pid=${encodeURIComponent(pid)}`),
+  createSchedule:   (data)          => req('POST',   '/scheduled-playbooks',        data),
+  updateSchedule:   (id, data)      => req('PATCH',  `/scheduled-playbooks/${id}`,  data),
+  deleteSchedule:   (id)            => req('DELETE', `/scheduled-playbooks/${id}`),
+  triggerSchedule:  (id)            => req('POST',   `/scheduled-playbooks/${id}/trigger`),
+
+  // Domain inventory
+  listDomains:    (pid)         => req('GET',    `/domains?pid=${encodeURIComponent(pid)}`),
+  createDomain:   (data)        => req('POST',   '/domains',        data),
+  updateDomain:   (id, data)    => req('PATCH',  `/domains/${id}`,  data),
+  deleteDomain:   (id)          => req('DELETE', `/domains/${id}`),
+
+  // AI
+  getAIConfig:       ()                => req('GET',  '/ai/config'),
+  saveAIConfig:      (data)            => req('PUT',  '/ai/config', data),
+  aiChat:            (pid, data)       => req('POST', `/projects/${pid}/ai/chat`, data),
+
+  // Import scanners
+  importNessus:      (pid, file)       => upload(`/projects/${pid}/import/nessus`, file),
+  importBurp:        (pid, file)       => upload(`/projects/${pid}/import/burp`, file),
+
+  // Attack graph
+  getAttackGraph:    (pid)             => req('GET',  `/projects/${pid}/attack-graph`),
+
+  // Knowledge base
+  listKBArticles:    (params={})       => { const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v])=>v!=null))).toString(); return req('GET', `/kb${qs?`?${qs}`:''}`); },
+  getKBArticle:      (id)              => req('GET',  `/kb/${id}`),
+  createKBArticle:   (data)            => req('POST', '/kb', data),
+  updateKBArticle:   (id, data)        => req('PATCH', `/kb/${id}`, data),
+  deleteKBArticle:   (id)              => req('DELETE', `/kb/${id}`),
 };

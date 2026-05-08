@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from '../api.js';
+import { toastError } from '../components/Toast.jsx';
 
 const STATUS_CFG = {
   queued:    { color: '#a0a8b8', label: 'Queued' },
@@ -76,9 +77,20 @@ function summarizeResult(result) {
   return parts.join(' · ');
 }
 
+function calcDuration(job) {
+  if (!job.started_at) return null;
+  const s = new Date(job.started_at);
+  const f = job.finished_at ? new Date(job.finished_at) : null;
+  if (!f) return job.status === 'running' ? 'running…' : null;
+  const sec = Math.round((f - s) / 1000);
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
+}
+
 function JobRow({ job, accent, onCancel, onDelete, onRerun, onRetry }) {
   const [expanded, setExpanded] = useState(false);
   const hasOutput = job.output || job.error_output;
+  const duration = calcDuration(job);
+  const playbookRunId = job.request_json?.playbook_run_id;
 
   return (
     <>
@@ -110,6 +122,9 @@ function JobRow({ job, accent, onCancel, onDelete, onRerun, onRetry }) {
         <td style={{ padding: '8px 10px', color: '#6a7080', fontSize: 12, whiteSpace: 'nowrap' }}>
           {job.finished_at ? job.finished_at.slice(0, 16) : '—'}
         </td>
+        <td style={{ padding: '8px 10px', color: '#6a7080', fontSize: 12, whiteSpace: 'nowrap' }}>
+          {duration || '—'}
+        </td>
         <td style={{ padding: '8px 10px', textAlign: 'right' }} onClick={e => e.stopPropagation()}>
           <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
             {(job.status === 'queued' || job.status === 'running') && (
@@ -127,18 +142,19 @@ function JobRow({ job, accent, onCancel, onDelete, onRerun, onRetry }) {
       </tr>
       {expanded && (
         <tr style={{ background: '#0d0f18' }}>
-          <td colSpan={6} style={{ padding: '0 10px 10px' }}>
+          <td colSpan={7} style={{ padding: '0 10px 10px' }}>
             {job.command && (
               <div style={{ marginBottom: 6 }}>
                 <span style={{ color: '#6a7080', fontSize: 11 }}>Command: </span>
                 <code style={{ color: '#a0a8b8', fontSize: 11 }}>{job.command}</code>
               </div>
             )}
-            {(job.scope_type || job.scope_id || job.result_json) && (
+            {(job.scope_type || job.scope_id || job.result_json || playbookRunId) && (
               <div style={{ marginBottom: 6, color: '#6a7080', fontSize: 11, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                 {job.scope_type && <span>Scope: <code style={{ color: '#a0a8b8' }}>{job.scope_type}</code></span>}
                 {job.scope_id && <span>Scope ID: <code style={{ color: '#a0a8b8' }}>{job.scope_id}</code></span>}
                 {summarizeResult(job.result_json) && <span>Result: <code style={{ color: '#a0a8b8' }}>{summarizeResult(job.result_json)}</code></span>}
+                {playbookRunId && <span>Playbook run: <code style={{ color: '#5b8af5', fontFamily: 'JetBrains Mono', fontSize: 10 }}>{playbookRunId}</code></span>}
               </div>
             )}
             {job.output && (
@@ -162,13 +178,22 @@ function btnStyle(color) {
   };
 }
 
-export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJobUpdate, onJobDelete }) {
+export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJobUpdate, onJobDelete, initialFilter, onFilterConsumed }) {
   const [jobs, setJobs] = useState([]);
   const [filter, setFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
+  const [connectorFilter, setConnectorFilter] = useState('all');
+  const [playbookRunFilter, setPlaybookRunFilter] = useState('');
+  const [searchText, setSearchText] = useState('');
   const [loading, setLoading] = useState(false);
   const pid = selectedProject;
   const pollRef = useRef(null);
+
+  useEffect(() => {
+    if (!initialFilter) return;
+    if (initialFilter.playbookRunId) setPlaybookRunFilter(initialFilter.playbookRunId);
+    if (onFilterConsumed) onFilterConsumed();
+  }, [initialFilter]);
 
   const load = useCallback(() => {
     if (!pid) return;
@@ -222,7 +247,7 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
       setJobs(prev => prev.map(j => j.id === jobId ? updated : j));
       if (onJobUpdate) onJobUpdate(updated);
     } catch (e) {
-      alert(e.message || 'Failed to cancel job');
+      toastError(e.message || 'Failed to cancel job');
     }
   };
 
@@ -232,7 +257,7 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
       setJobs(prev => prev.filter(j => j.id !== jobId));
       if (onJobDelete) onJobDelete(jobId);
     } catch (e) {
-      alert(e.message || 'Failed to delete job');
+      toastError(e.message || 'Failed to delete job');
     }
   };
 
@@ -242,7 +267,7 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
       setJobs(prev => [created, ...prev.filter(j => j.id !== created.id)]);
       if (onJobUpdate) onJobUpdate(created);
     } catch (e) {
-      alert(e.message || 'Failed to rerun job');
+      toastError(e.message || 'Failed to rerun job');
     }
   };
 
@@ -252,13 +277,25 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
       setJobs(prev => [created, ...prev.filter(j => j.id !== created.id)]);
       if (onJobUpdate) onJobUpdate(created);
     } catch (e) {
-      alert(e.message || 'Failed to retry job');
+      toastError(e.message || 'Failed to retry job');
     }
   };
+
+  const connectorKeys = useMemo(() => {
+    const seen = new Set();
+    for (const j of jobs) if (j.connector_key) seen.add(j.connector_key);
+    return [...seen].sort();
+  }, [jobs]);
 
   const displayed = jobs.filter(j => {
     if (filter !== 'all' && j.status !== filter) return false;
     if (typeFilter !== 'all' && j.type !== typeFilter) return false;
+    if (connectorFilter !== 'all' && j.connector_key !== connectorFilter) return false;
+    if (playbookRunFilter && j.request_json?.playbook_run_id !== playbookRunFilter) return false;
+    if (searchText) {
+      const q = searchText.toLowerCase();
+      if (!(j.title || '').toLowerCase().includes(q) && !(j.target || '').toLowerCase().includes(q)) return false;
+    }
     return true;
   });
 
@@ -284,12 +321,24 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
         </button>
       </div>
 
-      <div style={{ marginBottom: 12, fontSize: 11, color: '#6a7080', lineHeight: 1.5 }}>
-        Jobs now include connector, operation, scope, and related-entity metadata. This view is the current frontend surface for the orchestration layer.
+      {/* Search + playbook run filter */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder="Search title / target…"
+          style={{ background: '#13161f', color: '#c8cfe0', border: '1px solid #1e2230', borderRadius: 4, padding: '4px 10px', fontSize: 12, width: 220 }}
+        />
+        {playbookRunFilter && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#5b8af522', border: '1px solid #5b8af544', borderRadius: 4, padding: '2px 8px' }}>
+            <span style={{ color: '#5b8af5', fontSize: 11, fontFamily: 'JetBrains Mono' }}>playbook: {playbookRunFilter.slice(0, 8)}…</span>
+            <button onClick={() => setPlaybookRunFilter('')} style={{ background: 'none', border: 'none', color: '#5b8af5', cursor: 'pointer', fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
+          </div>
+        )}
       </div>
 
       {/* Status filter */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
         {['all', 'running', 'queued', 'done', 'failed', 'cancelled'].map(s => (
           <button
             key={s}
@@ -305,15 +354,35 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
             {counts[s] > 0 && <span style={{ marginLeft: 5, opacity: 0.7 }}>{counts[s]}</span>}
           </button>
         ))}
-        <select
-          value={typeFilter}
-          onChange={e => setTypeFilter(e.target.value)}
-          style={{ background: '#13161f', color: '#a0a8b8', border: '1px solid #1e2230', borderRadius: 4, padding: '3px 10px', fontSize: 12, marginLeft: 8 }}
-        >
-          <option value="all">All types</option>
-          {Object.entries(TYPE_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-        </select>
       </div>
+
+      {/* Type filter pills */}
+      <div style={{ display: 'flex', gap: 5, marginBottom: 8, flexWrap: 'wrap' }}>
+        <button
+          onClick={() => setTypeFilter('all')}
+          style={{ background: typeFilter === 'all' ? acc + '33' : '#13161f', color: typeFilter === 'all' ? acc : '#6a7080', border: `1px solid ${typeFilter === 'all' ? acc + '66' : '#1e2230'}`, borderRadius: 4, padding: '2px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+        >All types</button>
+        {Object.entries(TYPE_CFG).map(([k, v]) => (
+          <button key={k} onClick={() => setTypeFilter(typeFilter === k ? 'all' : k)}
+            style={{ background: typeFilter === k ? v.color + '33' : '#13161f', color: typeFilter === k ? v.color : '#6a7080', border: `1px solid ${typeFilter === k ? v.color + '66' : '#1e2230'}`, borderRadius: 4, padding: '2px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+          >{v.label}</button>
+        ))}
+      </div>
+
+      {/* Connector filter pills */}
+      {connectorKeys.length > 0 && (
+        <div style={{ display: 'flex', gap: 5, marginBottom: 12, flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setConnectorFilter('all')}
+            style={{ background: connectorFilter === 'all' ? '#6fc8f033' : '#13161f', color: connectorFilter === 'all' ? '#6fc8f0' : '#6a7080', border: `1px solid ${connectorFilter === 'all' ? '#6fc8f066' : '#1e2230'}`, borderRadius: 4, padding: '2px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
+          >All connectors</button>
+          {connectorKeys.map(k => (
+            <button key={k} onClick={() => setConnectorFilter(connectorFilter === k ? 'all' : k)}
+              style={{ background: connectorFilter === k ? '#6fc8f033' : '#13161f', color: connectorFilter === k ? '#6fc8f0' : '#6a7080', border: `1px solid ${connectorFilter === k ? '#6fc8f066' : '#1e2230'}`, borderRadius: 4, padding: '2px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 600, fontFamily: 'JetBrains Mono' }}
+            >{k}</button>
+          ))}
+        </div>
+      )}
 
       {loading && <div style={{ color: '#6a7080', fontSize: 13 }}>Loading...</div>}
 
@@ -327,8 +396,8 @@ export default function JobsView({ selectedProject, accent, jobs: jobsProp, onJo
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr style={{ borderBottom: '1px solid #1e2230' }}>
-              {['Job', 'Status', 'By', 'Created', 'Finished', ''].map((h, i) => (
-                <th key={i} style={{ padding: '6px 10px', color: '#6a7080', fontWeight: 500, fontSize: 11, textAlign: i === 5 ? 'right' : 'left' }}>{h}</th>
+              {['Job', 'Status', 'By', 'Created', 'Finished', 'Duration', ''].map((h, i) => (
+                <th key={i} style={{ padding: '6px 10px', color: '#6a7080', fontWeight: 500, fontSize: 11, textAlign: i === 6 ? 'right' : 'left' }}>{h}</th>
               ))}
             </tr>
           </thead>

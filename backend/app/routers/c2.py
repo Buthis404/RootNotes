@@ -158,7 +158,7 @@ def create_integration(
     _: models.User = Depends(require_admin),
 ):
     _require_c2()
-    if body.type not in ("cobalt_strike", "sliver", "adaptix"):
+    if body.type not in ("cobalt_strike", "sliver", "adaptix", "metasploit"):
         raise HTTPException(400, f"Unknown C2 type: {body.type}")
     integrations = _load_integrations(db)
     cfg = body.model_dump()
@@ -466,10 +466,138 @@ async def _adaptix_sync(cfg: dict) -> dict:
     return {"hosts": result_hosts, "creds": result_creds}
 
 
+async def _msf_sync(cfg: dict) -> dict:
+    """
+    Metasploit MSFRPC (HTTP JSON API).
+    msfrpcd -P <password> -S -f  (port 55553 by default, no SSL with -S)
+    """
+    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
+    username = cfg.get("username") or "msf"
+    password = cfg.get("token") or cfg.get("password") or ""
+
+    hosts_out = []
+    creds_out = []
+
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15) as client:
+            # Auth
+            auth_r = await client.post(
+                f"{base}/api/1.0/auth/login",
+                json={"username": username, "password": password},
+            )
+            if auth_r.status_code != 200:
+                return {"error": f"MSFRPC auth failed: {auth_r.status_code} {auth_r.text[:200]}"}
+
+            token = auth_r.json().get("token", "")
+            if not token:
+                return {"error": "No token in MSFRPC auth response"}
+
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Sessions
+            sess_r = await client.get(f"{base}/api/1.0/sessions", headers=headers)
+            if sess_r.status_code != 200:
+                return {"error": f"MSFRPC sessions failed: {sess_r.status_code}"}
+
+            sessions = sess_r.json().get("sessions", {})
+
+            for sid, s in sessions.items():
+                # tunnel_peer: "10.10.10.5:4444" or "10.10.10.5:49152 -> 10.10.14.1:4444"
+                tunnel_peer = s.get("tunnel_peer") or s.get("tunnel_local") or ""
+                ip = tunnel_peer.split(":")[0].strip() if tunnel_peer else ""
+                # Remove port if it got mixed in
+                if " -> " in ip:
+                    ip = ip.split(" -> ")[0].strip().split(":")[0]
+
+                info = s.get("info") or ""          # "SYSTEM @ DC01" or "root @ kali"
+                platform = s.get("platform") or ""  # "windows/x64", "linux/x64"
+                sess_type = s.get("type") or "shell" # "meterpreter" | "shell"
+
+                # Parse username and hostname from info
+                username_str = ""
+                hostname = ""
+                if " @ " in info:
+                    parts = info.split(" @ ", 1)
+                    username_str = parts[0].strip()
+                    hostname = parts[1].strip()
+                elif info:
+                    hostname = info.strip()
+
+                # Determine OS from platform
+                if "windows" in platform.lower():
+                    os_str = "Windows"
+                elif "linux" in platform.lower():
+                    os_str = "Linux"
+                elif "osx" in platform.lower() or "darwin" in platform.lower():
+                    os_str = "macOS"
+                else:
+                    os_str = platform or "Unknown"
+
+                # Status: meterpreter sessions = owned, shells = pwned
+                status = "owned" if sess_type == "meterpreter" else "pwned"
+
+                if ip:
+                    hosts_out.append({
+                        "ip": ip,
+                        "hostname": hostname,
+                        "os": os_str,
+                        "status": status,
+                        "tags": [f"msf-session-{sid}", sess_type],
+                        "notes": f"Session {sid} [{sess_type}]: {info}",
+                        "source": "metasploit",
+                    })
+
+                # Create cred if we have username
+                if username_str and ip:
+                    creds_out.append({
+                        "username": username_str,
+                        "secret": "",
+                        "type": "plain",
+                        "host": ip,
+                        "service": "shell" if sess_type == "shell" else "meterpreter",
+                        "notes": f"MSF session {sid}",
+                        "source": "metasploit",
+                    })
+
+            # Also try to get creds from Metasploit DB
+            try:
+                creds_r = await client.get(f"{base}/api/1.0/credentials", headers=headers)
+                if creds_r.status_code == 200:
+                    for c in creds_r.json().get("credentials", []):
+                        pub = c.get("public", {})
+                        priv = c.get("private", {})
+                        uname = pub.get("username") or ""
+                        secret = priv.get("data") or ""
+                        ctype_raw = (priv.get("type") or "password").lower()
+                        ctype = "hash" if ("hash" in ctype_raw or "ntlm" in ctype_raw) else "plain"
+                        origin = c.get("origin", {})
+                        host_addr = origin.get("address") or ""
+                        if uname:
+                            creds_out.append({
+                                "username": uname,
+                                "secret": secret,
+                                "type": ctype,
+                                "host": host_addr,
+                                "service": origin.get("service_name") or "",
+                                "notes": "",
+                                "source": "metasploit",
+                            })
+            except Exception:
+                pass  # Creds endpoint optional
+
+    except httpx.ConnectError as e:
+        return {"error": f"Cannot connect to MSFRPC at {base}: {e}"}
+    except Exception as e:
+        return {"error": f"MSFRPC sync error: {e}"}
+
+    return {"hosts": hosts_out, "creds": creds_out}
+
+
 _CONNECTORS = {
     "cobalt_strike": _cs_sync,
     "sliver": _sliver_sync,
     "adaptix": _adaptix_sync,
+    "metasploit": _msf_sync,
 }
 
 
@@ -757,6 +885,7 @@ def _render_command_with_cred(commandline: str, cred: dict | None, host: models.
         "{{PASS}}": secret,
         "{{PASSWORD}}": secret,
         "{{SECRET}}": secret,
+        "{{HASH}}": secret,
         "{{DOMAIN}}": domain,
         "{{REALM}}": domain,
         "{{HOST}}": host.ip if host else "",
@@ -805,7 +934,7 @@ async def _cs_live_agents(cfg: dict) -> list[dict]:
     url = cfg["url"].rstrip("/")
     headers = {"Authorization": f"Bearer {cfg.get('token', '')}"}
     async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
-        r = await client.get(f"{url}/api/v1/beacon", headers=headers)
+        r = await client.get(f"{url}/api/v1/beacons", headers=headers)
         r.raise_for_status()
         raw = r.json()
         beacons = raw if isinstance(raw, list) else raw.get("beacons", [])

@@ -33,6 +33,13 @@ def create_finding(body: schemas.FindingCreate, request: Request, db: Session = 
     db.refresh(finding)
     f = schemas.Finding.model_validate(finding)
     bcast(finding.pid, "finding", "create", f.model_dump())
+    if finding.severity in ("critical", "high"):
+        from ..core.notifications import dispatch_sync
+        icon = "🔴" if finding.severity == "critical" else "🟠"
+        dispatch_sync(db, "finding_critical",
+                      f"{icon} New {finding.severity.upper()} finding: {finding.title}",
+                      finding.description[:300] if finding.description else "No description",
+                      {"finding_id": finding.id, "severity": finding.severity, "pid": finding.pid})
     return finding
 
 

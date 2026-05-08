@@ -3,6 +3,7 @@ Bulk actions: run commands across multiple hosts, validate credentials.
 All operations require the attacker_ssh module to be enabled.
 """
 import asyncio
+from copy import deepcopy
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +17,7 @@ from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
+from ..core.permissions import get_membership, get_permissions_for_role
 from ..core.utils import domains_match
 from ..core.utils import new_id
 from ..database import get_db
@@ -125,6 +127,7 @@ class BulkExecBody(BaseModel):
     timeout_seconds: int = 60
     attacker_host_id: str | None = None    # project attacker host to run FROM
     attacker_target_id: str | None = None  # global target to run FROM
+    credential_id: str | None = None
 
 
 @router.post("/bulk-exec")
@@ -143,6 +146,18 @@ async def bulk_exec(
     if not body.command_template.strip():
         raise HTTPException(400, "Command template is required")
 
+    selected_cred = None
+    if body.credential_id:
+        membership = get_membership(db, pid, user.id) if user.role != "admin" else None
+        can_read_secret = user.role == "admin" or bool(membership and "credentials.read_secret" in get_permissions_for_role(membership.role))
+        if not can_read_secret:
+            raise HTTPException(403, "Insufficient permissions to use credential secrets")
+        selected_cred = db.query(models.Cred).filter(models.Cred.id == body.credential_id, models.Cred.pid == pid).first()
+        if not selected_cred:
+            raise HTTPException(404, "Credential not found")
+        if not selected_cred.secret:
+            raise HTTPException(400, "Credential has no secret")
+
     ssh_config = _resolve_exec_ssh_config(
         db, pid,
         attacker_host_id=body.attacker_host_id,
@@ -160,17 +175,30 @@ async def bulk_exec(
 
     exec_username = getattr(request.state, "username", None)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     results = []
+    access_role = _infer_bulk_access_role(body.command_template)
+    graph_updates = 0
 
     for host in target_hosts:
         target_ip = host.ip or host.hostname or "unknown"
+        cred_domain = (selected_cred.domain or "").strip() if selected_cred else ""
+        cred_user = selected_cred.username if selected_cred else ""
+        cred_secret = selected_cred.secret if selected_cred else ""
         command = (
             body.command_template
             .replace("{target}", target_ip)
             .replace("{TARGET}", target_ip)
             .replace("{{TARGET}}", target_ip)
             .replace("{{target}}", target_ip)
+            .replace("{{USER}}", cred_user)
+            .replace("{{USERNAME}}", cred_user)
+            .replace("{{PASS}}", cred_secret)
+            .replace("{{PASSWORD}}", cred_secret)
+            .replace("{{SECRET}}", cred_secret)
+            .replace("{{HASH}}", cred_secret)
+            .replace("{{DOMAIN}}", cred_domain)
+            .replace("{{REALM}}", cred_domain)
         )
         title = body.snippet_title.strip() or f"{body.scan_type}: {target_ip}"
 
@@ -220,9 +248,16 @@ async def bulk_exec(
 
         combined = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
         ok = result.get("ok", False)
+        success = _is_bulk_auth_success(command, ok, result.get("exit_code", -1), combined)
         activity.output = combined
         activity.status = "done" if ok else "failed"
-        activity.summary = "Completed via attacker SSH (bulk run)"
+        activity.summary = "Credential-driven bulk run success" if success and selected_cred else "Completed via attacker SSH (bulk run)"
+        if selected_cred:
+            note_text = f"Bulk run on {ts}: {'SUCCESS' if success else 'FAILED'}"
+            _upsert_cred_host_note(db, pid, selected_cred.id, host, note_text, access_role, success)
+            _maybe_promote_host_status(host, success)
+            if _enrich_access_graph(db, pid, body.attacker_host_id, host, access_role, success, ts):
+                graph_updates += 1
         db.commit()
         db.refresh(activity)
 
@@ -238,6 +273,7 @@ async def bulk_exec(
             "host_id": host.id,
             "ip": target_ip,
             "ok": ok,
+            "success": success,
             "exit_code": result.get("exit_code", -1),
             "stdout": result.get("stdout", "")[:5000],
             "stderr": result.get("stderr", ""),
@@ -245,7 +281,18 @@ async def bulk_exec(
             "activity_id": activity.id,
         })
 
-    return {"ok": True, "results": results}
+    summary = {
+        "total": len(results),
+        "ok": sum(1 for item in results if item.get("ok")),
+        "failed": sum(1 for item in results if not item.get("ok")),
+        "successful_auth": sum(1 for item in results if item.get("success")),
+        "state_updates": sum(1 for item in results if item.get("success") and selected_cred),
+        "graph_updates": graph_updates,
+        "credential_id": selected_cred.id if selected_cred else "",
+        "access_role": access_role or "",
+    }
+
+    return {"ok": True, "results": results, "summary": summary}
 
 
 # ── Credential validation ─────────────────────────────────────────────
@@ -298,6 +345,130 @@ def _parse_validation_result(ok: bool, exit_code: int, output: str, service: str
     return ok and exit_code == 0
 
 
+def _infer_bulk_access_role(command: str) -> str | None:
+    lower = (command or "").lower()
+    if "evil-winrm" in lower or "netexec winrm" in lower:
+        return "winrm"
+    if "ssh " in lower or "sshpass" in lower:
+        return "ssh"
+    if "wmiexec" in lower or "psexec" in lower:
+        return "local_admin"
+    return None
+
+
+def _is_bulk_auth_success(command: str, ok: bool, exit_code: int, output: str) -> bool:
+    lower = (output or "").lower()
+    cmd = (command or "").lower()
+    if "netexec smb" in cmd or "crackmapexec smb" in cmd:
+        if "pwn3d!" in lower:
+            return True
+        if "[+]" in lower and "status_logon_failure" not in lower and "status_access_denied" not in lower:
+            return True
+        return False
+    if "netexec winrm" in cmd or "evil-winrm" in cmd:
+        if "pwn3d!" in lower or "established" in lower or "evil-winrm shell" in lower:
+            return True
+        if "[+]" in lower and "logon_failure" not in lower and "access_denied" not in lower:
+            return True
+        return ok and exit_code == 0
+    if "ldapsearch" in cmd:
+        return ("dn:" in lower or "result: 0 success" in lower) and "invalid credentials" not in lower
+    return ok and exit_code == 0
+
+
+def _maybe_promote_host_status(host: models.Host, success: bool):
+    if not success:
+        return
+    current = (host.status or "").lower()
+    if current in {"", "unknown", "alive"}:
+        host.status = "access"
+
+
+def _upsert_cred_host_note(db: Session, pid: str, cred_id: str, host: models.Host, note_text: str, access_role: str | None, success: bool):
+    chn = db.query(models.CredHostNote).filter(
+        models.CredHostNote.cred_id == cred_id,
+        models.CredHostNote.host_id == host.id,
+    ).first()
+    if chn:
+        chn.notes = note_text
+        if success and access_role and access_role not in (chn.access or []):
+            chn.access = list(chn.access or []) + [access_role]
+        return chn
+    chn = models.CredHostNote(
+        id=new_id("chn"),
+        cred_id=cred_id,
+        host_id=host.id,
+        pid=pid,
+        notes=note_text,
+        access=[access_role] if success and access_role else [],
+    )
+    db.add(chn)
+    return chn
+
+
+def _edge_version(edge: dict) -> int:
+    return int(edge.get("version") or 0) + 1
+
+
+def _enrich_access_graph(db: Session, pid: str, attacker_host_id: str | None, target_host: models.Host, access_role: str | None, success: bool, ts: str):
+    if not success or not attacker_host_id or not access_role:
+        return None
+    network = db.query(models.Network).filter(models.Network.pid == pid).order_by(models.Network.id).first()
+    if not network:
+        return None
+    nodes = deepcopy(network.nodes_json or [])
+    edges = deepcopy(network.edges_json or [])
+    attacker_node = next((node for node in nodes if node.get("host_id") == attacker_host_id), None)
+    target_node = next((node for node in nodes if node.get("host_id") == target_host.id), None)
+    if not attacker_node or not target_node:
+        return None
+
+    existing = next((edge for edge in edges if {edge.get("from"), edge.get("to")} == {attacker_node.get("id"), target_node.get("id")}), None)
+    reason = f"Credential-driven bulk run succeeded via {access_role} on {ts}"
+    label = access_role.replace("_", " ")
+    if existing:
+        existing["type"] = access_role
+        existing["label"] = label
+        existing["reason"] = reason
+        existing["state"] = "observed"
+        existing["verified"] = True
+        existing["confidence"] = max(float(existing.get("confidence") or 0), 1.0)
+        existing["source"] = "manual"
+        existing["is_manual"] = True
+        existing["manual_override"] = True
+        existing["updated_at"] = datetime.utcnow().isoformat()
+        existing["version"] = _edge_version(existing)
+        network.edges_json = edges
+        db.commit()
+        payload = {"network_id": network.id, "link": existing, "updated_at": existing["updated_at"]}
+        bcast(pid, "network", "link_updated", payload)
+        return payload
+
+    edge = {
+        "id": new_id("edg"),
+        "from": attacker_node.get("id"),
+        "to": target_node.get("id"),
+        "style": "lateral",
+        "type": access_role,
+        "label": label,
+        "confidence": 1.0,
+        "source": "manual",
+        "reason": reason,
+        "state": "observed",
+        "verified": True,
+        "is_manual": True,
+        "manual_override": True,
+        "updated_at": datetime.utcnow().isoformat(),
+        "version": 1,
+    }
+    edges.append(edge)
+    network.edges_json = edges
+    db.commit()
+    payload = {"network_id": network.id, "link": edge, "updated_at": edge["updated_at"]}
+    bcast(pid, "network", "link_created", payload)
+    return payload
+
+
 @router.post("/creds/{cred_id}/validate")
 async def validate_cred(
     pid: str,
@@ -337,7 +508,7 @@ async def validate_cred(
 
     exec_username = getattr(request.state, "username", None)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     results = []
 
     job = start_job(

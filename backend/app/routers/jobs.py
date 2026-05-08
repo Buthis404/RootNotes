@@ -64,7 +64,9 @@ def list_jobs(
     pid: str,
     type: str | None = None,
     status: str | None = None,
-    limit: int = 100,
+    connector_key: str | None = None,
+    playbook_run_id: str | None = None,
+    limit: int = 200,
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
@@ -74,6 +76,10 @@ def list_jobs(
         q = q.filter(models.Job.type == type)
     if status:
         q = q.filter(models.Job.status == status)
+    if connector_key:
+        q = q.filter(models.Job.connector_key == connector_key)
+    if playbook_run_id:
+        q = q.filter(models.Job.request_json["playbook_run_id"].astext == playbook_run_id)
     jobs = q.order_by(models.Job.created_at.desc()).limit(limit).all()
     return [_job_dict(j) for j in jobs]
 

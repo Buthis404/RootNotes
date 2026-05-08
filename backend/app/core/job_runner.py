@@ -6,6 +6,7 @@ from ..core.events import bcast, log_event
 from ..core.job_tracker import finish_job, mark_job_running
 from ..core.ssh_exec import run_ssh_command
 from ..core.utils import new_id
+from ..core.writeback import apply_writeback
 
 _ACTIVE_TASKS: set[asyncio.Task] = set()
 _SUPPORTED_QUEUED_OPERATIONS = {
@@ -15,6 +16,8 @@ _SUPPORTED_QUEUED_OPERATIONS = {
     ("attacker_ssh", "exec"),
     ("topology", "auto_build"),
     ("topology", "rebuild_layout"),
+    ("httpx", "scan"),
+    ("ffuf", "scan"),
 }
 
 
@@ -36,6 +39,12 @@ async def run_queued_job(job_id: str) -> None:
             return
         mark_job_running(db, job)
         await _dispatch_job(db, job)
+        # Post-job enrichment: auto-update hosts/creds from results
+        db.refresh(job)
+        try:
+            apply_writeback(db, job, job.result_json or {})
+        except Exception:
+            pass  # writeback errors must never fail the job
     except Exception as exc:
         job = db.query(models.Job).filter(models.Job.id == job_id).first()
         if job and job.status not in ("done", "failed", "cancelled"):
@@ -63,6 +72,12 @@ async def _dispatch_job(db, job: models.Job) -> None:
     if job.connector_key == "topology" and job.operation == "rebuild_layout":
         await _run_topology_rebuild_job(db, job)
         return
+    if job.connector_key == "httpx" and job.operation == "scan":
+        await _run_httpx_job(db, job)
+        return
+    if job.connector_key == "ffuf" and job.operation == "scan":
+        await _run_ffuf_job(db, job)
+        return
     finish_job(db, job, status="failed", error_output="Queued execution is not supported for this connector/operation yet")
 
 
@@ -80,7 +95,7 @@ async def _run_nmap_job(db, job: models.Job) -> None:
 
     ssh_config = _get_ssh_config(job.pid, target_id)
     cmd = f"nmap {flags} -oX - {target} 2>/dev/null"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
     parsed = _parse_nmap_xml(result.get("stdout", ""))
 
@@ -133,7 +148,7 @@ async def _run_nuclei_job(db, job: models.Job) -> None:
     ssh_config = _get_ssh_config(job.pid, target_id)
     tpl_flag = f"-t {templates}" if templates.strip() else ""
     cmd = f"nuclei -u {target} {tpl_flag} -severity {severity} -jsonl {extra_flags} 2>/dev/null"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
     parsed = _parse_nuclei_jsonl(result.get("stdout", ""))
     existing_titles = {f.title for f in db.query(models.Finding).filter(models.Finding.pid == job.pid).all()}
@@ -174,7 +189,7 @@ async def _run_cme_job(db, job: models.Job) -> None:
         auth = f"-u '{payload.get('username')}'"
     domain = f"-d {payload.get('domain')}" if payload.get("domain") else ""
     cmd = f"nxc {protocol} {target} {auth} {domain} {payload.get('extra_flags') or '--users --groups'} 2>/dev/null"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
     parsed = _parse_cme_output(result.get("stdout", "") + result.get("stderr", ""))
     created_hosts, created_creds = 0, 0
@@ -267,7 +282,7 @@ async def _run_exec_job(db, job: models.Job) -> None:
     log_event(db, job.pid, job.created_by, "host_activity", "create", f"Attacker exec: {title}", {"host_id": attacker_host.id, "type": activity.activity_type})
     db.commit()
     db.refresh(activity)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, lambda: run_ssh_command(dict(ssh_config), command, timeout_seconds))
     activity.output = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
     activity.status = "done" if result.get("ok") else "failed"
@@ -276,6 +291,101 @@ async def _run_exec_job(db, job: models.Job) -> None:
     db.refresh(activity)
     bcast(job.pid, "host_activity", "update", schemas.HostActivity.model_validate(activity).model_dump())
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"exit_code": result.get("exit_code", -1), "host_id": attacker_host.id, "used_global_fallback": resolved_cred is None})
+
+
+async def _run_httpx_job(db, job: models.Job) -> None:
+    from ..routers.scans import _get_ssh_config, _parse_httpx_jsonl
+    import json as _json
+    from datetime import datetime as _dt
+
+    payload = job.request_json or {}
+    target = (payload.get("target") or job.target or "").strip()
+    flags = payload.get("flags") or "-title -status-code -tech-detect -follow-redirects"
+    timeout_seconds = int(payload.get("timeout_seconds") or 120)
+    target_id = payload.get("target_id")
+    if not target:
+        finish_job(db, job, status="failed", error_output="Missing target")
+        return
+    ssh_config = _get_ssh_config(job.pid, target_id)
+    cmd = f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1"
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    parsed = _parse_httpx_jsonl(result.get("stdout", ""))
+    ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
+    hosts_found = len({r["host"] for r in parsed if r["host"]})
+    urls_found = len(parsed)
+    activities_created = 0
+    for r in parsed:
+        h_ip = r["host"]
+        if not h_ip:
+            continue
+        existing = db.query(models.Host).filter(models.Host.pid == job.pid, models.Host.ip == h_ip).first()
+        if not existing:
+            existing = db.query(models.Host).filter(models.Host.pid == job.pid, models.Host.hostname == h_ip).first()
+        if not existing:
+            existing = models.Host(id=new_id("hst"), pid=job.pid, ip=h_ip, hostname="", os="", status="up", ports=[r["port"]] if r["port"] else [], services=["http" if r["port"] in (80, 8080) else "https"], tags=["httpx"], import_source="httpx")
+            db.add(existing)
+        else:
+            if r["port"] and r["port"] not in (existing.ports or []):
+                existing.ports = list(set((existing.ports or []) + [r["port"]]))
+        summary = f"[{r['status']}] {r['url']}"
+        if r["title"]:
+            summary += f" | {r['title']}"
+        if r["tech"]:
+            summary += f" | tech: {', '.join(r['tech'])}"
+        activity = models.HostActivity(id=new_id("hact"), pid=job.pid, host_id=existing.id, title=f"httpx: {r['url']}", activity_type="recon", command=cmd, summary=summary, output=_json.dumps(r), status="done", ts=ts)
+        db.add(activity)
+        activities_created += 1
+    log_event(db, job.pid, job.created_by, "scan", "httpx", f"httpx: {target} → {urls_found} URLs", {"target": target})
+    db.commit()
+    for h in db.query(models.Host).filter(models.Host.pid == job.pid, models.Host.import_source == "httpx").all():
+        db.refresh(h)
+        bcast(job.pid, "host", "upsert", schemas.Host.model_validate(h).model_dump())
+    finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"urls_found": urls_found, "hosts_found": hosts_found, "activities_created": activities_created})
+
+
+async def _run_ffuf_job(db, job: models.Job) -> None:
+    from ..routers.scans import _get_ssh_config, _parse_ffuf_json
+    import json as _json
+    from datetime import datetime as _dt
+
+    payload = job.request_json or {}
+    target_url = (payload.get("target_url") or job.target or "").strip().rstrip("/")
+    wordlist = payload.get("wordlist") or "/usr/share/seclists/Discovery/Web-Content/common.txt"
+    extensions = payload.get("extensions") or ""
+    flags = payload.get("flags") or "-mc 200,204,301,302,307,401,403,405"
+    timeout_seconds = int(payload.get("timeout_seconds") or 300)
+    target_id = payload.get("target_id")
+    if not target_url:
+        finish_job(db, job, status="failed", error_output="Missing target_url")
+        return
+    ssh_config = _get_ssh_config(job.pid, target_id)
+    ext_flag = f"-e {extensions}" if extensions.strip() else ""
+    url = f"{target_url}/FUZZ"
+    cmd = f"ffuf -u '{url}' -w '{wordlist}' {ext_flag} {flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    parsed = _parse_ffuf_json(result.get("stdout", ""))
+    ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
+    findings_created = 0
+    for r in parsed:
+        status_code = r.get("status") or 0
+        path = r.get("input", {}).get("FUZZ") or r.get("url") or ""
+        full_url = r.get("url") or f"{target_url}/{path}"
+        length = r.get("length") or 0
+        words = r.get("words") or 0
+        severity = "info"
+        if status_code in (200, 204):
+            severity = "low"
+        if path and any(kw in path.lower() for kw in ("admin", "config", "backup", "secret", ".env", "passwd")):
+            severity = "medium"
+        existing = db.query(models.Finding).filter(models.Finding.pid == job.pid, models.Finding.title == f"ffuf: {full_url}").first()
+        if not existing:
+            db.add(models.Finding(id=new_id("fnd"), pid=job.pid, title=f"ffuf: {full_url}", severity=severity, description=f"HTTP {status_code} — size {length} bytes / {words} words", proof=f"URL: {full_url}\nStatus: {status_code}\nSize: {length}", status="open", ts=ts))
+            findings_created += 1
+    log_event(db, job.pid, job.created_by, "scan", "ffuf", f"ffuf: {target_url} → {len(parsed)} paths", {"target": target_url})
+    db.commit()
+    finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"paths_found": len(parsed), "findings_created": findings_created})
 
 
 async def _run_topology_auto_build_job(db, job: models.Job) -> None:

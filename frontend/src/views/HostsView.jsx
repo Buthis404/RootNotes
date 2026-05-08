@@ -17,7 +17,36 @@ const BULK_TEMPLATES = {
   exec:    { label: 'Custom',      cmd: '',                                 type: 'exec',  activity: 'postex' },
 };
 
-function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) {
+function getBulkCredentialPacks(hosts, cred) {
+  if (!cred) return [];
+  const allWindows = hosts.length > 0 && hosts.every(h => String(h.os || '').toLowerCase().includes('win'));
+  const allLinux = hosts.length > 0 && hosts.every(h => {
+    const os = String(h.os || '').toLowerCase();
+    return os.includes('linux') || os.includes('ubuntu') || os.includes('debian') || os.includes('centos') || os.includes('redhat');
+  });
+  const hasDomain = hosts.some(h => (h.domain || '').trim()) || Boolean((cred.domain || '').trim());
+  const type = String(cred.type || '').toLowerCase();
+  const isHash = type.includes('hash') || type.includes('ntlm');
+  const packs = [];
+  if (allWindows) {
+    if (isHash) {
+      packs.push({ id: 'bulk-smb-hash', label: 'SMB hash sweep', cmd: 'netexec smb {target} -u {{USER}} -H {{HASH}}', type: 'exec', activity: 'recon' });
+      packs.push({ id: 'bulk-wmi-hash', label: 'WMI hash exec', cmd: 'impacket-wmiexec {{DOMAIN}}/{{USER}}@{target} -hashes :{{HASH}}', type: 'exec', activity: 'postex' });
+    } else {
+      packs.push({ id: 'bulk-smb-pass', label: 'SMB auth sweep', cmd: 'netexec smb {target} -u {{USER}} -p {{PASS}}', type: 'exec', activity: 'recon' });
+      packs.push({ id: 'bulk-winrm-pass', label: 'WinRM sweep', cmd: 'netexec winrm {target} -u {{USER}} -p {{PASS}}', type: 'exec', activity: 'recon' });
+      packs.push({ id: 'bulk-wmi-pass', label: 'WMI exec sweep', cmd: 'impacket-wmiexec {{DOMAIN}}/{{USER}}:{{PASS}}@{target}', type: 'exec', activity: 'postex' });
+      packs.push({ id: 'bulk-psexec-pass', label: 'PsExec sweep', cmd: 'impacket-psexec {{DOMAIN}}/{{USER}}:{{PASS}}@{target}', type: 'exec', activity: 'postex' });
+    }
+    if (hasDomain && !isHash) packs.push({ id: 'bulk-ldap-bind', label: 'LDAP bind sweep', cmd: 'ldapsearch -x -H ldap://{target} -D "{{USER}}@{{DOMAIN}}" -w "{{PASS}}" -b "" "(objectClass=*)"', type: 'exec', activity: 'recon' });
+  }
+  if (allLinux && !isHash) {
+    packs.push({ id: 'bulk-ssh-pass', label: 'SSH sweep', cmd: 'sshpass -p "{{PASS}}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 {{USER}}@{target} "whoami && hostname"', type: 'exec', activity: 'postex' });
+  }
+  return packs;
+}
+
+function BulkRunPanel({ selectedIds, hosts, creds, selectedProject, accent, onClose }) {
   const [moduleOk, setModuleOk] = useState(null);
   const [attackerTargets, setAttackerTargets] = useState(null); // { project_hosts, global_targets }
   const [selectedAttacker, setSelectedAttacker] = useState('');  // 'project:{id}' | 'global:{id}'
@@ -25,7 +54,9 @@ function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) 
   const [command, setCommand] = useState(BULK_TEMPLATES.nmap.cmd);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
+  const [summary, setSummary] = useState(null);
   const [timeoutSec, setTimeoutSec] = useState(60);
+  const [selectedCredentialId, setSelectedCredentialId] = useState('');
 
   useEffect(() => {
     api.listModules().then(({ modules }) => {
@@ -53,6 +84,7 @@ function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) 
     if (!command.trim()) return;
     setRunning(true);
     setResults(null);
+    setSummary(null);
     try {
       const tpl = BULK_TEMPLATES[templateKey] || BULK_TEMPLATES.exec;
       const [kind, id] = selectedAttacker.split(':');
@@ -64,10 +96,13 @@ function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) 
         timeout_seconds: timeoutSec,
         attacker_host_id: kind === 'project' ? id : null,
         attacker_target_id: kind === 'global' ? id : null,
+        credential_id: selectedCredentialId || null,
       });
       setResults(res.results || []);
+      setSummary(res.summary || null);
     } catch (e) {
       setResults([{ error: e.message || 'Request failed', ok: false }]);
+      setSummary(null);
     }
     setRunning(false);
   };
@@ -79,6 +114,20 @@ function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) 
     ...(attackerTargets?.global_targets || []).map(t => ({ value: `global:${t.id}`, label: `${t.name || t.host} (global)` })),
   ];
   const noTargets = attackerTargets !== null && allTargets.length === 0;
+  const bulkCreds = useMemo(() => {
+    return (creds || []).filter((cred) => {
+      if (cred.pid !== selectedProject) return false;
+      return selectedHosts.some((host) => {
+        const hostDomain = normalizeDomain(host.domain || '');
+        return (cred.host_ids || []).includes(host.id)
+          || cred.host === host.ip
+          || (host.hostname && cred.host === host.hostname)
+          || (cred.is_domain && hostDomain && domainsMatch(cred.domain || '', hostDomain));
+      });
+    });
+  }, [creds, selectedHosts, selectedProject]);
+  const selectedCredential = bulkCreds.find(cred => cred.id === selectedCredentialId) || null;
+  const bulkCredentialPacks = useMemo(() => getBulkCredentialPacks(selectedHosts, selectedCredential), [selectedCredential, selectedHosts]);
 
   return (
     <div style={{ padding: '14px 18px', borderBottom: '1px solid #1a1c22', background: '#0a0c10', display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -129,10 +178,25 @@ function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) 
         <span style={{ fontSize: 10, color: '#404550' }}>sec</span>
       </div>
 
+      <select value={selectedCredentialId} onChange={e => setSelectedCredentialId(e.target.value)} style={{ width: '100%', background: '#0e1016', border: `1px solid ${acc}44`, borderRadius: 4, padding: '5px 8px', color: '#c8cfe0', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none' }}>
+        <option value="">— no credential selected —</option>
+        {bulkCreds.map(cred => <option key={cred.id} value={cred.id}>{cred.username}{cred.domain ? `@${cred.domain}` : ''} · {cred.type}</option>)}
+      </select>
+
+      {selectedCredential && bulkCredentialPacks.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {bulkCredentialPacks.map((pack) => (
+            <button key={pack.id} onClick={() => { setTemplateKey(pack.id); setCommand(pack.cmd); }} style={{ background: command === pack.cmd ? '#cc223322' : '#13161f', border: `1px solid ${command === pack.cmd ? '#cc223366' : '#1e2230'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: command === pack.cmd ? '#cc2233' : '#808590', fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>
+              {pack.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 8 }}>
         <input
           value={command} onChange={e => setCommand(e.target.value)}
-          placeholder="nmap -sV {target} — use {target} for host IP"
+          placeholder="nmap -sV {target} — supports {target}, {{USER}}, {{PASS}}, {{DOMAIN}}, {{HASH}}"
           style={{ flex: 1, background: '#0e1016', border: `1px solid ${acc}44`, borderRadius: 4, padding: '6px 10px', color: '#c8cfe0', fontSize: 12, outline: 'none', fontFamily: 'JetBrains Mono' }}
         />
         <button onClick={run} disabled={running || !moduleOk || !command.trim() || !selectedAttacker || noTargets}
@@ -144,6 +208,17 @@ function BulkRunPanel({ selectedIds, hosts, selectedProject, accent, onClose }) 
       <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>
         Targets: {selectedHosts.slice(0, 6).map(h => h.ip || h.hostname).join(', ')}{selectedHosts.length > 6 ? ` +${selectedHosts.length - 6} more` : ''}
       </div>
+
+      {summary && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: '#9098a8', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', fontFamily: 'JetBrains Mono' }}>{summary.total} total</span>
+          <span style={{ fontSize: 10, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 4, padding: '3px 8px', fontFamily: 'JetBrains Mono' }}>{summary.ok} ran</span>
+          <span style={{ fontSize: 10, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 4, padding: '3px 8px', fontFamily: 'JetBrains Mono' }}>{summary.successful_auth} success</span>
+          <span style={{ fontSize: 10, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 4, padding: '3px 8px', fontFamily: 'JetBrains Mono' }}>{summary.state_updates} state updates</span>
+          <span style={{ fontSize: 10, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 4, padding: '3px 8px', fontFamily: 'JetBrains Mono' }}>{summary.graph_updates || 0} graph updates</span>
+          {summary.access_role && <span style={{ fontSize: 10, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 4, padding: '3px 8px', fontFamily: 'JetBrains Mono' }}>role: {summary.access_role}</span>}
+        </div>
+      )}
 
       {results && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 200, overflowY: 'auto' }}>
@@ -449,6 +524,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
         <BulkRunPanel
           selectedIds={selectedIds}
           hosts={hosts}
+          creds={creds}
           selectedProject={selectedProject}
           accent={accent}
           onClose={() => setShowBulkRun(false)}

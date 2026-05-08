@@ -4,6 +4,9 @@ import { PHASES, PHASE_COLORS, NODE_STATUS, SEVERITY, FINDING_STATUS } from '../
 import { isAttackerHost } from '../utils/hostMeta.js';
 
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+const SEV_COLORS = {
+  critical: '#cc2233', high: '#e8574a', medium: '#f09a3a', low: '#4a9eff', info: '#606570',
+};
 
 export default function ReportView({ projects, notes, hosts, creds, findings = [], hostActivities = [], selectedProject, accent }) {
   const proj = projects.find(p => p.id === selectedProject);
@@ -25,11 +28,125 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
     </div>
   );
 
+  const exportHTML = () => {
+    const date = new Date().toISOString().slice(0, 10);
+    const safeName = (proj?.name || 'report').replace(/[^a-z0-9]/gi, '_');
+
+    const sevBadge = (sev) => {
+      const c = SEV_COLORS[sev] || '#606570';
+      return `<span style="font-size:10px;font-weight:700;color:${c};background:${c}22;border:1px solid ${c}55;border-radius:3px;padding:2px 7px;font-family:monospace;text-transform:uppercase">${sev}</span>`;
+    };
+
+    const findingsHtml = pFindings.map(f => {
+      const desc = f.description ? (f.description.length > 500 ? f.description.slice(0, 500) + '...' : f.description) : '';
+      return `
+      <div style="padding:12px 0;border-bottom:1px solid #1e2029">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+          ${sevBadge(f.severity)}
+          <strong style="color:#e0e4ec;font-size:13px">${f.title || ''}</strong>
+        </div>
+        ${f.cve ? `<div style="font-size:11px;color:#5b8af5;font-family:monospace;margin-bottom:4px">${f.cve}</div>` : ''}
+        ${f.cvss ? `<div style="font-size:11px;color:#808590;font-family:monospace;margin-bottom:4px">CVSS: ${f.cvss}</div>` : ''}
+        ${desc ? `<div style="font-size:11px;color:#9098a8;line-height:1.6;margin-bottom:4px">${desc}</div>` : ''}
+        ${f.recommendation ? `<div style="font-size:11px;color:#6fc8f0;line-height:1.6"><strong>Recommendation:</strong> ${f.recommendation}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    const hostsHtml = pHosts.map(h => `
+      <tr>
+        <td style="padding:7px 10px;font-family:monospace;font-size:11px;color:#9098a8">${h.ip || ''}</td>
+        <td style="padding:7px 10px;font-size:11px;color:#c8cdd6">${h.hostname || ''}</td>
+        <td style="padding:7px 10px;font-size:11px;color:#808590">${h.status || ''}</td>
+        <td style="padding:7px 10px;font-size:11px;color:#606570">${(h.ports || []).slice(0, 8).join(', ')}</td>
+      </tr>`).join('');
+
+    const credsHtml = pCreds.map(c => `
+      <tr>
+        <td style="padding:7px 10px;font-family:monospace;font-size:11px;color:#c8cdd6">${c.username || ''}</td>
+        <td style="padding:7px 10px;font-size:11px;color:#5b8af5;font-family:monospace">${c.host || ''}</td>
+        <td style="padding:7px 10px;font-size:11px;color:#606570">${c.service || ''}</td>
+      </tr>`).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${proj?.name || 'Report'} — Security Report</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#08090b;color:#c8cdd6;font-family:system-ui,sans-serif;padding:40px;line-height:1.5}
+    h1{font-size:26px;font-weight:700;color:#f0f2f6;margin-bottom:8px}
+    h2{font-size:16px;font-weight:600;color:#e0e4ec;margin:28px 0 14px;padding-bottom:8px;border-bottom:1px solid #1e2029}
+    .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:20px 0 28px}
+    .stat{background:#0d0f14;border:1px solid #1e2029;border-radius:8px;padding:14px 16px}
+    .stat .val{font-size:26px;font-weight:700;font-family:monospace;margin-bottom:4px}
+    .stat .lbl{font-size:10px;color:#606570;text-transform:uppercase;letter-spacing:.08em}
+    table{width:100%;border-collapse:collapse;background:#0d0f14;border:1px solid #1e2029;border-radius:8px;overflow:hidden;margin-bottom:20px}
+    th{padding:9px 10px;text-align:left;font-size:10px;color:#404550;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #1e2029}
+    tr:not(:last-child) td{border-bottom:1px solid #14161b}
+    .findings-block{background:#0d0f14;border:1px solid #1e2029;border-radius:8px;padding:18px;margin-bottom:20px}
+    .footer{margin-top:40px;padding-top:16px;border-top:1px solid #1a1c22;font-size:10px;color:#404550}
+  </style>
+</head>
+<body>
+  <div style="font-size:10px;color:#404550;text-transform:uppercase;letter-spacing:.15em;margin-bottom:8px">Security Report</div>
+  <h1>${proj?.name || ''}</h1>
+  <div style="font-size:12px;color:#606570;margin-bottom:24px">${proj?.ip || ''} · ${date}</div>
+
+  <div class="stats">
+    <div class="stat"><div class="val" style="color:#c07af0">${pHosts.length}</div><div class="lbl">Hosts</div></div>
+    <div class="stat"><div class="val" style="color:#e8574a">${pFindings.length}</div><div class="lbl">Findings</div></div>
+    <div class="stat"><div class="val" style="color:#39d353">${pCreds.length}</div><div class="lbl">Credentials</div></div>
+    <div class="stat"><div class="val" style="color:#cc2233">${critHosts.length}</div><div class="lbl">Pwned</div></div>
+    <div class="stat"><div class="val" style="color:#6fc8f0">${pNotes.length}</div><div class="lbl">Notes</div></div>
+  </div>
+
+  ${pFindings.length > 0 ? `
+  <h2>Findings (${pFindings.length})</h2>
+  <div class="findings-block">${findingsHtml}</div>` : ''}
+
+  ${pHosts.length > 0 ? `
+  <h2>Hosts (${pHosts.length})</h2>
+  <table>
+    <thead><tr><th>IP</th><th>Hostname</th><th>Status</th><th>Ports</th></tr></thead>
+    <tbody>${hostsHtml}</tbody>
+  </table>` : ''}
+
+  ${pCreds.length > 0 ? `
+  <h2>Credentials (${pCreds.length})</h2>
+  <table>
+    <thead><tr><th>Username</th><th>Host</th><th>Service</th></tr></thead>
+    <tbody>${credsHtml}</tbody>
+  </table>` : ''}
+
+  <div class="footer">Generated by RootNotes · ${new Date().toISOString()}</div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${safeName}_report_${date}.html`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '24px 28px', maxWidth: 900 }}>
       <div style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 9, color: '#404550', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>Report · {new Date().toLocaleDateString('en')}</div>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 4 }}>{proj?.name}</h1>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 4 }}>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>Report · {new Date().toLocaleDateString('en')}</div>
+            <h1 style={{ fontSize: 22, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 4 }}>{proj?.name}</h1>
+          </div>
+          <button onClick={exportHTML}
+            style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0, marginTop: 4, transition: 'opacity .1s' }}
+            onMouseEnter={e => e.currentTarget.style.opacity = '.85'}
+            onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
+            <Icon name="export" size={12} color="#fff" /> Export HTML
+          </button>
+        </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <StatusDot status={proj?.status} />
           <span style={{ fontSize: 11, color: '#606570' }}>{proj?.ip}</span>
@@ -144,7 +261,8 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
                   {f.cve && <span style={{ fontSize: 10, color: '#5b8af5', fontFamily: 'JetBrains Mono' }}>{f.cve}</span>}
                   {linkedHost && <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>{linkedHost.ip}</span>}
                 </div>
-                {f.description && <div style={{ fontSize: 11, color: '#808590', lineHeight: 1.5 }}>{f.description.slice(0, 200)}{f.description.length > 200 ? '...' : ''}</div>}
+                {f.description && <div style={{ fontSize: 11, color: '#808590', lineHeight: 1.5, marginBottom: f.recommendation ? 6 : 0 }}>{f.description.slice(0, 300)}{f.description.length > 300 ? '...' : ''}</div>}
+                {f.recommendation && <div style={{ fontSize: 10, color: '#6fc8f0', lineHeight: 1.5 }}><span style={{ color: '#404550' }}>Rec: </span>{f.recommendation}</div>}
               </div>
             );
           })}

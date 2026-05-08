@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import ToastContainer from './components/Toast.jsx';
 import Icon from './components/Icon.jsx';
 import { TABS, ADMIN_TAB } from './constants.js';
 import { api } from './api.js';
 import { useProjectStore } from './store/useProjectStore.js';
 import { useSync } from './hooks/useSync.js';
+import OverviewView from './views/OverviewView.jsx';
 import ProjectsView from './views/ProjectsView.jsx';
 import NotesView from './views/NotesView.jsx';
 import HostsView from './views/HostsView.jsx';
@@ -23,6 +25,9 @@ import CheatsheetView from './views/CheatsheetView.jsx';
 import ScansView from './views/ScansView.jsx';
 import JobsView from './views/JobsView.jsx';
 import PlaybooksView from './views/PlaybooksView.jsx';
+import DomainsView from './views/DomainsView.jsx';
+import AIChatPanel from './components/AIChatPanel.jsx';
+import KBView from './views/KBView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import LoginView from './views/LoginView.jsx';
 import UserSettingsView from './views/UserSettingsView.jsx';
@@ -78,6 +83,7 @@ export default function App() {
   });
   const [tab, setTab] = useState(() => localStorage.getItem('rt_tab') || 'projects');
   const [selectedProject, setSelectedProject] = useState(() => localStorage.getItem('rt_project') || '');
+  const [jobsFilter, setJobsFilter] = useState(null);
 
   // ── Project data via Zustand ────────────────────────────────────────
   const {
@@ -737,6 +743,21 @@ export default function App() {
               setSelectedProject(result.project_id);
             }} />
         )}
+        {tab === 'overview' && (
+          <OverviewView
+            selectedProject={selectedProject}
+            projects={projects}
+            hosts={hosts}
+            creds={creds}
+            findings={findings}
+            notes={notes}
+            objectives={objectives}
+            timelineEvents={[]}
+            checklistItems={[]}
+            accent={acc}
+            onTabChange={setTab}
+          />
+        )}
         {tab === 'user-settings' && (
           <UserSettingsView accent={acc} currentUser={currentUser} onUserUpdated={setCurrentUser} />
         )}
@@ -833,11 +854,19 @@ export default function App() {
             jobs={jobs.filter(j => j.pid === selectedProject)}
             onJobUpdate={j => setJobs(prev => prev.map(x => x.id === j.id ? j : x))}
             onJobDelete={id => setJobs(prev => prev.filter(x => x.id !== id))}
+            initialFilter={jobsFilter}
+            onFilterConsumed={() => setJobsFilter(null)}
           />
         )}
         {tab === 'playbooks' && (
-          <PlaybooksView selectedProject={selectedProject} accent={acc} />
+          <PlaybooksView selectedProject={selectedProject} accent={acc}
+            onNavigate={(to, filter) => { setTab(to); if (filter) setJobsFilter(filter); }}
+          />
         )}
+        {tab === 'domains' && (
+          <DomainsView selectedProject={selectedProject} accent={acc} />
+        )}
+        {tab === 'kb' && <KBView selectedProject={selectedProject} accent={acc} currentUser={currentUser} />}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}
             selectedProject={selectedProject} accent={acc} />
@@ -860,6 +889,10 @@ export default function App() {
           onClose={() => setImportProjectId(null)}
           onImported={handleImported} />
       )}
+
+      {selectedProject && <AIChatPanel selectedProject={selectedProject} accent={acc} />}
+
+      <ToastContainer />
 
     </div>
   );

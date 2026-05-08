@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from ..core.events import bcast, log_event
 from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["notes"])
 
@@ -130,8 +133,8 @@ def delete_attachment(aid: str, db: Session = Depends(get_db), user: models.User
     note_id = attachment.note_id
     try:
         ensure_under_upload_root(Path(attachment.storage_path)).unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to delete attachment file %s: %s", attachment.storage_path, e)
     db.delete(attachment)
     db.commit()
     bcast(pid, "note_attachment", "delete", {"id": aid, "note_id": note_id})

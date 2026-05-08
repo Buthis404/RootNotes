@@ -218,7 +218,7 @@ async def execute_attacker_command(
                     request_json=body.model_dump())
 
     # Run SSH in thread pool to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         _config = dict(ssh_config)
         _cmd = body.command

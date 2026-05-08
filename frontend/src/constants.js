@@ -82,6 +82,7 @@ export function serviceColor(name) {
 
 export const TABS = [
   {id:'projects',   icon:'projects',  label:'Projects'},
+  {id:'overview',   icon:'bolt',      label:'Overview'},
   {id:'notes',      icon:'notes',     label:'Notes'},
   {id:'hosts',      icon:'hosts',     label:'Hosts'},
   {id:'creds',      icon:'person',    label:'Creds'},
@@ -95,8 +96,10 @@ export const TABS = [
   {id:'timeline',   icon:'clock',     label:'Timeline'},
   {id:'cheatsheet', icon:'terminal',  label:'Commands'},
   {id:'scans',      icon:'target',    label:'Scans'},
-  {id:'jobs',       icon:'clock',     label:'Jobs'},
+  {id:'jobs',       icon:'jobs',      label:'Jobs'},
   {id:'playbooks',  icon:'package',   label:'Playbooks'},
+  {id:'domains',    icon:'globe',     label:'Domains'},
+  {id:'kb',           icon:'book',    label:'Knowledge Base'},
   {id:'report',     icon:'report',    label:'Report'},
 ];
 

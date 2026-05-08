@@ -14,7 +14,7 @@ def log_event(
     entity: str,
     action: str,
     label: str,
-    meta: dict = None,
+    meta: dict | None = None,
 ):
     db.add(models.TimelineEvent(
         id=new_id("evt"),
@@ -32,8 +32,7 @@ def bcast(pid: str, entity: str, action: str, data: dict, ws=None):
     """Fire-and-forget WebSocket broadcast from sync endpoints."""
     msg = {"pid": pid, "entity": entity, "action": action, "data": data}
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(manager.broadcast(pid, msg, exclude=ws))
+        loop = asyncio.get_running_loop()
+        loop.call_soon_threadsafe(asyncio.ensure_future, manager.broadcast(pid, msg, exclude=ws))
     except RuntimeError:
         pass

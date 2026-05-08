@@ -32,7 +32,13 @@ const MODES = [
   },
 ];
 
+const TABS_NAV = [
+  { id: 'parsers', label: 'Parsers' },
+  { id: 'scanners', label: 'Scanners' },
+];
+
 export default function ImportModal({ projectId, onClose, onImported, accent }) {
+  const [activeTab, setActiveTab] = useState('parsers');
   const [mode, setMode] = useState('nmap');
   const [text, setText] = useState('');
   const [preview, setPreview] = useState(null);   // { hosts, creds }
@@ -40,6 +46,50 @@ export default function ImportModal({ projectId, onClose, onImported, accent }) 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);     // { hosts_added, creds_added }
   const fileRef = useRef();
+
+  // Nessus/Burp scanner state
+  const [nessusFile, setNessusFile] = useState(null);
+  const [nessusLoading, setNessusLoading] = useState(false);
+  const [nessusResult, setNessusResult] = useState(null);
+  const [nessusError, setNessusError] = useState('');
+  const [burpFile, setBurpFile] = useState(null);
+  const [burpLoading, setBurpLoading] = useState(false);
+  const [burpResult, setBurpResult] = useState(null);
+  const [burpError, setBurpError] = useState('');
+  const nessusRef = useRef();
+  const burpRef = useRef();
+
+  const doNessusImport = async () => {
+    if (!nessusFile) return;
+    setNessusLoading(true);
+    setNessusError('');
+    setNessusResult(null);
+    try {
+      const res = await api.importNessus(projectId, nessusFile);
+      setNessusResult(res);
+      onImported();
+    } catch (e) {
+      setNessusError(e.message || 'Import failed');
+    } finally {
+      setNessusLoading(false);
+    }
+  };
+
+  const doBurpImport = async () => {
+    if (!burpFile) return;
+    setBurpLoading(true);
+    setBurpError('');
+    setBurpResult(null);
+    try {
+      const res = await api.importBurp(projectId, burpFile);
+      setBurpResult(res);
+      onImported();
+    } catch (e) {
+      setBurpError(e.message || 'Import failed');
+    } finally {
+      setBurpLoading(false);
+    }
+  };
 
   const currentMode = MODES.find(m => m.id === mode);
 
@@ -115,7 +165,95 @@ export default function ImportModal({ projectId, onClose, onImported, accent }) 
           </button>
         </div>
 
+        {/* Tab nav */}
+        <div style={{ display: 'flex', gap: 2, padding: '10px 20px 0', borderBottom: '1px solid #1e2029', flexShrink: 0 }}>
+          {TABS_NAV.map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)}
+              style={{ background: 'none', border: 'none', borderBottom: activeTab === t.id ? `2px solid ${accent}` : '2px solid transparent', padding: '6px 14px 8px', cursor: 'pointer', fontSize: 11, fontWeight: 600, color: activeTab === t.id ? accent : '#606570', fontFamily: 'JetBrains Mono', transition: 'color .15s', marginBottom: -1 }}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
         <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+          {/* ── Scanners tab ── */}
+          {activeTab === 'scanners' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              {/* Nessus */}
+              <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Icon name="target" size={14} color="#e8574a" />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>Nessus</span>
+                </div>
+                <div style={{ fontSize: 10, color: '#606570' }}>Import .nessus XML scan report</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#0a0c10', border: '1px dashed #2a2d35', borderRadius: 6, padding: '10px 12px', cursor: 'pointer' }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = '#404550'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = '#2a2d35'}>
+                  <Icon name="export" size={13} color="#404550" />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 10, color: nessusFile ? '#c8cdd6' : '#808590', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {nessusFile ? nessusFile.name : 'Select .nessus / .xml file'}
+                    </div>
+                  </div>
+                  <input ref={nessusRef} type="file" accept=".xml,.nessus" style={{ display: 'none' }}
+                    onChange={e => { setNessusFile(e.target.files?.[0] || null); setNessusResult(null); setNessusError(''); }} />
+                </label>
+                {nessusError && (
+                  <div style={{ fontSize: 10, color: '#cc2233', background: '#cc223318', border: '1px solid #cc223344', borderRadius: 5, padding: '6px 10px' }}>{nessusError}</div>
+                )}
+                {nessusResult && (
+                  <div style={{ fontSize: 10, color: '#39d353', background: '#39d35318', border: '1px solid #39d35344', borderRadius: 5, padding: '6px 10px' }}>
+                    Imported: {nessusResult.hosts_created ?? nessusResult.hosts_added ?? '?'} hosts, {nessusResult.findings_created ?? nessusResult.findings_added ?? '?'} findings
+                  </div>
+                )}
+                <button onClick={doNessusImport} disabled={!nessusFile || nessusLoading}
+                  style={{ background: nessusFile && !nessusLoading ? accent : '#1e2029', border: 'none', borderRadius: 6, padding: '7px 14px', cursor: nessusFile && !nessusLoading ? 'pointer' : 'not-allowed', color: nessusFile && !nessusLoading ? '#fff' : '#404550', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, transition: 'all .15s' }}>
+                  {nessusLoading ? (
+                    <><span style={{ width: 10, height: 10, border: '2px solid #ffffff44', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} /> Importing...</>
+                  ) : 'Import Nessus'}
+                </button>
+              </div>
+
+              {/* Burp Suite */}
+              <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Icon name="bug" size={14} color="#f09a3a" />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>Burp Suite</span>
+                </div>
+                <div style={{ fontSize: 10, color: '#606570' }}>Import Burp Suite XML scan report</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#0a0c10', border: '1px dashed #2a2d35', borderRadius: 6, padding: '10px 12px', cursor: 'pointer' }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = '#404550'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = '#2a2d35'}>
+                  <Icon name="export" size={13} color="#404550" />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 10, color: burpFile ? '#c8cdd6' : '#808590', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {burpFile ? burpFile.name : 'Select .xml file'}
+                    </div>
+                  </div>
+                  <input ref={burpRef} type="file" accept=".xml" style={{ display: 'none' }}
+                    onChange={e => { setBurpFile(e.target.files?.[0] || null); setBurpResult(null); setBurpError(''); }} />
+                </label>
+                {burpError && (
+                  <div style={{ fontSize: 10, color: '#cc2233', background: '#cc223318', border: '1px solid #cc223344', borderRadius: 5, padding: '6px 10px' }}>{burpError}</div>
+                )}
+                {burpResult && (
+                  <div style={{ fontSize: 10, color: '#39d353', background: '#39d35318', border: '1px solid #39d35344', borderRadius: 5, padding: '6px 10px' }}>
+                    Imported: {burpResult.hosts_created ?? burpResult.hosts_added ?? '?'} hosts, {burpResult.findings_created ?? burpResult.findings_added ?? '?'} findings
+                  </div>
+                )}
+                <button onClick={doBurpImport} disabled={!burpFile || burpLoading}
+                  style={{ background: burpFile && !burpLoading ? accent : '#1e2029', border: 'none', borderRadius: 6, padding: '7px 14px', cursor: burpFile && !burpLoading ? 'pointer' : 'not-allowed', color: burpFile && !burpLoading ? '#fff' : '#404550', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, transition: 'all .15s' }}>
+                  {burpLoading ? (
+                    <><span style={{ width: 10, height: 10, border: '2px solid #ffffff44', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} /> Importing...</>
+                  ) : 'Import Burp'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Parsers tab ── */}
+          {activeTab === 'parsers' && <>
           {/* Mode selector */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8 }}>
             {MODES.map(m => (
@@ -310,6 +448,7 @@ SSH  10.10.14.10 22   BACKEND  [+] deploy:secretkey`}
               </button>
             </div>
           )}
+          </>}
         </div>
       </div>
     </div>

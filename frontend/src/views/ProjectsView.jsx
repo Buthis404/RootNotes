@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { toastError } from '../components/Toast.jsx';
 import Icon from '../components/Icon.jsx';
 import { FieldInput } from '../components/UI.jsx';
 import { OS_ICONS } from '../constants.js';
@@ -57,7 +58,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      alert('Export error: ' + err.message);
+      toastError('Export error: ' + err.message);
     } finally {
       setExportingId(null);
     }
@@ -72,7 +73,7 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
       const result = await api.importProject(file);
       onProjectImported?.(result);
     } catch (err) {
-      alert('Import error: ' + err.message);
+      toastError('Import error: ' + err.message);
     } finally {
       setImporting(false);
     }
