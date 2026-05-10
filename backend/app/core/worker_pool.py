@@ -28,6 +28,7 @@ class WorkerPool:
         self._worker_tasks: list[asyncio.Task] = []
         self._running = False
         self._active_job_ids: set[str] = set()
+        self._cancel_tokens: dict[str, object] = {}  # job_id → CancellationToken
 
     async def start(self) -> None:
         if self._running:
@@ -40,6 +41,14 @@ class WorkerPool:
 
     def submit(self, job_id: str) -> None:
         self._queue.put_nowait(job_id)
+
+    def cancel_job(self, job_id: str) -> bool:
+        """Signal a running job to stop. Returns True if the token was found and fired."""
+        token = self._cancel_tokens.get(job_id)
+        if token is not None:
+            token.cancel()
+            return True
+        return False
 
     async def stop(self) -> None:
         self._running = False
@@ -70,12 +79,16 @@ class WorkerPool:
             except asyncio.CancelledError:
                 break
             self._active_job_ids.add(job_id)
+            from .transport import CancellationToken
+            token = CancellationToken()
+            self._cancel_tokens[job_id] = token
             try:
                 from .job_runner import run_queued_job
-                await run_queued_job(job_id)
+                await run_queued_job(job_id, token)
             except Exception as exc:
                 logger.exception("Worker error running job %s: %s", job_id, exc)
             finally:
+                self._cancel_tokens.pop(job_id, None)
                 self._active_job_ids.discard(job_id)
                 self._queue.task_done()
 

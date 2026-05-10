@@ -140,9 +140,14 @@ def cancel_job(
         raise HTTPException(404, "Job not found")
     if job.status not in ("queued", "running"):
         raise HTTPException(400, "Job is already in a terminal state")
-    job.status = "cancelled"
-    db.commit()
-    db.refresh(job)
+    # Signal worker to stop (kills subprocess if running)
+    from ..core.worker_pool import get_pool
+    get_pool().cancel_job(job_id)
+    # For queued jobs that haven't started yet: mark cancelled immediately
+    if job.status == "queued":
+        job.status = "cancelled"
+        db.commit()
+        db.refresh(job)
     bcast(pid, "job", "update", _job_dict(job))
     return _job_dict(job)
 

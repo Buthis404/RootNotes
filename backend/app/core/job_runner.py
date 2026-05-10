@@ -4,7 +4,8 @@ from .. import models, schemas
 from ..database import SessionLocal
 from ..core.events import bcast, log_event
 from ..core.job_tracker import finish_job, mark_job_running
-from ..core.ssh_exec import run_ssh_command
+from ..core.ssh_exec import run_ssh_command, run_ssh_command_cancellable
+from ..core.transport import CancellationToken
 from ..core.utils import new_id
 from ..core.writeback import apply_writeback
 
@@ -29,14 +30,16 @@ def schedule_job_run(job_id: str) -> None:
     get_pool().submit(job_id)
 
 
-async def run_queued_job(job_id: str) -> None:
+async def run_queued_job(job_id: str, cancel_token: CancellationToken | None = None) -> None:
+    if cancel_token is None:
+        cancel_token = CancellationToken()
     db = SessionLocal()
     try:
         job = db.query(models.Job).filter(models.Job.id == job_id).first()
         if not job or job.status != "queued":
             return
         mark_job_running(db, job)
-        await _dispatch_job(db, job)
+        await _dispatch_job(db, job, cancel_token)
         # Post-job enrichment: auto-update hosts/creds from results
         db.refresh(job)
         try:
@@ -51,35 +54,35 @@ async def run_queued_job(job_id: str) -> None:
         db.close()
 
 
-async def _dispatch_job(db, job: models.Job) -> None:
+async def _dispatch_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     if job.connector_key == "nmap" and job.operation == "scan":
-        await _run_nmap_job(db, job)
+        await _run_nmap_job(db, job, cancel_token)
         return
     if job.connector_key == "nuclei" and job.operation == "scan":
-        await _run_nuclei_job(db, job)
+        await _run_nuclei_job(db, job, cancel_token)
         return
     if job.connector_key == "netexec" and job.operation == "scan":
-        await _run_cme_job(db, job)
+        await _run_cme_job(db, job, cancel_token)
         return
     if job.connector_key == "attacker_ssh" and job.operation == "exec":
-        await _run_exec_job(db, job)
+        await _run_exec_job(db, job, cancel_token)
         return
     if job.connector_key == "topology" and job.operation == "auto_build":
-        await _run_topology_auto_build_job(db, job)
+        await _run_topology_auto_build_job(db, job, cancel_token)
         return
     if job.connector_key == "topology" and job.operation == "rebuild_layout":
-        await _run_topology_rebuild_job(db, job)
+        await _run_topology_rebuild_job(db, job, cancel_token)
         return
     if job.connector_key == "httpx" and job.operation == "scan":
-        await _run_httpx_job(db, job)
+        await _run_httpx_job(db, job, cancel_token)
         return
     if job.connector_key == "ffuf" and job.operation == "scan":
-        await _run_ffuf_job(db, job)
+        await _run_ffuf_job(db, job, cancel_token)
         return
     finish_job(db, job, status="failed", error_output="Queued execution is not supported for this connector/operation yet")
 
 
-async def _run_nmap_job(db, job: models.Job) -> None:
+async def _run_nmap_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.scans import _get_ssh_config, _parse_nmap_xml
 
     payload = job.request_json or {}
@@ -94,7 +97,10 @@ async def _run_nmap_job(db, job: models.Job) -> None:
     ssh_config = _get_ssh_config(job.pid, target_id)
     cmd = f"nmap {flags} -oX - {target} 2>/dev/null"
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    result = await loop.run_in_executor(None, lambda: run_ssh_command_cancellable(ssh_config, cmd, timeout_seconds, cancel_token))
+    if result.get("cancelled"):
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
     parsed = _parse_nmap_xml(result.get("stdout", ""))
 
     created, updated = 0, 0
@@ -130,7 +136,7 @@ async def _run_nmap_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"hosts_found": len(parsed), "hosts_created": created, "hosts_updated": updated})
 
 
-async def _run_nuclei_job(db, job: models.Job) -> None:
+async def _run_nuclei_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.scans import _get_ssh_config, _parse_nuclei_jsonl
 
     payload = job.request_json or {}
@@ -147,7 +153,10 @@ async def _run_nuclei_job(db, job: models.Job) -> None:
     tpl_flag = f"-t {templates}" if templates.strip() else ""
     cmd = f"nuclei -u {target} {tpl_flag} -severity {severity} -jsonl {extra_flags} 2>/dev/null"
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    result = await loop.run_in_executor(None, lambda: run_ssh_command_cancellable(ssh_config, cmd, timeout_seconds, cancel_token))
+    if result.get("cancelled"):
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
     parsed = _parse_nuclei_jsonl(result.get("stdout", ""))
     existing_titles = {f.title for f in db.query(models.Finding).filter(models.Finding.pid == job.pid).all()}
     created_findings = []
@@ -166,7 +175,7 @@ async def _run_nuclei_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"findings_found": len(parsed), "findings_created": len(created_findings)})
 
 
-async def _run_cme_job(db, job: models.Job) -> None:
+async def _run_cme_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.scans import _get_ssh_config, _parse_cme_output
 
     payload = job.request_json or {}
@@ -188,7 +197,10 @@ async def _run_cme_job(db, job: models.Job) -> None:
     domain = f"-d {payload.get('domain')}" if payload.get("domain") else ""
     cmd = f"nxc {protocol} {target} {auth} {domain} {payload.get('extra_flags') or '--users --groups'} 2>/dev/null"
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    result = await loop.run_in_executor(None, lambda: run_ssh_command_cancellable(ssh_config, cmd, timeout_seconds, cancel_token))
+    if result.get("cancelled"):
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
     parsed = _parse_cme_output(result.get("stdout", "") + result.get("stderr", ""))
     created_hosts, created_creds = 0, 0
     host_objects = []
@@ -232,7 +244,7 @@ async def _run_cme_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"hosts_found": len(parsed["hosts"]), "hosts_created": created_hosts, "creds_found": len(parsed["creds"]), "creds_created": created_creds})
 
 
-async def _run_exec_job(db, job: models.Job) -> None:
+async def _run_exec_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.attacker_exec import _resolve_attacker_host, _resolve_project_cred, _build_ssh_config_from_project, _list_global_targets_for_project
     from ..plugins.state import list_attacker_targets
 
@@ -281,7 +293,15 @@ async def _run_exec_job(db, job: models.Job) -> None:
     db.commit()
     db.refresh(activity)
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_ssh_command(dict(ssh_config), command, timeout_seconds))
+    result = await loop.run_in_executor(None, lambda: run_ssh_command_cancellable(dict(ssh_config), command, timeout_seconds, cancel_token))
+    if result.get("cancelled"):
+        activity.output = "Cancelled by user"
+        activity.status = "failed"
+        db.commit()
+        db.refresh(activity)
+        bcast(job.pid, "host_activity", "update", schemas.HostActivity.model_validate(activity).model_dump())
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
     activity.output = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
     activity.status = "done" if result.get("ok") else "failed"
     activity.summary = f"Executed via attacker SSH ({'project cred' if resolved_cred else 'global config'})"
@@ -291,7 +311,7 @@ async def _run_exec_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"exit_code": result.get("exit_code", -1), "host_id": attacker_host.id, "used_global_fallback": resolved_cred is None})
 
 
-async def _run_httpx_job(db, job: models.Job) -> None:
+async def _run_httpx_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.scans import _get_ssh_config, _parse_httpx_jsonl
     import json as _json
     from datetime import datetime as _dt
@@ -307,7 +327,10 @@ async def _run_httpx_job(db, job: models.Job) -> None:
     ssh_config = _get_ssh_config(job.pid, target_id)
     cmd = f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1"
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    result = await loop.run_in_executor(None, lambda: run_ssh_command_cancellable(ssh_config, cmd, timeout_seconds, cancel_token))
+    if result.get("cancelled"):
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
     parsed = _parse_httpx_jsonl(result.get("stdout", ""))
     ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
     hosts_found = len({r["host"] for r in parsed if r["host"]})
@@ -342,7 +365,7 @@ async def _run_httpx_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"urls_found": urls_found, "hosts_found": hosts_found, "activities_created": activities_created})
 
 
-async def _run_ffuf_job(db, job: models.Job) -> None:
+async def _run_ffuf_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.scans import _get_ssh_config, _parse_ffuf_json
     import json as _json
     from datetime import datetime as _dt
@@ -362,7 +385,10 @@ async def _run_ffuf_job(db, job: models.Job) -> None:
     url = f"{target_url}/FUZZ"
     cmd = f"ffuf -u '{url}' -w '{wordlist}' {ext_flag} {flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: run_ssh_command(ssh_config, cmd, timeout_seconds))
+    result = await loop.run_in_executor(None, lambda: run_ssh_command_cancellable(ssh_config, cmd, timeout_seconds, cancel_token))
+    if result.get("cancelled"):
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
     parsed = _parse_ffuf_json(result.get("stdout", ""))
     ts = _dt.utcnow().strftime("%Y-%m-%d %H:%M")
     findings_created = 0
@@ -386,7 +412,7 @@ async def _run_ffuf_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done" if result.get("ok") else "failed", output=result.get("stdout", "")[:20000], error_output=result.get("stderr", ""), result={"paths_found": len(parsed), "findings_created": findings_created})
 
 
-async def _run_topology_auto_build_job(db, job: models.Job) -> None:
+async def _run_topology_auto_build_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.topology import _run_auto_build
 
     payload = job.request_json or {}
@@ -397,7 +423,7 @@ async def _run_topology_auto_build_job(db, job: models.Job) -> None:
     finish_job(db, job, status="done", result=result)
 
 
-async def _run_topology_rebuild_job(db, job: models.Job) -> None:
+async def _run_topology_rebuild_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
     from ..routers.topology import compute_layout
 
     payload = job.request_json or {}

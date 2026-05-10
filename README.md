@@ -1,38 +1,80 @@
 # RootNotes
 
-Self-hosted red team workspace for tracking engagements end-to-end — hosts, credentials, findings, notes, loot, attack paths, and reporting in one interface.
+**Single operational context for a pentest or red-team engagement.**
 
-![Network Map](docs/screenshots/03_network.png)
+Not a note-taking app. A platform where reconnaissance, operations, evidence, and reporting live in one space — and feed each other.
+
+![Attack Graph](docs/screenshots/attackgraph.png)
 
 ---
 
-## Features
+## The problem it solves
 
-| Module | What it does |
-|--------|-------------|
-| **Hosts** | Inventory with status (pwned / access / up), roles, ports, services, tags, linked creds |
-| **Credentials** | Plaintext, NTLM, Kerberos tickets; domain/local, cracked state, host linking |
-| **Findings** | Severity, CVE/CVSS, proof, recommendations, workflow status; report-ready |
-| **Notes** | Markdown with attachments, phases, tags, live collaboration via WebSocket |
-| **Loot** | Files, hashes, secrets, configs — upload/download with auth, host-linked |
-| **Attack Path** | Ordered escalation steps with MITRE technique fields |
-| **Network Map** | Interactive canvas with VLAN regions, node roles, overlay modes (threats / sessions / access / roles) |
-| **Objectives** | Mission goals with capture status and operator attribution |
-| **Playbooks** | Automated job sequences with live step state polling |
-| **Knowledge Base** | Markdown articles (global or project-scoped) with full-text search |
-| **Search** | Full-text across all entities with filter tokens (`type:host`, `severity:critical`, `service:smb`) |
-| **Report** | Executive summary with stats, compromised hosts, cracked creds, timeline |
-| **Timeline** | Per-project audit log of all operator activity |
+A typical engagement runs across a dozen tools and three open terminals. Scan results live in text files. Credentials are in a spreadsheet. The network diagram is in a separate draw.io tab. Findings are in a Word document that gets updated at the end.
+
+RootNotes puts the entire engagement state in one place:
+- **Operations run from the platform**, not just logged into it
+- **Results update the state** — a scan creates hosts, cred validation marks access edges, found hashes become loot
+- **The graph reflects what you know right now**, not a static diagram drawn once
+- **Reporting pulls from real data**, not from memory
+
+---
+
+## Core capabilities
+
+### Orchestration
+Run tools through the platform. Every operation is a Job with a status, output, and structured result that feeds back into the project state.
+
+| | |
+|---|---|
+| **Scans** | nmap, nuclei, httpx, ffuf — via attacker SSH or global connector |
+| **Bulk operations** | Execute against dynamic host collections: all Windows, all with valid SMB cred, all in subnet |
+| **Credential validation** | SMB, WinRM, SSH, LDAP, MSSQL, RDP — results create access edges and finding candidates |
+| **AD workflows** | SPN enum, ASREP, delegation, ADCS, BloodHound collect, domain enum |
+| **Playbooks** | Ordered operation sequences with live step polling |
+| **Cancellation** | Running jobs can be killed — stops the subprocess, not just the DB record |
+
+### State tracking
+Operations change the project. Automatically.
+- Nmap scan → hosts created/updated with ports and OS
+- Cred validation → access edges in the graph, host status updated
+- Job output → NTLM hashes, Kerberos tickets, secrets auto-extracted to Loot
+- Structured job results → Finding candidates promoted for analyst review
+
+### Intelligence
+Everything your team needs to know about the engagement in one place.
+
+- **Hosts** — inventory with status (`up / access / pwned`), roles, ports, services, tags, linked credentials
+- **Credentials** — plaintext, NTLM, Kerberos tickets; domain/local; cracked state; host linkage
+- **Findings** — severity, CVE/CVSS, proof, recommendations, MITRE IDs, workflow status
+- **Notes** — Markdown with attachments, phases, tags, live collaboration
+- **Knowledge Base** — Markdown articles (global or project-scoped) with full-text search
+- **Attack Path** — ordered escalation steps with MITRE technique fields; link steps to real hosts
+
+### Visualization
+Two graph views showing different angles on the same engagement state.
+
+**Network Map** — topology canvas with VLAN regions, overlay modes (threats / sessions / access / roles), drag-and-drop layout, host inspector with activity timeline.
+
+**Attack Graph** — interactive canvas showing hosts connected by credential paths. Drag nodes to reposition. Click any node to see linked credentials, findings that mention it, ports and services.
+
+### Evidence pipeline
+- Loot: files, hashes, secrets, configs — upload/download with auth, linked to host + job + credential
+- Auto-extraction from job output: NTLM hashes, Kerberos tickets, secrets, file references
+- sha256 on every upload; artifact type classification
+
+### Reporting
+Executive summary built from real project data: compromised hosts, cracked credentials, critical findings, timeline of operator activity, attack path narrative.
 
 ---
 
 ## Screenshots
 
-### Projects
-![Projects](docs/screenshots/02_projects.png)
-
 ### Network Map — overlay modes: Threats · Sessions · Access · Roles
 ![Network](docs/screenshots/03_network.png)
+
+### Attack Graph — interactive canvas with linked creds and findings
+![Attack Graph](docs/screenshots/attackgraph.png)
 
 ### Hosts
 ![Hosts](docs/screenshots/04_hosts.png)
@@ -60,13 +102,25 @@ Self-hosted red team workspace for tracking engagements end-to-end — hosts, cr
 
 ---
 
-## Quick Start
+## The operational loop
+
+```
+Reconnaissance  →  Collections  →  Operations  →  Results
+     ↑                                               ↓
+  Report    ←    Intelligence   ←   Graph State  ←──┘
+```
+
+Every layer feeds the next. Data is not entered twice.
+
+---
+
+## Quick start
 
 **Requirements:** Docker, Docker Compose
 
 ```bash
 # 1. Configure
-cp .env.example .env   # set JWT_SECRET, DB_PASSWORD, ADMIN_PASSWORD
+cp .env.example .env        # set JWT_SECRET, DB_PASSWORD, ADMIN_PASSWORD
 
 # 2. Build and start
 docker compose up -d --build
@@ -75,7 +129,7 @@ docker compose up -d --build
 open http://localhost:3000
 ```
 
-Default credentials (if `ADMIN_PASSWORD` is not set, backend prints the generated password to logs on first start):
+Default credentials (printed to backend logs on first start if `ADMIN_PASSWORD` is not set):
 
 ```
 admin / admin
@@ -83,7 +137,7 @@ admin / admin
 
 ---
 
-## Environment Variables
+## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -100,20 +154,22 @@ admin / admin
 ## Architecture
 
 ```
-nginx ──► frontend  (React + Vite, static build)
-     ──► backend   (FastAPI + SQLAlchemy + asyncio worker pool)
+nginx ──► frontend   (React + Vite, static build)
+     ──► backend    (FastAPI + SQLAlchemy + asyncio worker pool)
                 └──► PostgreSQL 16
 ```
 
 - **Auth:** JWT bearer tokens, role-based (`admin` / `member`)
 - **Realtime:** WebSocket per-project — presence and live entity sync
-- **Workers:** bounded async job pool with startup recovery (interrupted jobs → failed, queued → re-submit)
+- **Workers:** bounded async job pool (5 workers), true cancellation via `CancellationToken` + subprocess kill
 - **Storage:** uploaded files in `data/uploads/`, database in `data/postgres/`
+- **Execution:** attacker SSH connector or global target; SSH commands run via `Popen` with cancellation watcher thread
 
 ---
 
-## Security Notes
+## Security
 
 - Change `JWT_SECRET` and `DB_PASSWORD` before any non-local deployment
 - Designed for internal trusted networks — no public internet exposure assumed
-- All file downloads require a valid auth token (passed as `?token=` or `Authorization` header)
+- All file downloads require a valid auth token (`?token=` or `Authorization` header)
+- Credentials encrypted at rest

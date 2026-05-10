@@ -16,6 +16,7 @@ import AdminView from './views/AdminView.jsx';
 import FindingsView from './views/FindingsView.jsx';
 import ObjectivesView from './views/ObjectivesView.jsx';
 import AttackPathView from './views/AttackPathView.jsx';
+import AttackGraphView from './views/AttackGraphView.jsx';
 import LootView from './views/LootView.jsx';
 import ScopeView from './views/ScopeView.jsx';
 import SearchModal from './components/SearchModal.jsx';
@@ -558,7 +559,7 @@ export default function App() {
     loot:       loots.filter(l => l.pid === selectedProject).length,
     scope:      scopes.filter(s => s.pid === selectedProject).length,
     jobs:     jobs.filter(j => j.pid === selectedProject && (j.status === 'running' || j.status === 'queued')).length,
-    network: 0, projects: 0, report: 0, checklist: 0, timeline: 0, cheatsheet: 0, scans: 0,
+    network: 0, attackgraph: 0, projects: 0, report: 0, checklist: 0, timeline: 0, cheatsheet: 0, scans: 0,
   };
 
   const selectedProjectHosts = useMemo(
@@ -823,6 +824,14 @@ export default function App() {
             onCreateStep={addAttackStep}
             onUpdateStep={updateAttackStep}
             onDeleteStep={deleteAttackStep}
+            selectedProject={selectedProject}
+            accent={acc}
+            hosts={hosts}
+          />
+        )}
+        {tab === 'attackgraph' && selectedProject && (
+          <AttackGraphView
+            key={selectedProject}
             selectedProject={selectedProject}
             accent={acc}
           />

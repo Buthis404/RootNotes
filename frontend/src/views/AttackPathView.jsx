@@ -15,14 +15,29 @@ const NODE_TYPES = {
 const EMPTY_STEP = { node_type: 'host', label: '', sublabel: '', technique: '', mitre_id: '', notes: '' };
 
 // ── Step edit modal ───────────────────────────────────────────────────
-function StepModal({ step, isNew, onSave, onClose, accent }) {
+function StepModal({ step, isNew, onSave, onClose, accent, hosts = [] }) {
   const [form, setForm] = useState(step ? { ...step } : { ...EMPTY_STEP });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
   const inp = (k, placeholder, multiline) => {
     const s = { width: '100%', background: '#07080b', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#d0d4dc', fontSize: 12, fontFamily: multiline ? 'JetBrains Mono' : 'inherit', outline: 'none', resize: multiline ? 'vertical' : 'none', boxSizing: 'border-box' };
     return multiline
       ? <textarea value={form[k]} onChange={e => set(k, e.target.value)} placeholder={placeholder} rows={3} style={s} />
       : <input value={form[k]} onChange={e => set(k, e.target.value)} placeholder={placeholder} style={s} />;
+  };
+
+  const pickHost = e => {
+    const hostId = e.target.value;
+    if (!hostId) return;
+    const host = hosts.find(h => h.id === hostId);
+    if (!host) return;
+    set('label', host.hostname || host.ip || '');
+    set('sublabel', [host.os, host.role].filter(Boolean).join(' · ') || host.ip || '');
+    // Auto-set node type based on host role/hostname
+    const hn = (host.hostname || '').toLowerCase();
+    if (host.role === 'dc' || hn.includes('dc') || hn.includes('domain')) set('node_type', 'dc');
+    else if (host.is_attacker) set('node_type', 'external');
+    else set('node_type', 'host');
   };
 
   return (
@@ -39,6 +54,27 @@ function StepModal({ step, isNew, onSave, onClose, accent }) {
         </div>
 
         <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Host picker */}
+          {hosts.length > 0 && (
+            <div>
+              <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>
+                Link to host <span style={{ color: '#353840', textTransform: 'none', letterSpacing: 0 }}>(auto-fills label & sublabel)</span>
+              </div>
+              <select
+                defaultValue=""
+                onChange={pickHost}
+                style={{ width: '100%', background: '#07080b', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#d0d4dc', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', cursor: 'pointer' }}
+              >
+                <option value="">— pick a host to auto-fill —</option>
+                {hosts.map(h => (
+                  <option key={h.id} value={h.id}>
+                    {h.hostname || h.ip} {h.ip && h.hostname ? `(${h.ip})` : ''} {h.os ? `· ${h.os}` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Node type */}
           <div>
             <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Node type</div>
@@ -309,7 +345,7 @@ function AttackPathGraph({ steps, accent }) {
 }
 
 // ── Main view ─────────────────────────────────────────────────────────
-export default function AttackPathView({ attackPaths, attackSteps, onCreatePath, onUpdatePath, onDeletePath, onCreateStep, onUpdateStep, onDeleteStep, selectedProject, accent }) {
+export default function AttackPathView({ attackPaths, attackSteps, onCreatePath, onUpdatePath, onDeletePath, onCreateStep, onUpdateStep, onDeleteStep, selectedProject, accent, hosts = [] }) {
   const [activePath, setActivePath] = useState(null);
   const [modal, setModal] = useState(null); // null | { mode:'new'|'edit', step }
   const [viewMode, setViewMode] = useState('list'); // 'list' | 'graph'
@@ -516,6 +552,7 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
           accent={accent}
           onClose={() => setModal(null)}
           onSave={modal.mode === 'new' ? handleAddStep : handleEditStep}
+          hosts={hosts.filter(h => h.pid === selectedProject)}
         />
       )}
     </div>

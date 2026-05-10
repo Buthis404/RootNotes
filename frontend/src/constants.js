@@ -89,6 +89,7 @@ export const TABS = [
   {id:'findings',   icon:'bug',       label:'Findings'},
   {id:'objectives', icon:'flag',      label:'Objectives'},
   {id:'attackpath', icon:'attackpath',label:'Attack Path'},
+  {id:'attackgraph',icon:'network',  label:'Attack Graph'},
   {id:'loot',       icon:'loot',      label:'Loot'},
   {id:'scope',      icon:'scope',     label:'Scope'},
   {id:'checklist',  icon:'list',      label:'Checklist'},
