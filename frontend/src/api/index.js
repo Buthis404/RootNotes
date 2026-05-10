@@ -78,10 +78,14 @@ export const api = {
   deleteNetworkRegion:       (pid, regionId, networkId) => req('DELETE', `/projects/${pid}/network/regions/${regionId}?network_id=${encodeURIComponent(networkId)}`),
 
   // Findings
-  getFindings:    (pid)       => req('GET',    `/findings${pid ? `?pid=${pid}` : ''}`),
+  getFindings:    (pid, params = {}) => {
+    const qs = new URLSearchParams({ ...(pid ? { pid } : {}), ...Object.fromEntries(Object.entries(params).filter(([,v]) => v != null)) }).toString();
+    return req('GET', `/findings${qs ? `?${qs}` : ''}`);
+  },
   createFinding:  (data)      => req('POST',   '/findings',          data),
   updateFinding:  (id, data)  => req('PATCH',  `/findings/${id}`,    data),
   deleteFinding:  (id)        => req('DELETE', `/findings/${id}`),
+  scanCandidates: (pid)       => req('POST',   `/findings/scan-candidates?pid=${pid}`),
 
   // Checklist
   getChecklist:       (pid, phase) => req('GET',    `/checklist?pid=${pid}${phase ? `&phase=${phase}` : ''}`),
@@ -111,11 +115,15 @@ export const api = {
   deleteAttackStep: (id)        => req('DELETE', `/attack-steps/${id}`),
 
   // Loot
-  getLoots:    (pid)       => req('GET',    `/loots${pid ? `?pid=${pid}` : ''}`),
+  getLoots:    (pid, params = {}) => {
+    const qs = new URLSearchParams({ ...(pid ? { pid } : {}), ...Object.fromEntries(Object.entries(params).filter(([,v]) => v != null)) }).toString();
+    return req('GET', `/loots${qs ? `?${qs}` : ''}`);
+  },
   createLoot:  (data)      => req('POST',   '/loots',          data),
   updateLoot:  (id, data)  => req('PATCH',  `/loots/${id}`,    data),
   deleteLoot:  (id)        => req('DELETE', `/loots/${id}`),
   uploadLootFile: (id, file) => upload(`/loots/${id}/file`, file),
+  getJobArtifacts: (pid, jobId) => req('GET', `/projects/${pid}/jobs/${jobId}/artifacts`),
 
   // Scope
   getScopes:    (pid)      => req('GET',    `/scopes${pid ? `?pid=${pid}` : ''}`),
@@ -138,8 +146,9 @@ export const api = {
   deleteCredHostNote: (id)          => req('DELETE', `/cred-host-notes/${id}`),
 
   // Search & presence
-  search:      (q, pid) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}`),
+  search:      (q, pid, limit = 60) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}&limit=${limit}`),
   getPresence: ()        => req('GET', '/presence'),
+  getWorkerStatus: ()    => req('GET', '/worker/status'),
   listModules: ()        => req('GET', '/modules'),
   listConnectors: ()     => req('GET', '/connectors'),
 
@@ -179,6 +188,8 @@ export const api = {
   topologyApply:         (pid, data)    => req('POST', `/projects/${pid}/topology/apply`,          data),
   topologyRebuildLayout: (pid, data)    => req('POST', `/projects/${pid}/topology/rebuild-layout`, data),
   topologyAutoBuild:     (pid, data)    => req('POST', `/projects/${pid}/topology/auto-build`,     data),
+  topologySmartBuild:    (pid, data)    => req('POST', `/projects/${pid}/topology/smart-build`,    data),
+  topologyLateralPaths:  (pid, fromHostId, depth = 3) => req('GET', `/projects/${pid}/topology/lateral-paths?from_host_id=${fromHostId}&depth=${depth}`),
   getTopology:           (pid)          => req('GET',  `/projects/${pid}/topology`),
   getTopologySources:    (pid)          => req('GET',  `/projects/${pid}/topology/sources`),
 
@@ -227,16 +238,26 @@ export const api = {
   executeC2HostAction:   (pid, data)     => req('POST',   `/admin/c2/execute/${pid}`, data),
   getC2AgentTasks:       (pid, integrationId, agentId, limit = 30) => req('GET', `/admin/c2/agent-tasks/${pid}?integration_id=${encodeURIComponent(integrationId)}&agent_id=${encodeURIComponent(agentId)}&limit=${encodeURIComponent(limit)}`),
 
+  // Collections
+  listCollections:   (pid)          => req('GET',    `/projects/${pid}/collections`),
+  createCollection:  (pid, data)    => req('POST',   `/projects/${pid}/collections`,          data),
+  updateCollection:  (pid, id, data)=> req('PATCH',  `/projects/${pid}/collections/${id}`,    data),
+  deleteCollection:  (pid, id)      => req('DELETE', `/projects/${pid}/collections/${id}`),
+  resolveCollection: (pid, id)      => req('GET',    `/projects/${pid}/collections/${id}/resolve`),
+  previewCollection: (pid, filters) => req('POST',   `/projects/${pid}/collections/preview`,  filters),
+
   // Bulk actions
   bulkExec:      (pid, data)           => req('POST', `/projects/${pid}/bulk-exec`,                data),
   validateCred:  (pid, credId, data)   => req('POST', `/projects/${pid}/creds/${credId}/validate`, data),
+  getCredMatrix: (pid)                 => req('GET',  `/projects/${pid}/cred-matrix`),
 
   // Jobs
   listJobs:   (pid, params = {}) => {
     const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v]) => v != null))).toString();
     return req('GET', `/projects/${pid}/jobs${qs ? `?${qs}` : ''}`);
   },
-  getJob:     (pid, jobId) => req('GET',    `/projects/${pid}/jobs/${jobId}`),
+  getJob:          (pid, jobId) => req('GET',    `/projects/${pid}/jobs/${jobId}`),
+  streamJobOutput: (pid, jobId) => `/api/projects/${pid}/jobs/${jobId}/output-stream`,
   deleteJob:  (pid, jobId) => req('DELETE', `/projects/${pid}/jobs/${jobId}`),
   cancelJob:  (pid, jobId) => req('PATCH',  `/projects/${pid}/jobs/${jobId}/cancel`),
   rerunJob:   (pid, jobId) => req('POST',   `/projects/${pid}/jobs/${jobId}/rerun`),
@@ -297,3 +318,12 @@ export const api = {
   updateKBArticle:   (id, data)        => req('PATCH', `/kb/${id}`, data),
   deleteKBArticle:   (id)              => req('DELETE', `/kb/${id}`),
 };
+
+/** Append auth token to a /api/uploads/... download URL for use in <a href> links. */
+export function downloadUrl(url) {
+  if (!url) return url;
+  const token = getToken();
+  if (!token) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}

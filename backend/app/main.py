@@ -14,7 +14,6 @@ from pathlib import Path
 from fastapi import FastAPI, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -201,13 +200,38 @@ with engine.begin() as conn:
         )
     """))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_kb_articles_pid ON kb_articles(pid)"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS host_collections (
+            id TEXT PRIMARY KEY,
+            pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT '#4f8ef7',
+            filters_json JSONB NOT NULL DEFAULT '{}',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_host_collections_pid ON host_collections(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_hosts_pid ON hosts(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts(ip)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_creds_pid ON creds(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_notes_pid ON notes(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_notes_ts ON notes(ts DESC)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_findings_pid ON findings(pid)"))
+    conn.execute(text("ALTER TABLE findings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual'"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_findings_source ON findings(pid, source) WHERE source <> 'manual'"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_loots_pid ON loots(pid)"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS job_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS cred_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS finding_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS playbook_run_id TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS sha256 TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS artifact_type TEXT NOT NULL DEFAULT 'file'"))
+    conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}'"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_loots_job_id ON loots(job_id) WHERE job_id <> ''"))
+    conn.execute(text("ALTER TABLE host_activities ADD COLUMN IF NOT EXISTS job_id TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_host_activities_pid ON host_activities(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_host_activities_host_id ON host_activities(host_id)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_cred_host_notes_cred_id ON cred_host_notes(cred_id)"))
@@ -339,6 +363,15 @@ async def lifespan(app: FastAPI):
                 logger.info("  Password: (from ADMIN_PASSWORD env var)")
             logger.info(border)
 
+        # Migrate: encrypt any plaintext cred secrets left from before P4
+        from .core.crypto import encrypt_str as _enc
+        plaintext_creds = [c for c in db.query(models.Cred).all() if c.secret and not c.secret.startswith("__enc__:")]
+        if plaintext_creds:
+            for c in plaintext_creds:
+                c.secret = _enc(c.secret)
+            db.commit()
+            logger.info("Migrated %d plaintext credential secrets to encrypted storage", len(plaintext_creds))
+
         # Backfill: make admin user owner of all projects without owners
         admin_users = db.query(models.User).filter(models.User.role == "admin", models.User.active == True).all()
         if admin_users:
@@ -376,12 +409,26 @@ async def lifespan(app: FastAPI):
 
     init_plugins(app)
 
+    # Start worker pool + recovery
+    from .core.worker_pool import get_pool, startup_recovery
+    pool = get_pool()
+    await pool.start()
+    recovery_db = SessionLocal()
+    try:
+        recovered = await startup_recovery(recovery_db)
+        if recovered:
+            import logging
+            logging.getLogger(__name__).info("Recovered %d queued jobs on startup", recovered)
+    finally:
+        recovery_db.close()
+
     # Start background tasks
     task_c2 = asyncio.create_task(_c2_auto_sync_loop())
     task_scheduler = asyncio.create_task(_scheduled_playbooks_loop())
     yield
     task_c2.cancel()
     task_scheduler.cancel()
+    await pool.stop()
     for t in (task_c2, task_scheduler):
         try:
             await t
@@ -391,7 +438,8 @@ async def lifespan(app: FastAPI):
 
 # ── FastAPI app ───────────────────────────────────────────────────────
 app = FastAPI(title="RootNotes API", lifespan=lifespan)
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
+# Authenticated file downloads — replaces the unauthenticated StaticFiles mount.
+# Token can be passed as ?token= query param for <a href> download links.
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -413,6 +461,11 @@ async def auth_middleware(request: Request, call_next):
     if not path.startswith("/api/") or path.startswith(_PUBLIC_PATHS):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
+    # SSE/EventSource can't set headers — allow token via query param for stream endpoints
+    if not auth.startswith("Bearer "):
+        qs_token = request.query_params.get("token", "")
+        if qs_token:
+            auth = f"Bearer {qs_token}"
     if not auth.startswith("Bearer "):
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
     payload = decode_token(auth[7:])
@@ -424,6 +477,54 @@ async def auth_middleware(request: Request, call_next):
     if request.state.role == "viewer" and request.method not in ("GET", "HEAD", "OPTIONS"):
         return JSONResponse({"detail": "Read-only account"}, status_code=403)
     return await call_next(request)
+
+
+# ── Authenticated file downloads ─────────────────────────────────────
+@app.get("/api/uploads/{pid}/{path:path}")
+async def download_upload(
+    pid: str,
+    path: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from fastapi.responses import FileResponse
+    from .core.access import check_pid_access
+    from .core.deps import get_current_user_from_token
+
+    token = request.headers.get("Authorization", "")
+    if not token.startswith("Bearer "):
+        qs = request.query_params.get("token", "")
+        if qs:
+            token = f"Bearer {qs}"
+    if not token.startswith("Bearer "):
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    user_payload = decode_token(token[7:])
+    if not user_payload:
+        return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+    user = db.query(models.User).filter(models.User.id == user_payload["sub"]).first()
+    if not user or not user.active:
+        return JSONResponse({"detail": "User not found"}, status_code=401)
+
+    from .core.access import check_pid_access as _check
+    try:
+        _check(db, pid, user, "notes.read")
+    except Exception:
+        return JSONResponse({"detail": "Access denied"}, status_code=403)
+
+    # Resolve safe file path
+    from .core.utils import ensure_under_upload_root
+    from pathlib import Path as _Path
+    target = UPLOAD_ROOT / pid / path
+    try:
+        safe = ensure_under_upload_root(target)
+    except Exception:
+        return JSONResponse({"detail": "Invalid path"}, status_code=400)
+
+    if not safe.exists() or not safe.is_file():
+        return JSONResponse({"detail": "File not found"}, status_code=404)
+
+    return FileResponse(str(safe), filename=safe.name)
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────
@@ -489,7 +590,7 @@ from .routers import (
     system_modules, attacker_exec, export, project_templates,
     scans, webhooks, c2, jobs, bulk_actions, playbooks, notifications,
     scheduled_playbooks, domains,
-    ai, import_scanners, attack_graph, kb,
+    ai, import_scanners, attack_graph, kb, collections,
 )
 
 app.include_router(auth.router)
@@ -531,3 +632,21 @@ app.include_router(ai.router)
 app.include_router(import_scanners.router)
 app.include_router(attack_graph.router)
 app.include_router(kb.router)
+app.include_router(collections.router)
+
+
+@app.get("/api/worker/status", tags=["worker"])
+async def worker_status(db: Session = Depends(get_db)):
+    from .core.worker_pool import get_pool
+    from . import models as _models
+    pool = get_pool()
+    queued_db = db.query(_models.Job).filter(_models.Job.status == "queued").count()
+    running_db = db.query(_models.Job).filter(_models.Job.status == "running").count()
+    return {
+        "max_workers": pool._max_workers,
+        "active": pool.active_count,
+        "active_jobs": pool.active_jobs,
+        "queue_size": pool.queue_size,
+        "queued_in_db": queued_db,
+        "running_in_db": running_db,
+    }

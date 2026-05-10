@@ -10,8 +10,9 @@ from ..core.access import check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
-from ..core.ssh_exec import run_ssh_command
+from ..core.ssh_exec import run_ssh_command, is_transport_failure as _is_transport_failure
 from ..core.utils import new_id
+from ..core.crypto import decrypt_str
 from ..database import get_db
 from ..plugins.registry import registry
 from ..plugins.state import list_attacker_targets
@@ -80,12 +81,13 @@ def _resolve_project_cred(db: Session, pid: str, host: models.Host, cred_id: str
 
 
 def _build_ssh_config_from_project(host: models.Host, cred: models.Cred, fallback: dict) -> dict:
+    secret = decrypt_str(cred.secret)
     return {
         "host": host.ip,
         "port": fallback.get("port") or 22,
         "username": cred.username,
-        "password": cred.secret if cred.type != "key" else "",
-        "private_key": cred.secret if cred.type == "key" else "",
+        "password": secret if cred.type != "key" else "",
+        "private_key": secret if cred.type == "key" else "",
         "known_hosts_policy": fallback.get("known_hosts_policy") or "accept_new",
     }
 
@@ -174,13 +176,26 @@ async def execute_attacker_command(
             used_global_target = next((target for target in global_targets if target.get("id") == body.target_id), None)
             if not used_global_target:
                 raise HTTPException(404, "Global attacker target not found for this project")
+            ssh_config = next((t for t in list_attacker_targets() if t.get("id") == used_global_target.get("id")), None)
+            if not ssh_config:
+                raise HTTPException(404, "Stored global attacker target not found")
+            # For explicit target, no fallback — wrap as single-item list below
+            _exec_ssh_candidates = [ssh_config]
         else:
-            used_global_target = global_targets[0] if global_targets else None
-        if not used_global_target:
-            raise HTTPException(400, "No global attacker target is assigned to this project")
-        ssh_config = next((target for target in list_attacker_targets() if target.get("id") == used_global_target.get("id")), None)
-        if not ssh_config:
-            raise HTTPException(404, "Stored global attacker target not found")
+            if not global_targets:
+                raise HTTPException(400, "No global attacker target is assigned to this project")
+            # All eligible global targets for transport fallback
+            all_stored = list_attacker_targets()
+            _exec_ssh_candidates = [
+                t for gt in global_targets
+                for t in all_stored
+                if t.get("id") == gt.get("id") and t.get("enabled", True)
+            ]
+            if not _exec_ssh_candidates:
+                raise HTTPException(400, "No enabled global attacker targets found")
+            ssh_config = _exec_ssh_candidates[0]
+    else:
+        _exec_ssh_candidates = [ssh_config]
 
     if attacker_host is None:
         attacker_host = _resolve_attacker_host(db, pid, body.host_id) if body.host_id else db.query(models.Host).filter(models.Host.pid == pid).order_by(models.Host.hostname, models.Host.ip).first()
@@ -217,19 +232,32 @@ async def execute_attacker_command(
                     related_entity_type="host", related_entity_id=attacker_host.id,
                     request_json=body.model_dump())
 
-    # Run SSH in thread pool to avoid blocking the event loop
+    # Run SSH with transport fallback
     loop = asyncio.get_running_loop()
-    try:
-        _config = dict(ssh_config)
-        _cmd = body.command
-        _timeout = body.timeout_seconds
-        result = await loop.run_in_executor(None, lambda: run_ssh_command(_config, _cmd, _timeout))
-    except ValueError as e:
+    result = None
+    _cmd = body.command
+    _timeout = body.timeout_seconds
+    for _cfg_idx, _cfg in enumerate(_exec_ssh_candidates):
+        try:
+            _config = dict(_cfg)
+            result = await loop.run_in_executor(None, lambda c=_config: run_ssh_command(c, _cmd, _timeout))
+        except ValueError as e:
+            activity.status = "failed"
+            activity.output = str(e)
+            db.commit()
+            finish_job(db, job, status="failed", error_output=str(e))
+            raise HTTPException(400, str(e))
+        if _is_transport_failure(result) and _cfg_idx + 1 < len(_exec_ssh_candidates):
+            continue  # try next target
+        break
+
+    if _is_transport_failure(result):
+        err = f"All {len(_exec_ssh_candidates)} attacker target(s) unreachable: {result.get('stderr','')[:200]}"
         activity.status = "failed"
-        activity.output = str(e)
+        activity.output = err
         db.commit()
-        finish_job(db, job, status="failed", error_output=str(e))
-        raise HTTPException(400, str(e))
+        finish_job(db, job, status="failed", error_output=err)
+        raise HTTPException(502, err)
 
     combined_output = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
 

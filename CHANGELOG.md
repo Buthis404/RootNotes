@@ -1,5 +1,67 @@
 # RootNotes — Changelog
 
+## 2026-05-09 — Smart topology build + Full-text job output search + Attacker SSH improvements
+
+### Smart topology build (`POST /topology/smart-build`)
+
+Новый endpoint вместо flat subnet-mesh строит многослойный граф:
+
+**Источники данных (в порядке приоритета):**
+1. `CredHostNote.access[]` — подтверждённые access-рёбра (ssh/winrm/smb_admin/local_admin) с `verified=true, confidence=1.0, source=cred_validation`
+2. Jobs `bulk_exec done` с `access_role` в result_json — `source=bulk_exec, verified=true`
+3. `HostActivity` с типом `exec/postex/lateral` — `source=host_activity, confidence=0.9`
+4. `host.domain` + DC-детектирование (порты 88+389, тег dc, роль domain_controller) → `domain_member` рёбра `source=auto, confidence=0.8`
+5. Subnet hub-and-spoke inference — `same_subnet/lan, source=auto, confidence=0.7-0.9`
+
+**Регионы:** из Scope CIDR-записей — автоматический bounding box по нодам в подсети
+
+**Для каждого ребра:** `type, label, source, reason, state (observed/inferred), verified, confidence, is_manual`
+
+**Стили рёбер:**
+- Access (ssh/winrm/local_admin): зелёный solid/dashed (верифицировано / нет)
+- Lateral/pivot: жёлтый анимированный
+- domain_member: фиолетовый пунктир
+- same_subnet/lan: тёмно-серый пунктир
+
+**Ноды:** обогащены `domain`, `tags`, `role` из host metadata; роль инфицируется из порт-сигнатур (domain_controller, web_server, database, jump_host, router)
+
+**Правила:** manual/observed рёбра сохраняются всегда; auto-рёбра перестраиваются при каждом вызове
+
+Кнопка **Smart Build** (зелёная) в тулбаре Network Map рядом с Auto-layout.
+
+---
+
+## 2026-05-09 — Full-text job output search + Attacker SSH improvements + Cred Matrix
+
+### Full-text search по job output
+- Новый query-param `output_search` в `GET /api/projects/{pid}/jobs` — SQL `ilike` по полям `output` и `error_output`
+- В JobsView добавлено поле **"Search in output…"** с дебаунсом 400ms и кнопкой очистки
+- При активном output_search: строки с совпадением авто-разворачиваются, бейдж показывает количество найденных job'ов
+- В развёрнутом output: совпадающие строки выделяются желтым (`<mark>`), несовпадающие затемнены (opacity 0.3), счётчик совпадающих строк сверху
+
+---
+
+## 2026-05-09 — Attacker SSH improvements + Cred Matrix
+
+### Credential × Host Access Matrix
+- Новый endpoint `GET /api/projects/{pid}/cred-matrix` — возвращает `{creds, hosts, matrix}` по данным `CredHostNote`
+- `CredMatrix.jsx` — heatmap-компонент: sticky-заголовки, вертикальный текст для хостов, tooltip с access-ролями и заметками
+- Фильтры: Все / Успешные / Проверенные; поиск по username/domain/service; stat-бейджи
+- Переключатель **⊞ Matrix** в хедере вкладки Credentials
+
+### Transport Fallback для Attacker SSH
+- `ssh_exec.py`: добавлен `is_transport_failure(result)` — детектирует недоступность хоста (exit_code 255 + stderr-паттерны)
+- `bulk_actions.py`: `_resolve_exec_ssh_configs()` возвращает список кандидатов; `bulk_exec` и `validate_cred` перебирают их при transport-ошибке
+- `attacker_exec.py`: `_exec_ssh_candidates` + fallback-цикл; HTTP 502 если все таргеты недоступны
+- Auth-ошибки и ошибки команд не вызывают fallback — только network-недоступность
+
+### Attack Path Graph — исправление направлений стрелок
+- Row-wrap рёбра теперь маршрутизируются через низ/верх нод (не через правый край)
+- Два отдельных маркера: `#arrow-h` (→, для рёбер в строке) и `#arrow-v` (↓, для межстрочных переходов)
+- Квадратичные безье (`Q`) для скруглённых углов пути
+
+---
+
 ## 2026-05-08 — Fixes
 
 ### Notifications

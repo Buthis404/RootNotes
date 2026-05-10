@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { toastError } from '../components/Toast.jsx';
 import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
+import CredMatrix from '../components/CredMatrix.jsx';
 import { Badge, CredTypeBadge, SearchBar, FieldInput, TagEditor } from '../components/UI.jsx';
 import { CRED_TYPES } from '../constants.js';
 import { getCredBadges, getCredTagMeta, normalizeDomain, domainsMatch } from '../utils/hostMeta.js';
@@ -199,7 +200,7 @@ function ValidateCredPanel({ cred, projectHosts, selectedProject, accent, onClos
       <div style={{ marginBottom: 8 }}>
         <div style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase', marginBottom: 5 }}>Service</div>
         <div style={{ display: 'flex', gap: 4 }}>
-          {[['auto', 'Auto'], ['ssh', 'SSH'], ['smb', 'SMB']].map(([v, l]) => (
+          {[['auto', 'Auto'], ['ssh', 'SSH'], ['smb', 'SMB'], ['winrm', 'WinRM'], ['mssql', 'MSSQL'], ['ldap', 'LDAP'], ['rdp', 'RDP']].map(([v, l]) => (
             <button key={v} onClick={() => setService(v)}
               style={{ background: service === v ? `${acc}22` : '#0e1016', border: `1px solid ${service === v ? acc + '66' : '#2a2d35'}`, borderRadius: 3, padding: '3px 10px', cursor: 'pointer', color: service === v ? acc : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
               {l}
@@ -298,6 +299,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
   const [selectedId, setSelectedId] = useState(null);
   const [checkedIds, setCheckedIds] = useState([]);
   const [showValidate, setShowValidate] = useState(false);
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'matrix'
   const { widths, startResize } = useColumnResize({ username: 150, type: 90, service: 90, hosts: 160, tags: 160, cracked: 70 });
   const colBorder = '1px solid #14161b';
 
@@ -462,6 +464,11 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
         <button onClick={handleExportCsv}
           style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#808590', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
           <Icon name="export" size={10} color="currentColor" /> CSV
+        </button>
+        <button onClick={() => setViewMode(v => v === 'matrix' ? 'list' : 'matrix')}
+          title="Матрица: учётные данные × хосты"
+          style={{ background: viewMode === 'matrix' ? `${accent}22` : 'transparent', border: `1px solid ${viewMode === 'matrix' ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: viewMode === 'matrix' ? accent : '#808590', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+          ⊞ Matrix
         </button>
       </div>
 
@@ -635,8 +642,15 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
         </div>
       )}
 
+      {/* Matrix view */}
+      {viewMode === 'matrix' && (
+        <div style={{ flex: 1, overflow: 'hidden', padding: '8px 18px', display: 'flex', flexDirection: 'column' }}>
+          <CredMatrix pid={selectedProject} accent={accent} />
+        </div>
+      )}
+
       {/* Table header */}
-      <div style={{ display: 'flex', alignItems: 'stretch', padding: '8px 18px', borderBottom: '1px solid #1a1c22', background: '#090b0f', flexShrink: 0 }}>
+      {viewMode === 'list' && <div style={{ display: 'flex', alignItems: 'stretch', padding: '8px 18px', borderBottom: '1px solid #1a1c22', background: '#090b0f', flexShrink: 0 }}>
         <div style={{ width: 28, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
           <input type="checkbox" checked={checkedIds.length === filtered.length && filtered.length > 0}
             onChange={e => setCheckedIds(e.target.checked ? filtered.map(c => c.id) : [])}
@@ -660,9 +674,9 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
           <span onMouseDown={(e) => startResize('cracked', e)} style={{ position: 'absolute', right: -6, top: -8, bottom: -8, width: 12, cursor: 'col-resize' }} />
         </div>
         <div style={{ width: 56 }} />
-      </div>
+      </div>}
 
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      {viewMode === 'list' && <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Rows */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {filtered.length === 0 && <div style={{ padding: 32, textAlign: 'center', color: '#404550', fontSize: 12 }}>No credentials</div>}
@@ -913,7 +927,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
             </div>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }

@@ -213,6 +213,8 @@ function AttackPathGraph({ steps, accent }) {
   const svgW = Math.min(sorted.length, COLS) * (NODE_W + GAP_X) + 40;
   const svgH = totalRows * (NODE_H + GAP_Y) + 40;
 
+  const R = 8; // corner radius for row-wrap paths
+
   const edges = sorted.slice(0, -1).map((_, i) => {
     const from = positions[i];
     const to = positions[i + 1];
@@ -220,17 +222,30 @@ function AttackPathGraph({ steps, accent }) {
     const toRow = Math.floor((i + 1) / COLS);
 
     if (fromRow === toRow) {
+      // Same row: exit right side → enter left side of next node
       return {
         d: `M ${from.x + NODE_W} ${from.y + NODE_H / 2} L ${to.x} ${to.y + NODE_H / 2}`,
-        key: i,
+        key: i, isWrap: false,
       };
     } else {
-      const midX = from.x + NODE_W + GAP_X / 2;
-      const midY = from.y + NODE_H / 2;
-      const nextY = to.y + NODE_H / 2;
+      // Row wrap: exit bottom-center of from-node → drop to mid-gap →
+      //           horizontal to above to-node → enter top-center of to-node
+      const fromBX = from.x + NODE_W / 2;
+      const fromBY = from.y + NODE_H;
+      const midY   = from.y + NODE_H + GAP_Y / 2;
+      const toBX   = to.x + NODE_W / 2;
+      const toBY   = to.y;
+      // Rounded corners via quadratic bezier at each bend
       return {
-        d: `M ${from.x + NODE_W} ${midY} L ${midX} ${midY} L ${midX} ${nextY} L ${to.x} ${nextY}`,
-        key: i,
+        d: [
+          `M ${fromBX} ${fromBY}`,
+          `L ${fromBX} ${midY - R}`,
+          `Q ${fromBX} ${midY} ${fromBX - R} ${midY}`,
+          `L ${toBX + R} ${midY}`,
+          `Q ${toBX} ${midY} ${toBX} ${midY + R}`,
+          `L ${toBX} ${toBY}`,
+        ].join(' '),
+        key: i, isWrap: true,
       };
     }
   });
@@ -239,13 +254,17 @@ function AttackPathGraph({ steps, accent }) {
     <div style={{ overflowX: 'auto', overflowY: 'auto', padding: 16 }}>
       <svg width={svgW} height={svgH} style={{ display: 'block' }}>
         <defs>
-          <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <marker id="arrow-h" markerWidth="8" markerHeight="8" refX="8" refY="3" orient="auto">
             <path d="M0,0 L0,6 L8,3 z" fill="#404550" />
+          </marker>
+          <marker id="arrow-v" markerWidth="8" markerHeight="8" refX="3" refY="8" orient="auto">
+            <path d="M0,0 L6,0 L3,8 z" fill="#404550" />
           </marker>
         </defs>
 
         {edges.map(e => (
-          <path key={e.key} d={e.d} stroke="#2a2d35" strokeWidth="1.5" fill="none" markerEnd="url(#arrow)" />
+          <path key={e.key} d={e.d} stroke="#2a2d35" strokeWidth="1.5" fill="none"
+            markerEnd={e.isWrap ? "url(#arrow-v)" : "url(#arrow-h)"} />
         ))}
 
         {sorted.map((step, i) => {

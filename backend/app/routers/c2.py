@@ -1177,6 +1177,31 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
             ))
             created_creds += 1
 
+    # ── Record C2 session as HostActivity so smart-build picks it up ─
+    for hobj in host_objects:
+        try:
+            existing_act = db.query(models.HostActivity).filter(
+                models.HostActivity.pid == pid,
+                models.HostActivity.host_id == hobj.id,
+                models.HostActivity.activity_type == "c2",
+            ).first()
+            if existing_act:
+                existing_act.ts = ts
+                existing_act.summary = f"Active {source} session (synced {ts})"
+            else:
+                db.add(models.HostActivity(
+                    id=new_id("ha"),
+                    pid=pid,
+                    host_id=hobj.id,
+                    title=f"C2 session [{cfg['name']}]",
+                    activity_type="c2",
+                    summary=f"Active {source} session (synced {ts})",
+                    status="done",
+                    ts=ts,
+                ))
+        except Exception:
+            pass
+
     log_event(
         db, pid, None, "c2", "sync",
         f"C2 sync [{cfg['name']}]: {created_hosts} new hosts, {updated_hosts} updated, {created_creds} creds",
@@ -1382,7 +1407,7 @@ async def get_host_actions(
                 "source": "rootnotes",
                 "integration_id": "",
                 "username": cred.username,
-                "secret": cred.secret,
+                "secret": decrypt_str(cred.secret),
                 "domain": cred.domain,
                 "host": cred.host,
                 "type": cred.type,
@@ -1433,7 +1458,7 @@ async def execute_host_action(
                     "id": cred.id,
                     "source": "rootnotes",
                     "username": cred.username,
-                    "secret": cred.secret,
+                    "secret": decrypt_str(cred.secret),
                     "domain": cred.domain,
                     "host": cred.host,
                     "type": cred.type,

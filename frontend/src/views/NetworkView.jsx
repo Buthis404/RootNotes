@@ -52,6 +52,85 @@ const CommitFieldInput = memo(function CommitFieldInput({ label, value, onCommit
   );
 });
 
+function LateralPathsPanel({ hostId, projectId, accent }) {
+  const [paths, setPaths] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [depth, setDepth] = useState(3);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.topologyLateralPaths(projectId, hostId, depth);
+      setPaths(data);
+    } catch (e) {
+      setError(e?.message || 'Failed to load paths');
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId, hostId, depth]);
+
+  useEffect(() => {
+    setPaths(null);
+    setError(null);
+  }, [hostId]);
+
+  const CONF_COLOR = { high: '#39d353', medium: '#f09a3a', low: '#cc2233' };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Depth</span>
+        {[2, 3, 4].map(d => (
+          <button key={d} onClick={() => setDepth(d)} style={{ background: depth === d ? accent + '22' : 'none', border: `1px solid ${depth === d ? accent : '#2a2d35'}`, borderRadius: 3, padding: '2px 7px', cursor: 'pointer', color: depth === d ? accent : '#505560', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{d}</button>
+        ))}
+        <button onClick={load} disabled={loading} style={{ marginLeft: 'auto', background: accent, border: 'none', borderRadius: 4, padding: '5px 10px', cursor: loading ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: loading ? 0.6 : 1 }}>
+          {loading ? 'Scanning…' : 'Find paths'}
+        </button>
+      </div>
+
+      {error && <div style={{ fontSize: 10, color: '#cc2233', marginBottom: 8 }}>{error}</div>}
+
+      {paths && (
+        <>
+          {paths.paths.length === 0 && (
+            <div style={{ fontSize: 10, color: '#404550' }}>No lateral paths found from this host (depth {depth}).</div>
+          )}
+          {paths.unreachable_count > 0 && (
+            <div style={{ fontSize: 9, color: '#505560', marginBottom: 8 }}>{paths.unreachable_count} node(s) unreachable</div>
+          )}
+          {paths.paths.map((p, i) => (
+            <div key={i} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 10px', marginBottom: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                <span style={{ fontSize: 11, color: '#e0e4ec', fontFamily: 'Space Grotesk', fontWeight: 600, flex: 1 }}>{p.target_label}</span>
+                {p.verified && <span style={{ fontSize: 8, color: '#39d353', background: '#39d35318', border: '1px solid #39d35344', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>VERIFIED</span>}
+                <span style={{ fontSize: 8, color: CONF_COLOR[p.confidence] || '#808590', background: (CONF_COLOR[p.confidence] || '#808590') + '18', border: `1px solid ${(CONF_COLOR[p.confidence] || '#808590')}44`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono', textTransform: 'uppercase' }}>{p.confidence}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: p.techniques?.length ? 5 : 0 }}>
+                <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>dist {p.distance}</span>
+                {p.target_role && <span style={{ fontSize: 9, color: '#808590', fontFamily: 'JetBrains Mono' }}>{p.target_role}</span>}
+                {p.target_zone && <span style={{ fontSize: 8, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af044', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{p.target_zone}</span>}
+              </div>
+              {p.techniques?.length > 0 && (
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {p.techniques.map((t, ti) => (
+                    <span key={ti} style={{ fontSize: 8, color: accent, background: accent + '18', border: `1px solid ${accent}44`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{t}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+
+      {!paths && !loading && (
+        <div style={{ fontSize: 10, color: '#404550' }}>Click "Find paths" to run BFS through the access graph from this host.</div>
+      )}
+    </div>
+  );
+}
+
 function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, deleteEdge, onClose, onAddActivity, onUpdateActivity, onDeleteActivity }) {
   const [activeTab, setActiveTab] = useState('details');
   const [creds, setCreds] = useState(null);
@@ -320,17 +399,19 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
             {!credsLoading && nodeCreds.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No linked credentials</div>}
             {hostObj ? nodeCreds.map(c => <div key={c.id} style={{ marginBottom: 6 }}><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>{getCredBadges(c).slice(0, 5).map(b => <Badge key={`${c.id}-${b.label}`} label={b.label} color={b.color} />)}</div><CredPanel cred={c} host={hostObj} accent={accent} pid={projectId} linkType={c._linkType} /></div>) : null}
           </div>}
+          {activeTab === 'paths' && hostObj && <LateralPathsPanel hostId={hostObj.id} projectId={projectId} accent={accent} />}
         </>}
       </div>
     </div>
   );
 }
 
-function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData }) {
+function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData, accessOverlay, overlayMode }) {
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [connecting, setConnecting] = useState(null);
-  const [showOverlay, setShowOverlay] = useState(false);
+  // overlayData presence drives visibility — no separate toggle needed
+  const showOverlay = !!overlayData && overlayMode !== 'none';
   const [pan, setPan] = useState({ x: 40, y: 40 });
   const [zoom, setZoom] = useState(1);
   const [draggingNode, setDraggingNode] = useState(null);
@@ -1031,8 +1112,35 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     setShowAddFromProject(false);
   };
 
-  const edgeStyle = (s) => ({ exploit: { stroke: '#cc2233', sw: 2, dash: '6 3', anim: true }, lateral: { stroke: '#e8cc42', sw: 1.5, dash: '4 4', anim: true }, tunnel: { stroke: '#5b8af5', sw: 2, dash: '8 4', anim: true }, normal: { stroke: '#39d353', sw: 1.5, dash: '4 6', anim: false } }[s] || { stroke: '#39d353', sw: 1.5, dash: '4 6', anim: false });
-  const markerFor = (s) => ({ exploit: 'url(#me)', lateral: 'url(#ml)', tunnel: 'url(#mt)', normal: 'url(#mgreen)' }[s] || 'url(#mgreen)');
+  const edgeStyle = (edge) => {
+    const s = typeof edge === 'string' ? edge : (edge?.style || '');
+    const t = typeof edge === 'string' ? '' : (edge?.type || '');
+    const verified = typeof edge === 'object' ? edge?.verified : false;
+    // Access edges — green solid (verified) or green dashed (unverified)
+    if (['ssh', 'winrm', 'smb_admin', 'local_admin', 'shell', 'c2_session'].includes(t)) {
+      return verified
+        ? { stroke: '#39d353', sw: 2, dash: 'none', anim: false }
+        : { stroke: '#39d35388', sw: 1.5, dash: '6 3', anim: false };
+    }
+    if (t === 'lateral' || t === 'pivot') return { stroke: '#e8cc42', sw: 1.5, dash: '4 4', anim: true };
+    if (t === 'domain_member') return { stroke: '#8f7af5', sw: 1.5, dash: '8 4', anim: false };
+    if (t === 'auth_path' || t === 'trust') return { stroke: '#c07af0', sw: 1.5, dash: '6 3', anim: false };
+    if (t === 'same_subnet' || t === 'lan') return { stroke: '#2a3548', sw: 1, dash: '6 6', anim: false };
+    if (t === 'routed') return { stroke: '#1e4060', sw: 1, dash: '4 8', anim: false };
+    // Legacy style string
+    const byStyle = { exploit: { stroke: '#cc2233', sw: 2, dash: '6 3', anim: true }, lateral: { stroke: '#e8cc42', sw: 1.5, dash: '4 4', anim: true }, tunnel: { stroke: '#5b8af5', sw: 2, dash: '8 4', anim: true }, normal: { stroke: '#39d353', sw: 1.5, dash: '4 6', anim: false } };
+    return byStyle[s] || { stroke: '#39d353', sw: 1.5, dash: '4 6', anim: false };
+  };
+  const markerFor = (edge) => {
+    const s = typeof edge === 'string' ? edge : (edge?.style || '');
+    const t = typeof edge === 'string' ? '' : (edge?.type || '');
+    if (s === 'exploit') return 'url(#me)';
+    if (s === 'lateral' || t === 'lateral' || t === 'pivot') return 'url(#ml)';
+    if (s === 'tunnel') return 'url(#mt)';
+    if (t === 'domain_member' || t === 'auth_path' || t === 'trust') return 'url(#mp)';
+    if (t === 'same_subnet' || t === 'lan' || t === 'routed') return 'url(#mgray)';
+    return 'url(#mgreen)';
+  };
   const canUndo = historyState.past.length > 0;
   const canRedo = historyState.future.length > 0;
 
@@ -1069,7 +1177,6 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
         <div style={{ width: 1, height: 16, background: '#2a2d35' }} />
         {unplaced.length > 0 && <button onClick={() => setShowAddFromProject(v => !v)} style={{ background: 'none', border: `1px solid ${accent}66`, borderRadius: 4, padding: '4px 10px', color: accent, cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>+ from project ({unplaced.length})</button>}
         <button onClick={() => setShowAttackAnalyzer(true)} style={{ background: 'none', border: '1px solid #cc223366', borderRadius: 4, padding: '4px 10px', color: '#cc2233', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>⚡ Attack paths</button>
-        {overlayData && <button onClick={() => setShowOverlay(v => !v)} style={{ background: showOverlay ? '#f09a3a22' : 'none', border: `1px solid ${showOverlay ? '#f09a3a88' : '#2a2d3566'}`, borderRadius: 4, padding: '4px 10px', color: showOverlay ? '#f09a3a' : '#606570', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }} title="Toggle threat overlay">🔍 Overlay</button>}
         <button onClick={addRegion} style={{ background: 'none', border: `1px solid ${accentGreen}66`, borderRadius: 4, padding: '4px 10px', color: accentGreen, cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Region</button>
         <button onClick={() => setShowCreateNode(v => !v)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '4px 10px', color: '#fff', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Node</button>
         {selectedNodeIds.length > 0 && <><button onClick={() => setConnecting(selectedNodeIds[0])} title={selectedNodeIds.length > 1 ? `Create edges from ${selectedNodeIds.length} nodes` : 'Create edge'} style={{ background: connecting ? `${accentGreen}22` : 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: connecting ? accentGreen : '#606570', cursor: 'pointer' }}><Icon name="link" size={12} color="currentColor" />{selectedNodeIds.length > 1 && <span style={{ fontSize: 9, marginLeft: 4, fontFamily: 'JetBrains Mono' }}>×{selectedNodeIds.length}</span>}</button><button onClick={deleteSelected} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#cc2233', cursor: 'pointer' }}><Icon name="trash" size={12} color="currentColor" /></button></>}
@@ -1101,7 +1208,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             <defs>
               <pattern id="sg" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#ffffff05" strokeWidth="1" /></pattern>
               <pattern id="lg" width="100" height="100" patternUnits="userSpaceOnUse"><path d="M 100 0 L 0 0 0 100" fill="none" stroke="#ffffff09" strokeWidth="1" /></pattern>
-              {[['mgreen', '#39d353'], ['me', '#cc2233'], ['ml', '#e8cc42'], ['mt', '#5b8af5']].map(([id, c]) => <marker key={id} id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill={c} /></marker>)}
+              {[['mgreen', '#39d353'], ['me', '#cc2233'], ['ml', '#e8cc42'], ['mt', '#5b8af5'], ['mp', '#8f7af5'], ['mgray', '#2a3548']].map(([id, c]) => <marker key={id} id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill={c} /></marker>)}
             </defs>
             <g ref={canvasGroupRef} transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
               <rect x="-50000" y="-50000" width="100000" height="100000" fill="url(#sg)" style={{ pointerEvents: 'none' }} />
@@ -1123,12 +1230,16 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
               </g>)}
               {visibleEdges.map(edge => {
                 const fn = nodeById.get(edge.from); const tn = nodeById.get(edge.to); if (!fn || !tn) return null;
-                const ep = edgeStyle(edge.style);
+                const ep = edgeStyle(edge);
                 const mx = (fn.x + tn.x) / 2;
                 const my = (fn.y + tn.y) / 2;
                 const edgeLabel = String(edge.label || '').trim();
-                const edgeDimmed = attackPathSet ? !attackPathSet.edges.has(edge.id) : false;
-                return <g key={edge.id} style={{ opacity: edgeDimmed ? 0.08 : 1, transition: 'opacity .2s' }}><line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke={ep.stroke} strokeWidth={ep.sw} strokeDasharray={animateLinks ? (ep.dash === 'none' ? undefined : ep.dash) : undefined} markerEnd={markerFor(edge.style)} opacity=".9" style={animateEdges && ep.anim ? { animation: 'dash 1.5s linear infinite' } : undefined} />{edgeLabel && !simplifiedNodes && <><rect x={mx - edgeLabel.length * 3 - 4} y={my - 8} width={edgeLabel.length * 6 + 8} height={14} rx="3" fill="#0e1016" stroke={ep.stroke} strokeWidth="0.5" opacity=".95" /><text x={mx} y={my + 3} textAnchor="middle" fontSize="9" fill={ep.stroke} fontFamily="JetBrains Mono">{edgeLabel}</text></>}<line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke="transparent" strokeWidth={14} style={{ cursor: 'default' }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setEdgeMenu({ x: e.clientX, y: e.clientY, edgeId: edge.id }); }} /></g>;
+                const _ACCESS_EDGE_TYPES = new Set(['ssh','winrm','smb_admin','local_admin','shell','c2_session','lateral','pivot','auth_path']);
+                const isAccessEdge = _ACCESS_EDGE_TYPES.has(edge.type || '');
+                const edgeDimmed = attackPathSet
+                  ? !attackPathSet.edges.has(edge.id)
+                  : (accessOverlay && !isAccessEdge);
+                return <g key={edge.id} style={{ opacity: edgeDimmed ? 0.06 : 1, transition: 'opacity .2s' }}><line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke={ep.stroke} strokeWidth={ep.sw} strokeDasharray={animateLinks ? (ep.dash === 'none' ? undefined : ep.dash) : undefined} markerEnd={markerFor(edge)} opacity=".9" style={animateEdges && ep.anim ? { animation: 'dash 1.5s linear infinite' } : undefined} />{edgeLabel && !simplifiedNodes && <><rect x={mx - edgeLabel.length * 3 - 4} y={my - 8} width={edgeLabel.length * 6 + 8} height={14} rx="3" fill="#0e1016" stroke={ep.stroke} strokeWidth="0.5" opacity=".95" /><text x={mx} y={my + 3} textAnchor="middle" fontSize="9" fill={ep.stroke} fontFamily="JetBrains Mono">{edgeLabel}</text></>}<line x1={fn.x} y1={fn.y} x2={tn.x} y2={tn.y} stroke="transparent" strokeWidth={14} style={{ cursor: 'default' }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setEdgeMenu({ x: e.clientX, y: e.clientY, edgeId: edge.id }); }} /></g>;
               })}
               {visibleNodes.map(node => {
                 const sc = NODE_STATUS[node.status]?.color || '#404550';
@@ -1152,18 +1263,33 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                   ))}
                   {!simplifiedNodes && (() => {
                     const roleBadges = roleBadgesByNodeId.get(node.id) || [];
-                    if (!roleBadges.length) return null;
                     const ipCount = displayIps.length;
-                    const badgeY = 64 + ipCount * 9 + 4;
+                    let badgeY = 64 + ipCount * 9 + 4;
                     const bw = 20, gap = 2;
-                    const totalW = roleBadges.length * (bw + gap) - gap;
-                    const startX = 20 - totalW / 2;
-                    return roleBadges.map((r, i) => (
-                      <g key={r.id} transform={`translate(${startX + i * (bw + gap)},${badgeY})`}>
-                        <rect x="0" y="0" width={bw} height="10" rx="2.5" fill={r.color + '22'} stroke={r.color + '66'} strokeWidth=".8"/>
-                        <text x={bw / 2} y="7.5" textAnchor="middle" fontSize="6" fill={r.color} fontFamily="JetBrains Mono" fontWeight="600">{r.short}</text>
-                      </g>
-                    ));
+                    const roleElems = roleBadges.length ? (() => {
+                      const totalW = roleBadges.length * (bw + gap) - gap;
+                      const startX = 20 - totalW / 2;
+                      return roleBadges.map((r, i) => (
+                        <g key={r.id} transform={`translate(${startX + i * (bw + gap)},${badgeY})`}>
+                          <rect x="0" y="0" width={bw} height="10" rx="2.5" fill={r.color + '22'} stroke={r.color + '66'} strokeWidth=".8"/>
+                          <text x={bw / 2} y="7.5" textAnchor="middle" fontSize="6" fill={r.color} fontFamily="JetBrains Mono" fontWeight="600">{r.short}</text>
+                        </g>
+                      ));
+                    })() : null;
+                    if (roleBadges.length) badgeY += 13;
+                    const ZONE_COLORS = { internal: '#5b8af5', dmz: '#f09a3a', external: '#cc2233', management: '#c07af0' };
+                    const zoneElem = node.zone_type && node.zone_type !== 'scope' ? (() => {
+                      const zc = ZONE_COLORS[node.zone_type] || '#606570';
+                      const zLabel = node.zone_type.toUpperCase().slice(0, 4);
+                      return (
+                        <g transform={`translate(${20 - 12},${badgeY})`}>
+                          <rect x="0" y="0" width="24" height="10" rx="2.5" fill={zc + '22'} stroke={zc + '55'} strokeWidth=".8"/>
+                          <text x="12" y="7.5" textAnchor="middle" fontSize="6" fill={zc} fontFamily="JetBrains Mono" fontWeight="700">{zLabel}</text>
+                        </g>
+                      );
+                    })() : null;
+                    if (!roleElems && !zoneElem) return null;
+                    return <>{roleElems}{zoneElem}</>;
                   })()}
                 </g>;
               })}
@@ -1268,7 +1394,11 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [nameVal, setNameVal] = useState('');
   const [showTopologyBuilder, setShowTopologyBuilder] = useState(false);
   const [autoBuilding, setAutoBuilding] = useState(false);
+  const [smartBuilding, setSmartBuilding] = useState(false);
   const [topologyEnabled, setTopologyEnabled] = useState(true);
+  const [accessOverlay, setAccessOverlay] = useState(false);
+  const [overlayMode, setOverlayMode] = useState('none'); // 'none'|'threats'|'sessions'|'access'|'roles'
+  const [allActivities, setAllActivities] = useState([]);
 
   useEffect(() => {
     if (networks.length > 0) {
@@ -1293,8 +1423,29 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const activeNet = networks.find(n => n.id === activeNetId);
   const projectHosts = hosts;
 
+  // Lazy-load activities for session overlay
+  useEffect(() => {
+    if (overlayMode !== 'sessions' || !projectId) return;
+    if (allActivities.length > 0) return;
+    api.getHostActivities(projectId).then(data => setAllActivities(data || [])).catch(() => {});
+  }, [overlayMode, projectId]);
+
+  const ROLE_COLORS = {
+    domain_controller: '#e8574a',
+    server: '#f09a3a',
+    file_server: '#f09a3a',
+    database: '#c07af0',
+    workstation: '#5b8af5',
+    laptop: '#5b8af5',
+    network: '#6fc8f0',
+    printer: '#a0a8b8',
+    other: '#606570',
+  };
+
   // Compute overlay map: host_id|ip → { color, label, priority }
   const overlayData = useMemo(() => {
+    if (overlayMode === 'none') return null;
+
     const map = new Map();
     const set = (key, entry) => {
       if (!key) return;
@@ -1302,40 +1453,66 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       if (!existing || entry.priority > existing.priority) map.set(key, entry);
     };
 
-    // Creds linked to hosts → green (lowest priority)
-    for (const cred of creds) {
-      for (const hid of (cred.host_ids || [])) set(hid, { color: '#39d353', label: 'Has creds', priority: 1 });
-    }
-
-    // Captured objectives on hosts
-    for (const obj of objectives) {
-      if (obj.host_id && (obj.status === 'captured' || obj.status === 'submitted')) {
-        set(obj.host_id, { color: '#f09a3a', label: 'Objective captured', priority: 3 });
+    if (overlayMode === 'threats') {
+      for (const cred of creds) {
+        for (const hid of (cred.host_ids || [])) set(hid, { color: '#39d353', label: 'Has creds', priority: 1 });
       }
-    }
-
-    // Findings (critical/high) on hosts
-    for (const f of findings) {
-      if (f.host_id) {
+      for (const obj of objectives) {
+        if (obj.host_id && (obj.status === 'captured' || obj.status === 'submitted'))
+          set(obj.host_id, { color: '#f09a3a', label: 'Objective captured', priority: 3 });
+      }
+      for (const f of findings) {
+        if (!f.host_id) continue;
         if (f.severity === 'critical') set(f.host_id, { color: '#e8574a', label: 'Critical finding', priority: 5 });
         else if (f.severity === 'high') set(f.host_id, { color: '#f09a3a', label: 'High finding', priority: 4 });
         else if (f.severity === 'medium') set(f.host_id, { color: '#e8cc42', label: 'Medium finding', priority: 2 });
       }
-    }
-
-    // Attack steps referencing hosts (by label/IP match) — mark as blue
-    for (const step of attackSteps) {
-      if (!step.label) continue;
-      for (const host of projectHosts) {
-        if (step.label === host.ip || step.label === host.hostname || step.sublabel === host.ip) {
-          set(host.id, { color: '#5b8af5', label: 'In attack path', priority: 3 });
-          break;
+      for (const step of attackSteps) {
+        if (!step.label) continue;
+        for (const host of projectHosts) {
+          if (step.label === host.ip || step.label === host.hostname || step.sublabel === host.ip) {
+            set(host.id, { color: '#5b8af5', label: 'In attack path', priority: 3 });
+            break;
+          }
         }
       }
     }
 
-    return map;
-  }, [creds, objectives, findings, attackSteps, projectHosts]);
+    if (overlayMode === 'sessions') {
+      const c2Acts = allActivities.filter(a => a.activity_type === 'c2');
+      for (const act of c2Acts) {
+        set(act.host_id, { color: '#39d353', label: 'C2 session', priority: 5 });
+      }
+      // Also mark hosts with shell activities
+      for (const act of allActivities) {
+        if (act.activity_type === 'shell' || act.activity_type === 'exec')
+          set(act.host_id, { color: '#6fc8f0', label: 'Shell activity', priority: 3 });
+      }
+    }
+
+    if (overlayMode === 'access') {
+      for (const cred of creds) {
+        for (const hid of (cred.host_ids || [])) {
+          set(hid, { color: '#39d353', label: 'Cred valid', priority: 2 });
+        }
+      }
+      // Hosts with 'access' or 'pwned' status
+      for (const host of projectHosts) {
+        if (host.status === 'pwned') set(host.id, { color: '#e8574a', label: 'Pwned', priority: 5 });
+        else if (host.status === 'access') set(host.id, { color: '#f09a3a', label: 'Access', priority: 4 });
+      }
+    }
+
+    if (overlayMode === 'roles') {
+      for (const host of projectHosts) {
+        const color = ROLE_COLORS[host.role] || '#606570';
+        set(host.id, { color, label: host.role || 'unknown', priority: 1 });
+        if (host.ip) set(host.ip, { color, label: host.role || 'unknown', priority: 1 });
+      }
+    }
+
+    return map.size > 0 ? map : null;
+  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities]);
 
   const mappedIps = useMemo(
     () => new Set((activeNet?.nodes || []).map(n => n.ip).filter(Boolean)),
@@ -1355,6 +1532,24 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       console.error('Auto-build failed:', e);
     } finally {
       setAutoBuilding(false);
+    }
+  };
+
+  const handleSmartBuild = async () => {
+    setSmartBuilding(true);
+    try {
+      await api.topologySmartBuild(projectId, {
+        keep_manual_positions: true,
+        include_access_edges: true,
+        include_domain_edges: true,
+        include_subnet_edges: true,
+        include_regions: true,
+      });
+      await onRefreshNetworks?.();
+    } catch (e) {
+      console.error('Smart-build failed:', e);
+    } finally {
+      setSmartBuilding(false);
     }
   };
 
@@ -1390,6 +1585,52 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           </button>
         )}
 
+        {/* Smart Build — full pentest-aware topology from all data sources */}
+        {topologyEnabled && projectHosts.length > 0 && (
+          <button
+            onClick={handleSmartBuild}
+            disabled={smartBuilding}
+            title="Smart Build: topology from creds, host activities, jobs, scope CIDRs and subnet inference"
+            style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: smartBuilding ? 'default' : 'pointer', color: smartBuilding ? '#404550' : '#39d353', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: smartBuilding ? 0.6 : 1, transition: 'color .15s' }}
+          >
+            <Icon name="target" size={11} color="currentColor" />
+            {smartBuilding ? 'Building…' : 'Smart Build'}
+          </button>
+        )}
+
+        {/* Access Graph Overlay — dim non-access edges */}
+        {topologyEnabled && (activeNet?.edges?.length ?? (activeNet?.edges_json?.length ?? 0)) > 0 && (
+          <button
+            onClick={() => setAccessOverlay(v => !v)}
+            title="Access Graph: show only access edges (ssh, winrm, c2_session, lateral…)"
+            style={{ background: accessOverlay ? '#39d35312' : 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: accessOverlay ? '#39d353' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s' }}
+          >
+            <Icon name="link" size={11} color="currentColor" />
+            Access Graph
+          </button>
+        )}
+
+        {/* Node overlay mode selector */}
+        {topologyEnabled && (() => {
+          const modes = [
+            { key: 'none',     label: 'No overlay',  color: '#404550' },
+            { key: 'threats',  label: '⚑ Threats',   color: '#e8574a' },
+            { key: 'sessions', label: '⊙ Sessions',  color: '#39d353' },
+            { key: 'access',   label: '✓ Access',    color: '#f09a3a' },
+            { key: 'roles',    label: '◈ Roles',     color: '#6fc8f0' },
+          ];
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', borderLeft: '1px solid #1a1c22' }}>
+              {modes.map(m => (
+                <button key={m.key} onClick={() => setOverlayMode(m.key)}
+                  title={`Overlay: ${m.label}`}
+                  style={{ background: overlayMode === m.key ? m.color + '18' : 'transparent', border: 'none', padding: '9px 11px', cursor: 'pointer', color: overlayMode === m.key ? m.color : '#404550', fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', borderRight: '1px solid #1a1c2244' }}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
         {topologyEnabled && <button onClick={() => setShowTopologyBuilder(true)} title="Build topology from scan" style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#5b8af5', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="target" size={11} color="currentColor" /> Topology</button>}
       </div>
 
@@ -1421,7 +1662,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       )}
 
       {activeNet
-        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} />
+        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} accessOverlay={accessOverlay} overlayMode={overlayMode} />
         : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 14, color: '#303540' }}>
             <Icon name="network" size={40} color="#2a2d35" />

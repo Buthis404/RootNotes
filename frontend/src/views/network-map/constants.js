@@ -51,4 +51,4 @@ export const ROLE_SHORT = {
 };
 
 export const EMPTY_ACTIVITY = { title: '', activity_type: 'recon', command: '', summary: '', output: '', status: 'done' };
-export const INSPECTOR_TABS = ['details', 'activity', 'credentials'];
+export const INSPECTOR_TABS = ['details', 'activity', 'credentials', 'paths'];

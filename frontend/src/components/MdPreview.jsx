@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js/lib/core';
+import { downloadUrl } from '../api.js';
 
 // Languages for syntax highlighting
 import langBash from 'highlight.js/lib/languages/bash';
@@ -155,7 +156,7 @@ function FileLink({ href, children, accent }) {
   const label = typeof children === 'string' ? children : (Array.isArray(children) ? children.join('') : String(children || ext));
   return (
     <a
-      href={href} download
+      href={downloadUrl(href)} download
       style={{ display: 'inline-flex', alignItems: 'center', gap: 7, background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 6, padding: '5px 12px', color: accent || '#6fc8f0', fontSize: 11, fontFamily: 'JetBrains Mono', textDecoration: 'none', margin: '4px 0', transition: 'border-color .12s' }}
       onMouseEnter={e => e.currentTarget.style.borderColor = accent || '#6fc8f0'}
       onMouseLeave={e => e.currentTarget.style.borderColor = '#2a2d35'}
@@ -220,8 +221,8 @@ function buildComponents(accent) {
       if (VIDEO_EXT.has(ext)) return <VideoPlayer src={href}>{children}</VideoPlayer>;
       if (AUDIO_EXT.has(ext)) return <AudioPlayer src={href} />;
       if (ext === 'pdf') return <PdfEmbed src={href} text={typeof children === 'string' ? children : ''} />;
-      // Attachment file (from /uploads/...)
-      if (href && href.startsWith('/uploads/')) return <FileLink href={href} accent={accent}>{children}</FileLink>;
+      // Attachment file (from /api/uploads/... or legacy /uploads/...)
+      if (href && (href.startsWith('/api/uploads/') || href.startsWith('/uploads/'))) return <FileLink href={href} accent={accent}>{children}</FileLink>;
       // Regular link
       return (
         <a href={href} target="_blank" rel="noreferrer" style={{ color: accent, textDecoration: 'none', borderBottom: `1px solid ${accent}55`, paddingBottom: 1, transition: 'border-color .1s' }}

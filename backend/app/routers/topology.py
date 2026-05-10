@@ -10,6 +10,7 @@ Endpoints:
 """
 import ipaddress
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Optional
 
@@ -26,6 +27,23 @@ from ..core.layout import compute_layout
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
 from ..plugins.registry import registry
+
+AUTO_LINK_SUPPRESSIONS_KEY = "suppressed_auto_links"
+
+
+def _node_ref(node: dict | None) -> str:
+    if not node:
+        return ""
+    return str(node.get("host_id") or node.get("ip") or node.get("id") or "").strip()
+
+
+def _edge_ref(from_node: dict | None, to_node: dict | None) -> str:
+    left = _node_ref(from_node)
+    right = _node_ref(to_node)
+    if not left or not right:
+        return ""
+    a, b = sorted([left, right])
+    return f"{a}::{b}"
 
 router = APIRouter(prefix="/api/projects/{pid}/topology", tags=["topology"])
 
@@ -955,3 +973,592 @@ def topology_auto_build(
         raise HTTPException(404, "No network map found")
     finish_job(db, job, status="done", result=result)
     return {**result, "job_id": job.id}
+
+
+# ── Smart build ───────────────────────────────────────────────────────
+
+def _ip_in_network(ip: str, net: ipaddress.IPv4Network) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in net
+    except ValueError:
+        return False
+
+
+def _infer_node_role(h: dict) -> str:
+    """Infer a richer role from host metadata."""
+    if h.get("is_attacker") or (h.get("role") or "").lower() == "attacker":
+        return "attacker"
+    tags = {t.lower() for t in (h.get("tags") or [])}
+    role = (h.get("role") or "").lower()
+    ports = h.get("ports") or []
+    os_low = (h.get("os") or "").lower()
+
+    if role in ("domain_controller", "dc") or "dc" in tags or ("88/tcp" in ports and "389/tcp" in ports):
+        return "domain_controller"
+    if role in ("router", "firewall", "network_device") or tags & {"router", "firewall", "gateway"}:
+        return "router"
+    if role == "jump_host" or "jump" in tags:
+        return "jump_host"
+    if "445/tcp" in ports and "server" in os_low:
+        return "file_server"
+    if any(p in ports for p in ("80/tcp", "443/tcp", "8080/tcp", "8443/tcp")):
+        return "web_server"
+    if any(p in ports for p in ("1433/tcp", "3306/tcp", "5432/tcp", "1521/tcp")):
+        return "database"
+    if "windows" in os_low and "server" not in os_low:
+        return "workstation"
+    return role or "server"
+
+
+def _run_smart_build(
+    pid: str,
+    db: Session,
+    keep_manual_positions: bool = True,
+    create_missing_networks: bool = True,
+    include_access_edges: bool = True,
+    include_domain_edges: bool = True,
+    include_subnet_edges: bool = True,
+    include_regions: bool = True,
+) -> dict:
+    """
+    Pentest-aware topology build from all available project data sources.
+
+    Edge priority:
+    1. manual / observed (preserved, never removed)
+    2. cred_validation (CredHostNote with non-empty access[])
+    3. bulk_exec (Job done with access_role)
+    4. host_activity (HostActivity exec/postex/lateral done)
+    5. domain_member (host.domain + DC detection)
+    6. subnet proximity (infer_links_smart hub-and-spoke)
+    """
+    project = db.query(models.Project).filter(models.Project.id == pid).first()
+    if not project:
+        return {"ok": False, "error": "Project not found"}
+
+    all_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
+    if not all_hosts:
+        return {"ok": True, "nodes_total": 0, "nodes_added": 0, "edges_added": 0, "regions_added": 0}
+
+    network = db.query(models.Network).filter(models.Network.pid == pid).first()
+    if not network:
+        if not create_missing_networks:
+            return {"ok": False, "error": "No network map found"}
+        network = models.Network(
+            id=new_id("net"), pid=pid, name="Network",
+            background="#07080b", regions_json=[], nodes_json=[], edges_json=[], meta_json={},
+        )
+        db.add(network)
+        db.flush()
+
+    existing_nodes: list = list(network.nodes_json or [])
+    existing_edges: list = list(network.edges_json or [])
+    existing_meta: dict = deepcopy(network.meta_json or {})
+
+    # Scope CIDRs for subnet annotation and regions
+    scope_cidrs: list = []
+    scope_region_defs: list = []
+    try:
+        scopes = db.query(models.Scope).filter(models.Scope.pid == pid).all()
+        for s in scopes:
+            val = (s.value or "").strip()
+            if "/" in val:
+                try:
+                    net_obj = ipaddress.ip_network(val, strict=False)
+                    scope_cidrs.append(net_obj)
+                    scope_region_defs.append({
+                        "cidr": val, "net_obj": net_obj,
+                        "description": s.description or "",
+                        "in_scope": s.in_scope,
+                    })
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+
+    def _annotate_subnet(ip: str) -> str:
+        try:
+            addr = ipaddress.ip_address(ip)
+            matching = [n for n in scope_cidrs if addr in n]
+            if matching:
+                return str(max(matching, key=lambda n: n.prefixlen))
+        except ValueError:
+            pass
+        return _get_subnet(ip)
+
+    # Build full host metadata list for layout + link inference
+    hosts_meta = []
+    for h in all_hosts:
+        hosts_meta.append({
+            "id": h.id, "ip": h.ip, "hostname": h.hostname, "os": h.os,
+            "status": h.status, "role": h.role, "is_attacker": h.is_attacker,
+            "ports": h.ports or [], "services": h.services or [],
+            "tags": h.tags or [], "domain": h.domain or "",
+            "subnet": _annotate_subnet(h.ip or ""),
+        })
+
+    # Position nodes
+    positioned = compute_layout(hosts_meta, existing_nodes, keep_manual_positions, existing_edges)
+
+    node_by_hid = {n.get("host_id"): n for n in existing_nodes if n.get("host_id")}
+    node_by_ip = {n.get("ip"): n for n in existing_nodes if n.get("ip")}
+    nodes_added = 0
+    nodes_updated = 0
+
+    for p in positioned:
+        h_id = p.get("id", "")
+        h_ip = p.get("ip", "")
+        en = node_by_hid.get(h_id) or node_by_ip.get(h_ip)
+        if en:
+            if not (en.get("manually_positioned") and keep_manual_positions):
+                en["x"] = p["x"]
+                en["y"] = p["y"]
+                en["auto_positioned"] = True
+                en["manually_positioned"] = False
+            # Sync rich metadata into node
+            if p.get("domain") and not en.get("domain"):
+                en["domain"] = p["domain"]
+            if p.get("tags"):
+                en["tags"] = p["tags"]
+            inferred_role = _infer_node_role(p)
+            if inferred_role and inferred_role not in ("unknown", "server"):
+                en["role"] = inferred_role
+            nodes_updated += 1
+        else:
+            inferred_role = _infer_node_role(p)
+            new_node = {
+                "id": new_id("nd"), "host_id": h_id,
+                "label": p.get("hostname") or h_ip, "ip": h_ip, "ips": [],
+                "ports": p.get("ports", []), "services": p.get("services", []),
+                "subnet": p.get("subnet") or _get_subnet(h_ip),
+                "status": p.get("status", "unknown"),
+                "role": inferred_role,
+                "type": _node_type_for(p), "notes": "",
+                "is_attacker": bool(p.get("is_attacker")),
+                "domain": p.get("domain", ""),
+                "tags": p.get("tags", []),
+                "x": p["x"], "y": p["y"],
+                "manually_positioned": False, "auto_positioned": True,
+            }
+            existing_nodes.append(new_node)
+            node_by_hid[h_id] = new_node
+            node_by_ip[h_ip] = new_node
+            nodes_added += 1
+
+    # Rebuild lookup maps after new nodes added
+    ip_to_nid = {n.get("ip"): n.get("id") for n in existing_nodes if n.get("ip")}
+    hid_to_nid = {n.get("host_id"): n.get("id") for n in existing_nodes if n.get("host_id")}
+    node_by_id = {n.get("id"): n for n in existing_nodes if n.get("id")}
+
+    # Preserve manual edges; rebuild all auto edges
+    manual_edges = [
+        e for e in existing_edges
+        if e.get("source") != "auto" or e.get("is_manual") or e.get("manual_override")
+    ]
+    suppressed = set(existing_meta.get(AUTO_LINK_SUPPRESSIONS_KEY) or [])
+    manual_keys = (
+        {(e.get("from"), e.get("to")) for e in manual_edges} |
+        {(e.get("to"), e.get("from")) for e in manual_edges}
+    )
+
+    new_auto_edges = []
+    seen_keys = set(manual_keys)
+    edges_added = 0
+
+    def _add_edge(from_nid: str, to_nid: str, edge_data: dict) -> bool:
+        if not from_nid or not to_nid or from_nid == to_nid:
+            return False
+        key = (from_nid, to_nid)
+        rkey = (to_nid, from_nid)
+        if key in seen_keys or rkey in seen_keys:
+            return False
+        eref = _edge_ref(node_by_id.get(from_nid), node_by_id.get(to_nid))
+        if eref and eref in suppressed:
+            return False
+        seen_keys.add(key)
+        seen_keys.add(rkey)
+        new_auto_edges.append({"id": new_id("edg"), "from": from_nid, "to": to_nid, **edge_data})
+        return True
+
+    # Identify attacker nodes (used as edge source for access edges)
+    attacker_hids = [h.id for h in all_hosts if h.is_attacker or (h.role or "").lower() == "attacker"]
+    attacker_nids = [hid_to_nid[hid] for hid in attacker_hids if hid_to_nid.get(hid)]
+
+    # ── P1: Access edges from CredHostNote (confirmed validation) ─────
+    if include_access_edges:
+        creds_map = {c.id: c for c in db.query(models.Cred).filter(models.Cred.pid == pid).all()}
+        notes = db.query(models.CredHostNote).filter(models.CredHostNote.pid == pid).all()
+        for note in notes:
+            if not note.access:
+                continue
+            target_nid = hid_to_nid.get(note.host_id)
+            if not target_nid:
+                continue
+            cred = creds_map.get(note.cred_id)
+            cred_label = ""
+            if cred:
+                cred_label = (f"{cred.domain}\\" if cred.domain else "") + (cred.username or "")
+            roles = note.access
+            primary = roles[0]
+
+            from_nid = None
+            if attacker_nids:
+                from_nid = attacker_nids[0]
+            elif cred and cred.host_ids:
+                for hid in cred.host_ids:
+                    nid = hid_to_nid.get(hid)
+                    if nid and nid != target_nid:
+                        from_nid = nid
+                        break
+
+            if not from_nid:
+                continue
+
+            if _add_edge(from_nid, target_nid, {
+                "type": primary, "label": primary.replace("_", " "),
+                "confidence": 1.0, "source": "cred_validation",
+                "reason": f"Credential validated: {cred_label} [{', '.join(roles)}]",
+                "state": "observed", "verified": True, "is_manual": False,
+                "access_roles": roles,
+            }):
+                edges_added += 1
+
+    # ── P2: Access edges from bulk_exec Jobs ──────────────────────────
+    if include_access_edges:
+        bulk_jobs = db.query(models.Job).filter(
+            models.Job.pid == pid,
+            models.Job.type == "exec",
+            models.Job.status == "done",
+            models.Job.operation == "bulk_exec",
+        ).all()
+        for job in bulk_jobs:
+            rj = job.request_json or {}
+            res = job.result_json or {}
+            tgt_hid = job.related_entity_id
+            att_hid = rj.get("attacker_host_id")
+            role = res.get("access_role") or rj.get("access_role")
+            if not (tgt_hid and att_hid and role):
+                continue
+            from_nid = hid_to_nid.get(att_hid)
+            to_nid = hid_to_nid.get(tgt_hid)
+            if not from_nid or not to_nid:
+                continue
+            if _add_edge(from_nid, to_nid, {
+                "type": role, "label": role.replace("_", " "),
+                "confidence": 1.0, "source": "bulk_exec",
+                "reason": f"Bulk exec success: {job.title or 'exec'} via {role}",
+                "state": "observed", "verified": True, "is_manual": False,
+            }):
+                edges_added += 1
+
+    # ── P3: Host activity evidence edges (incl. C2 sessions) ─────────
+    if include_access_edges and attacker_nids:
+        _exec_types = {"exec", "postex", "lateral", "c2"}
+        _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral", "c2": "c2_session"}
+        acts = db.query(models.HostActivity).filter(
+            models.HostActivity.pid == pid,
+            models.HostActivity.status == "done",
+        ).all()
+        for act in acts:
+            if act.activity_type not in _exec_types:
+                continue
+            target_nid = hid_to_nid.get(act.host_id)
+            if not target_nid:
+                continue
+            from_nid = attacker_nids[0]
+            if from_nid == target_nid:
+                continue
+            etype = _type_map.get(act.activity_type, "shell")
+            if _add_edge(from_nid, target_nid, {
+                "type": etype, "label": etype.replace("_", " "),
+                "confidence": 0.9, "source": "host_activity",
+                "reason": f"Host activity: {act.title or act.activity_type} [{act.ts}]",
+                "state": "observed", "verified": True, "is_manual": False,
+            }):
+                edges_added += 1
+
+    # ── P4: Domain membership edges (DC → members) ───────────────────
+    if include_domain_edges:
+        def _is_dc(h: dict) -> bool:
+            r = (h.get("role") or "").lower()
+            if r in ("domain_controller", "dc"):
+                return True
+            if "dc" in {t.lower() for t in (h.get("tags") or [])}:
+                return True
+            p = h.get("ports") or []
+            return "88/tcp" in p and "389/tcp" in p
+
+        dc_by_domain: dict = {}
+        for h in hosts_meta:
+            if _is_dc(h):
+                domain = (h.get("domain") or "").lower()
+                if domain:
+                    dc_by_domain.setdefault(domain, []).append(h)
+
+        for h in hosts_meta:
+            domain = (h.get("domain") or "").lower()
+            if not domain:
+                continue
+            target_nid = hid_to_nid.get(h["id"])
+            if not target_nid:
+                continue
+            for dc_h in dc_by_domain.get(domain, []):
+                dc_nid = hid_to_nid.get(dc_h["id"])
+                if not dc_nid or dc_nid == target_nid:
+                    continue
+                if _add_edge(dc_nid, target_nid, {
+                    "type": "domain_member",
+                    "label": f"domain: {domain}",
+                    "confidence": 0.8, "source": "auto",
+                    "reason": f"host.domain={domain} matches DC {dc_h.get('hostname') or dc_h.get('ip', '')}",
+                    "state": "inferred", "verified": False, "is_manual": False,
+                }):
+                    edges_added += 1
+
+    # ── P5: Subnet proximity edges (hub-and-spoke) ───────────────────
+    if include_subnet_edges:
+        for link in infer_links_smart(hosts_meta):
+            src_nid = ip_to_nid.get(link.source_ip)
+            dst_nid = ip_to_nid.get(link.target_ip)
+            if not src_nid or not dst_nid:
+                continue
+            if _add_edge(src_nid, dst_nid, {
+                "type": link.link_type, "label": link.label or "",
+                "confidence": link.confidence, "source": "auto",
+                "reason": link.reason, "state": "inferred",
+                "verified": False, "is_manual": False,
+            }):
+                edges_added += 1
+
+    # ── Regions from scope CIDRs ──────────────────────────────────────
+    regions_added = 0
+    if include_regions and scope_region_defs:
+        existing_regions = list(network.regions_json or [])
+        existing_region_notes = {r.get("note", "") for r in existing_regions}
+
+        for sr in scope_region_defs:
+            cidr_str = sr["cidr"]
+            if cidr_str in existing_region_notes:
+                continue
+            net_obj = sr["net_obj"]
+            in_scope_hosts = [
+                h for h in hosts_meta
+                if h.get("ip") and _ip_in_network(h["ip"], net_obj)
+            ]
+            if not in_scope_hosts:
+                continue
+            node_positions = []
+            for h in in_scope_hosts:
+                nid = hid_to_nid.get(h["id"])
+                n = node_by_id.get(nid)
+                if n:
+                    node_positions.append((n.get("x", 0), n.get("y", 0)))
+            if not node_positions:
+                continue
+            pad = 60
+            min_x = min(p[0] for p in node_positions) - pad
+            min_y = min(p[1] for p in node_positions) - pad
+            max_x = max(p[0] for p in node_positions) + 160 + pad
+            max_y = max(p[1] for p in node_positions) + 100 + pad
+            in_scope = sr["in_scope"]
+            existing_regions.append({
+                "id": new_id("r"),
+                "x": min_x, "y": min_y,
+                "w": max_x - min_x, "h": max_y - min_y,
+                "label": sr["description"] or cidr_str,
+                "note": cidr_str,
+                "fill": "#0d1f0d" if in_scope else "#1f0d0d",
+                "stroke": "#1e3a1e" if in_scope else "#3a1e1e",
+                "zone_type": "scope",
+                "updated_at": datetime.utcnow().isoformat(),
+                "version": 1,
+            })
+            regions_added += 1
+
+        network.regions_json = existing_regions
+
+    # ── Infer node zone_type from region containment ─────────────────
+    regions_with_zone = [r for r in (network.regions_json or []) if r.get("zone_type") and r.get("zone_type") != "scope"]
+    if regions_with_zone:
+        for node in existing_nodes:
+            nx, ny = node.get("x", 0), node.get("y", 0)
+            for region in regions_with_zone:
+                rx = region.get("x", 0)
+                ry = region.get("y", 0)
+                rw = region.get("w", 1)
+                rh = region.get("h", 1)
+                if rx <= nx <= rx + rw and ry <= ny <= ry + rh:
+                    node["zone_type"] = region.get("zone_type")
+                    break
+
+    network.nodes_json = existing_nodes
+    network.edges_json = manual_edges + new_auto_edges
+    network.meta_json = existing_meta
+    db.commit()
+
+    result_net = schemas.Network.from_orm_obj(network)
+    bcast(pid, "network", "layout_applied", {
+        "network": result_net.model_dump(),
+        "updated_at": datetime.utcnow().isoformat(),
+    })
+
+    return {
+        "ok": True,
+        "nodes_total": len(existing_nodes),
+        "nodes_added": nodes_added,
+        "nodes_updated": nodes_updated,
+        "edges_added": edges_added,
+        "regions_added": regions_added,
+    }
+
+
+class SmartBuildRequest(BaseModel):
+    keep_manual_positions: bool = True
+    create_missing_networks: bool = True
+    include_access_edges: bool = True
+    include_domain_edges: bool = True
+    include_subnet_edges: bool = True
+    include_regions: bool = True
+
+
+@router.post("/smart-build", dependencies=[Depends(require_topo_apply)])
+def topology_smart_build(
+    pid: str,
+    body: SmartBuildRequest = SmartBuildRequest(),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Pentest-aware topology build from all project data sources.
+
+    Uses: hosts, creds, CredHostNote, HostActivity, Jobs, scope CIDRs.
+    Distinguishes: network proximity, validated access, host activity, domain trust.
+    Preserves all manual/observed edges; rebuilds inferred edges only.
+    """
+    username = getattr(getattr(request, "state", None), "username", None) if request else None
+    job = start_job(
+        db, pid, "topology", "Topology smart-build",
+        created_by=username or "",
+        connector_key="topology", operation="smart_build",
+        related_entity_type="network", related_entity_id=pid,
+        request_json=body.model_dump(),
+    )
+    result = _run_smart_build(
+        pid, db,
+        keep_manual_positions=body.keep_manual_positions,
+        create_missing_networks=body.create_missing_networks,
+        include_access_edges=body.include_access_edges,
+        include_domain_edges=body.include_domain_edges,
+        include_subnet_edges=body.include_subnet_edges,
+        include_regions=body.include_regions,
+    )
+    if not result.get("ok"):
+        err = result.get("error", "Smart build failed")
+        finish_job(db, job, status="failed", error_output=err)
+        raise HTTPException(404 if "not found" in err.lower() else 400, err)
+    finish_job(db, job, status="done", result=result)
+    return {**result, "job_id": job.id}
+
+
+# ── Access edge types (used by lateral path BFS) ──────────────────────
+_ACCESS_EDGE_TYPES = frozenset({
+    "ssh", "winrm", "smb_admin", "local_admin", "shell",
+    "c2_session", "lateral", "pivot", "auth_path",
+})
+
+
+@router.get("/lateral-paths", dependencies=[Depends(require_topo_apply)])
+def topology_lateral_paths(
+    pid: str,
+    from_host_id: str,
+    depth: int = 3,
+    db: Session = Depends(get_db),
+):
+    """
+    BFS through access graph edges from a given host.
+    Returns suggested next-hop targets with path info and techniques.
+    """
+    depth = max(1, min(depth, 5))
+
+    network = db.query(models.Network).filter(models.Network.pid == pid).first()
+    if not network:
+        return {"paths": [], "unreachable_count": 0}
+
+    edges = network.edges_json or []
+    nodes = network.nodes_json or []
+
+    # Build node lookup: id → node metadata
+    node_map = {n["id"]: n for n in nodes}
+
+    # Find the starting node ID for from_host_id
+    start_nid = None
+    for n in nodes:
+        if n.get("host_id") == from_host_id or n.get("id") == from_host_id:
+            start_nid = n["id"]
+            break
+    if not start_nid:
+        return {"paths": [], "unreachable_count": 0}
+
+    # Build adjacency from access edges only
+    adjacency: dict[str, list[dict]] = {}
+    for edge in edges:
+        if edge.get("type") not in _ACCESS_EDGE_TYPES:
+            continue
+        src = edge.get("from")
+        dst = edge.get("to")
+        if not src or not dst:
+            continue
+        adjacency.setdefault(src, []).append({"to": dst, "edge": edge})
+        # Bidirectional for pivot/lateral
+        if edge.get("type") in ("lateral", "pivot"):
+            adjacency.setdefault(dst, []).append({"to": src, "edge": edge})
+
+    # BFS
+    visited = {start_nid}
+    queue = [(start_nid, [])]  # (current_nid, path_edges)
+    paths = []
+    seen_targets = set()
+
+    while queue:
+        cur, path_edges = queue.pop(0)
+        if len(path_edges) >= depth:
+            continue
+        for hop in adjacency.get(cur, []):
+            nxt = hop["to"]
+            if nxt in visited:
+                continue
+            visited.add(nxt)
+            new_path = path_edges + [hop["edge"]]
+            target_node = node_map.get(nxt, {})
+            target_host_id = target_node.get("host_id")
+
+            if target_host_id and target_host_id not in seen_targets:
+                seen_targets.add(target_host_id)
+                edge_types = list({e.get("type") for e in new_path})
+                paths.append({
+                    "target_node_id": nxt,
+                    "target_host_id": target_host_id,
+                    "target_label": target_node.get("label") or target_node.get("ip") or nxt,
+                    "target_role": target_node.get("role"),
+                    "target_zone": target_node.get("zone_type"),
+                    "distance": len(new_path),
+                    "techniques": edge_types,
+                    "path_node_ids": [start_nid] + [e.get("to") for e in new_path],
+                    "confidence": min(e.get("confidence", 0.5) for e in new_path),
+                    "verified": all(e.get("verified", False) for e in new_path),
+                })
+
+            queue.append((nxt, new_path))
+
+    # Sort by distance then confidence desc
+    paths.sort(key=lambda p: (p["distance"], -p["confidence"]))
+
+    all_nids = {n["id"] for n in nodes}
+    reachable = {p["target_node_id"] for p in paths} | {start_nid}
+    unreachable = len([n for n in nodes if n.get("host_id") and n["id"] not in reachable])
+
+    return {
+        "from_node_id": start_nid,
+        "from_host_id": from_host_id,
+        "paths": paths,
+        "unreachable_count": unreachable,
+    }

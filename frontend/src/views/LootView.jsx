@@ -1,7 +1,35 @@
 import { useRef, useState } from 'react';
-import { api } from '../api.js';
+import { api, downloadUrl } from '../api.js';
 import Icon from '../components/Icon.jsx';
 import { SearchBar } from '../components/UI.jsx';
+
+async function downloadLoot(loot) {
+  if (loot.public_url) {
+    // Fetch with auth token and trigger blob download
+    const url = downloadUrl(loot.public_url);
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = loot.filename || 'loot';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    } catch (e) {
+      alert(`Download failed: ${e.message}`);
+    }
+  } else {
+    // No file — download value as .txt
+    const content = loot.value || loot.description || '';
+    const blob = new Blob([content], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (loot.filename || loot.source_path?.split('/').pop() || 'loot') + (loot.public_url ? '' : '.txt');
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+}
 
 const LOOT_TYPES = {
   file:   { label: 'File',    color: '#5b8af5' },
@@ -197,7 +225,12 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                 style={{ display: 'flex', alignItems: 'center', minHeight: 44, padding: '8px 18px', borderBottom: '1px solid #14161b', gap: 12, cursor: 'pointer', background: isSel ? '#ffffff06' : 'transparent', borderLeft: isSel ? `2px solid ${accent}` : '2px solid transparent', transition: 'background .1s' }}
                 onMouseEnter={e => !isSel && (e.currentTarget.style.background = '#ffffff04')}
                 onMouseLeave={e => !isSel && (e.currentTarget.style.background = 'transparent')}>
-                <div style={{ width: 80, flexShrink: 0 }}><TypeBadge type={loot.loot_type} /></div>
+                <div style={{ width: 80, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <TypeBadge type={loot.loot_type} />
+                  {loot.artifact_type && loot.artifact_type !== 'file' && (
+                    <span style={{ fontSize: 8, color: '#808590', background: '#80859018', border: '1px solid #80859033', borderRadius: 3, padding: '1px 4px', fontFamily: 'JetBrains Mono' }}>{loot.artifact_type.replace('_', ' ')}</span>
+                  )}
+                </div>
                 <div style={{ flex: 1, minWidth: 0, fontFamily: 'JetBrains Mono', fontSize: Math.max(10, fs - 3), color: shown ? '#c8cdd6' : '#606570', filter: shown ? 'none' : 'blur(5px)', transition: 'filter .2s', userSelect: shown ? 'text' : 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {loot.value || '(empty)'}
                 </div>
@@ -221,10 +254,12 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: isCopied ? '#39d353' : '#404550', display: 'flex', padding: 2 }}>
                     <Icon name={isCopied ? 'check' : 'copy'} size={12} color="currentColor" />
                   </button>
-                  {loot.public_url && <a href={loot.public_url} download={loot.filename || true} title="Download"
-                    style={{ color: '#404550', display: 'flex', padding: 2, textDecoration: 'none' }}>
+                  <button onClick={() => downloadLoot(loot)} title="Download"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: loot.public_url ? '#5b8af5' : '#404550', display: 'flex', padding: 2 }}
+                    onMouseEnter={e => e.currentTarget.style.color = '#5b8af5'}
+                    onMouseLeave={e => e.currentTarget.style.color = loot.public_url ? '#5b8af5' : '#404550'}>
                     <Icon name="export" size={12} color="currentColor" />
-                  </a>}
+                  </button>
                   <button onClick={() => { onDelete(loot.id); if (selectedId === loot.id) setSelectedId(null); }}
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#303540', display: 'flex', padding: 2 }}
                     onMouseEnter={e => e.currentTarget.style.color = '#cc2233'}
@@ -287,7 +322,9 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                   <input ref={editFileRef} type="file" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && uploadFileForLoot(selLoot.id, e.target.files[0])} />
                   <button onClick={() => editFileRef.current?.click()} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{uploading ? 'Uploading…' : 'Upload / replace'}</button>
-                  {selLoot.public_url && <a href={selLoot.public_url} download={selLoot.filename || true} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', color: '#5b8af5', fontSize: 10, fontFamily: 'JetBrains Mono', textDecoration: 'none' }}>Download</a>}
+                  <button onClick={() => downloadLoot(selLoot)} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: selLoot.public_url ? '#5b8af5' : '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                    {selLoot.public_url ? 'Download file' : 'Download as .txt'}
+                  </button>
                 </div>
                 <div style={{ fontSize: 10, color: '#606570', marginTop: 6, fontFamily: 'JetBrains Mono' }}>{selLoot.filename ? `${selLoot.filename}${selLoot.file_size ? ` · ${selLoot.file_size} bytes` : ''}` : 'No file attached'}</div>
               </div>
@@ -298,6 +335,12 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                   {copied === 'panel' ? 'Copied' : 'Copy'}
                 </button>
               </div>
+              {selLoot.sha256 && (
+                <div style={{ fontSize: 8, color: '#303540', fontFamily: 'JetBrains Mono', wordBreak: 'break-all' }}>sha256: {selLoot.sha256}</div>
+              )}
+              {selLoot.job_id && (
+                <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>Source job: <span style={{ color: '#5b8af5' }}>{selLoot.job_id}</span></div>
+              )}
               <div style={{ fontSize: 9, color: '#303540', fontFamily: 'JetBrains Mono' }}>{selLoot.ts}</div>
             </div>
           </div>

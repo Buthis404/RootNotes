@@ -9,6 +9,7 @@ from .. import models, schemas
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root
+from ..core.artifact_extractor import sha256_bytes as _sha256
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
@@ -16,12 +17,29 @@ router = APIRouter(prefix="/api/loots", tags=["loots"])
 
 
 @router.get("", response_model=list[schemas.Loot])
-def list_loots(pid: str | None = None, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+def list_loots(
+    pid: str | None = None,
+    job_id: str | None = None,
+    artifact_type: str | None = None,
+    host_id: str | None = None,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     if pid:
         check_pid_access(db, pid, user, "loot.read")
-        return db.query(models.Loot).filter(models.Loot.pid == pid).order_by(models.Loot.ts.desc()).all()
+        q = db.query(models.Loot).filter(models.Loot.pid == pid)
+        if job_id:
+            q = q.filter(models.Loot.job_id == job_id)
+        if artifact_type:
+            q = q.filter(models.Loot.artifact_type == artifact_type)
+        if host_id:
+            q = q.filter(models.Loot.host_id == host_id)
+        return q.order_by(models.Loot.ts.desc()).all()
     if user.role == "admin":
-        return db.query(models.Loot).order_by(models.Loot.ts.desc()).all()
+        q = db.query(models.Loot)
+        if job_id:
+            q = q.filter(models.Loot.job_id == job_id)
+        return q.order_by(models.Loot.ts.desc()).all()
     member_pids = get_user_member_pids(db, user)
     return db.query(models.Loot).filter(models.Loot.pid.in_(member_pids)).order_by(models.Loot.ts.desc()).all()
 
@@ -84,17 +102,22 @@ async def upload_loot_file(lid: str, request: Request, file: UploadFile = File(.
     loot_dir.mkdir(parents=True, exist_ok=True)
     disk_name = f"{loot.id}{ext}"
     disk_path = ensure_under_upload_root(loot_dir / disk_name)
+    MAX_UPLOAD = 50 * 1024 * 1024  # 50 MB
     content = await file.read()
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, "File exceeds 50 MB limit")
     disk_path.write_bytes(content)
     loot.filename = safe_name
     loot.content_type = file.content_type or "application/octet-stream"
     loot.file_size = len(content)
     loot.storage_path = str(disk_path)
-    loot.public_url = f"/uploads/{loot.pid}/loot/{disk_name}"
+    loot.public_url = f"/api/uploads/{loot.pid}/loot/{disk_name}"
+    loot.sha256 = _sha256(content)
+    loot.artifact_type = "file"
     if not loot.value:
         loot.value = safe_name
     if not loot.source_path:
-        loot.source_path = loot.public_url
+        loot.source_path = f"/api/uploads/{loot.pid}/loot/{disk_name}"
     loot.loot_type = "file"
     db.commit()
     db.refresh(loot)

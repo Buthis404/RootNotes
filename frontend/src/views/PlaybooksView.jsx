@@ -48,22 +48,43 @@ function emptyCondition() {
   return { when: 'success', result_key: '', operator: 'eq', value: '', action: 'stop', target_step: null };
 }
 
+// Structured result keys available for ALL connector types
+const STRUCTURED_KEYS = [
+  'structured.ok',
+  'structured.auth_success',
+  'structured.access_role',
+  'structured.summary',
+  'structured.counts.hosts_found',
+  'structured.counts.hosts_created',
+  'structured.counts.hosts_valid',
+  'structured.counts.hosts_failed',
+  'structured.counts.hosts_pwned',
+  'structured.counts.exit_code',
+  'structured.counts.findings_created',
+  'structured.counts.paths_found',
+];
+
 const RESULT_KEYS_BY_CONNECTOR = {
-  'nmap:scan':             ['hosts_found', 'hosts_created', 'hosts_updated'],
-  'nuclei:scan':           ['findings_found', 'findings_created'],
-  'netexec:scan':          ['hosts_found', 'hosts_created', 'hosts_updated'],
-  'netexec:ldap_enum':     ['hosts_found', 'hosts_created', 'hosts_updated'],
-  'netexec:spray_smb':     ['hosts_found', 'hosts_created', 'hosts_updated'],
-  'c2_integration:sync':   ['hosts_found', 'hosts_created', 'hosts_updated', 'creds_created'],
-  'topology:auto_build':   ['hosts_created'],
-  'topology:preview':      ['hosts_created'],
-  'attacker_ssh:exec':     ['exit_code'],
-  'attacker_ssh:bulk_exec':['exit_code'],
-  'attacker_ssh:kerberoast':['exit_code'],
-  'attacker_ssh:asreproast':['exit_code'],
-  'attacker_ssh:ldap_dump': ['exit_code'],
-  'httpx:scan':            ['urls_found', 'hosts_found', 'activities_created'],
-  'ffuf:scan':             ['paths_found', 'findings_created'],
+  'nmap:scan':                  [...STRUCTURED_KEYS, 'hosts_found', 'hosts_created', 'hosts_updated'],
+  'nuclei:scan':                [...STRUCTURED_KEYS, 'findings_found', 'findings_created'],
+  'netexec:scan':               [...STRUCTURED_KEYS, 'hosts_found', 'hosts_created', 'hosts_updated'],
+  'netexec:ldap_enum':          [...STRUCTURED_KEYS, 'hosts_found', 'hosts_created', 'hosts_updated'],
+  'netexec:spray_smb':          [...STRUCTURED_KEYS, 'hosts_found', 'hosts_created', 'hosts_updated'],
+  'netexec:spray_winrm':        [...STRUCTURED_KEYS, 'hosts_success', 'hosts_pwned', 'hosts_failed'],
+  'netexec:spray_mssql':        [...STRUCTURED_KEYS, 'hosts_success', 'hosts_pwned', 'hosts_failed'],
+  'netexec:spray_ldap':         [...STRUCTURED_KEYS, 'hosts_success', 'hosts_failed'],
+  'netexec:spray_rdp':          [...STRUCTURED_KEYS, 'hosts_success', 'hosts_failed'],
+  'attacker_ssh:cred_validate': [...STRUCTURED_KEYS, 'hosts_total', 'hosts_valid', 'hosts_failed'],
+  'c2_integration:sync':        [...STRUCTURED_KEYS, 'hosts_found', 'hosts_created', 'hosts_updated', 'creds_created'],
+  'topology:auto_build':        [...STRUCTURED_KEYS, 'hosts_created'],
+  'topology:preview':           [...STRUCTURED_KEYS, 'hosts_created'],
+  'attacker_ssh:exec':          [...STRUCTURED_KEYS, 'exit_code'],
+  'attacker_ssh:bulk_exec':     [...STRUCTURED_KEYS, 'exit_code'],
+  'attacker_ssh:kerberoast':    [...STRUCTURED_KEYS, 'exit_code'],
+  'attacker_ssh:asreproast':    [...STRUCTURED_KEYS, 'exit_code'],
+  'attacker_ssh:ldap_dump':     [...STRUCTURED_KEYS, 'exit_code'],
+  'httpx:scan':                 [...STRUCTURED_KEYS, 'urls_found', 'hosts_found', 'activities_created'],
+  'ffuf:scan':                  [...STRUCTURED_KEYS, 'paths_found', 'findings_created'],
 };
 
 function resultKeysForSteps(steps) {
@@ -680,6 +701,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [editor, setEditor] = useState(emptyPlaybook());
   const [form, setForm] = useState({ target: '', target_url: '', flags: '-sV -sC -T4 --open', severity: 'critical,high,medium', keep_manual_positions: true, create_missing_networks: true });
   const [expandedRunId, setExpandedRunId] = useState(null);
+  const [runJobsCache, setRunJobsCache] = useState({}); // runId → Job[]
+  const runPollRef = useRef(null);
   const [runMode, setRunMode] = useState('single'); // 'single' | 'batch'
   const [batchForm, setBatchForm] = useState({ host_ids: [], host_tags: [], host_status: '', parallelism: 3 });
   const [hosts, setHosts] = useState([]);
@@ -732,6 +755,25 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   }, []);
 
   const selected = playbooks.find(p => p.id === selectedPlaybookId) || null;
+
+  // Load full job list when a run is expanded; poll while running
+  const loadRunJobs = useCallback(async (runId) => {
+    if (!selectedProject || !runId) return;
+    try {
+      const data = await api.listJobs(selectedProject, { playbook_run_id: runId, limit: 50 });
+      setRunJobsCache(prev => ({ ...prev, [runId]: data || [] }));
+    } catch {}
+  }, [selectedProject]);
+
+  useEffect(() => {
+    if (!expandedRunId) { clearInterval(runPollRef.current); return; }
+    loadRunJobs(expandedRunId);
+    const run = runs.find(r => r.id === expandedRunId);
+    if (run?.status === 'running' || run?.status === 'queued') {
+      runPollRef.current = setInterval(() => loadRunJobs(expandedRunId), 2000);
+    }
+    return () => clearInterval(runPollRef.current);
+  }, [expandedRunId, runs, loadRunJobs]);
 
   useEffect(() => {
     if (!selected || editingMode) return;
@@ -1142,18 +1184,58 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                       {isExpanded && (
                         <div style={{ padding: '0 16px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
                           <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 8, overflow: 'hidden' }}>
-                            <div style={{ padding: '8px 12px', borderBottom: '1px solid #14161b', fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Steps</div>
-                            {(run.jobs_json || []).map((job, idx) => (
-                              <div key={job.id} style={{ padding: '8px 12px', borderBottom: idx < (run.jobs_json || []).length - 1 ? '1px solid #12141a' : 'none', display: 'flex', alignItems: 'center', gap: 10 }}>
-                                <div style={{ width: 20, height: 20, borderRadius: '50%', background: '#13161f', border: `1px solid ${accent}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent, fontSize: 9, fontFamily: 'JetBrains Mono', fontWeight: 700, flexShrink: 0 }}>{idx + 1}</div>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={{ fontSize: 11, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.title}</div>
-                                  <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginTop: 2 }}>{job.id}</div>
-                                </div>
-                                <StatusBadge status={job.status} />
-                                <button onClick={() => onNavigate?.('jobs', { playbookRunId: run.id })} style={{ background: 'transparent', border: '1px solid #1e2230', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#5b8af5', fontSize: 10, fontFamily: 'JetBrains Mono', flexShrink: 0 }}>View</button>
-                              </div>
-                            ))}
+                            <div style={{ padding: '8px 12px', borderBottom: '1px solid #14161b', fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'flex', alignItems: 'center', gap: 8 }}>
+                              Steps
+                              {run.status === 'running' && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f09a3a', animation: 'pulse 1.2s infinite', display: 'inline-block' }} />}
+                            </div>
+                            {(() => {
+                              const liveJobs = runJobsCache[run.id];
+                              const steps = run.jobs_json || [];
+                              return steps.map((snapshot, idx) => {
+                                const liveJob = liveJobs?.find(j => j.id === snapshot.id);
+                                const job = liveJob || snapshot;
+                                const statusCfg = RUN_STATUS[job.status] || RUN_STATUS.queued;
+                                const isRunning = job.status === 'running';
+                                const isFailed = job.status === 'failed';
+                                const dur = liveJob?.started_at ? (() => {
+                                  const s = new Date(liveJob.started_at);
+                                  const f = liveJob.finished_at ? new Date(liveJob.finished_at) : new Date();
+                                  const sec = Math.round((f - s) / 1000);
+                                  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
+                                })() : null;
+                                const summary = liveJob?.result_json?.structured?.summary || '';
+                                const lastLines = liveJob?.output?.split('\n').filter(Boolean).slice(-3) || [];
+                                return (
+                                  <div key={job.id} style={{ borderBottom: idx < steps.length - 1 ? '1px solid #12141a' : 'none', background: isRunning ? '#f09a3a06' : isFailed ? '#cc223306' : 'transparent' }}>
+                                    <div style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                                      <div style={{ width: 20, height: 20, borderRadius: '50%', background: job.status === 'done' ? '#39d35322' : isRunning ? '#f09a3a22' : isFailed ? '#cc223322' : '#13161f', border: `1px solid ${statusCfg.color}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: statusCfg.color, fontSize: 9, fontFamily: 'JetBrains Mono', fontWeight: 700, flexShrink: 0 }}>
+                                        {isRunning ? <span style={{ animation: 'pulse 1.2s infinite' }}>●</span> : job.status === 'done' ? '✓' : isFailed ? '✗' : idx + 1}
+                                      </div>
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontSize: 11, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.title}</div>
+                                        <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                          {liveJob?.connector_key && <span style={{ color: '#6fc8f0' }}>{liveJob.connector_key}</span>}
+                                          {liveJob?.operation && <span>{liveJob.operation}</span>}
+                                          {liveJob?.target && <span>→ {liveJob.target}</span>}
+                                          {summary && <span style={{ color: '#808590' }}>{summary}</span>}
+                                        </div>
+                                      </div>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                                        <StatusBadge status={job.status} />
+                                        {dur && <span style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>⏱{dur}</span>}
+                                      </div>
+                                    </div>
+                                    {(isRunning || isFailed) && lastLines.length > 0 && (
+                                      <div style={{ padding: '0 12px 8px 42px' }}>
+                                        <pre style={{ margin: 0, fontSize: 9, color: isFailed ? '#f87171' : '#606570', fontFamily: 'JetBrains Mono', lineHeight: 1.5, background: '#07080c', borderRadius: 4, padding: '4px 8px', overflow: 'hidden' }}>
+                                          {lastLines.join('\n')}
+                                        </pre>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              });
+                            })()}
                           </div>
 
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#606570' }}>

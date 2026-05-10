@@ -370,6 +370,7 @@ class FindingBase(BaseModel):
     proof: str = ""
     recommendation: str = ""
     status: str = "open"
+    source: str = "manual"
     ts: str
 
 
@@ -387,6 +388,7 @@ class FindingUpdate(BaseModel):
     proof: Optional[str] = None
     recommendation: Optional[str] = None
     status: Optional[str] = None
+    source: Optional[str] = None
     ts: Optional[str] = None
 
 
@@ -484,6 +486,13 @@ class LootBase(BaseModel):
     content_type: str = ""
     file_size: int = 0
     public_url: str = ""
+    job_id: str = ""
+    cred_id: str = ""
+    finding_id: str = ""
+    playbook_run_id: str = ""
+    sha256: str = ""
+    artifact_type: str = "file"
+    tags: list[str] = []
 
 class LootCreate(LootBase):
     pass
@@ -498,6 +507,13 @@ class LootUpdate(BaseModel):
     content_type: Optional[str] = None
     file_size: Optional[int] = None
     public_url: Optional[str] = None
+    job_id: Optional[str] = None
+    cred_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    playbook_run_id: Optional[str] = None
+    sha256: Optional[str] = None
+    artifact_type: Optional[str] = None
+    tags: Optional[list[str]] = None
 
 class Loot(LootBase):
     id: str

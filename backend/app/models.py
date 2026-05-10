@@ -121,6 +121,7 @@ class Finding(Base):
     proof = Column(Text, nullable=False, default="")
     recommendation = Column(Text, nullable=False, default="")
     status = Column(String, nullable=False, default="open")
+    source = Column(String, nullable=False, default="manual")
     ts = Column(String, nullable=False)
 
 
@@ -190,6 +191,14 @@ class Loot(Base):
     storage_path = Column(Text, nullable=False, default="")
     public_url = Column(Text, nullable=False, default="")
     ts = Column(String, nullable=False)
+    # Evidence pipeline linkage
+    job_id = Column(String, nullable=False, default="")
+    cred_id = Column(String, nullable=False, default="")
+    finding_id = Column(String, nullable=False, default="")
+    playbook_run_id = Column(String, nullable=False, default="")
+    sha256 = Column(String, nullable=False, default="")
+    artifact_type = Column(String, nullable=False, default="file")
+    tags = Column(ARRAY(String), nullable=False, default=[])
 
 
 class Scope(Base):
@@ -244,6 +253,7 @@ class HostActivity(Base):
     output = Column(Text, nullable=False, default="")
     status = Column(String, nullable=False, default="done")
     ts = Column(String, nullable=False)
+    job_id = Column(String, nullable=False, default="")
 
 
 class FindingTemplate(Base):
@@ -385,6 +395,20 @@ class KBArticle(Base):
     content = Column(Text, nullable=False, default="")
     category = Column(String, nullable=False, default="General")
     tags = Column(ARRAY(String), nullable=False, default=[])
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False)
+
+
+class HostCollection(Base):
+    __tablename__ = "host_collections"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    color = Column(String, nullable=False, default="#4f8ef7")
+    filters_json = Column(JSONB, nullable=False, default=dict)
     created_by = Column(String, nullable=False, default="")
     created_at = Column(String, nullable=False)
     updated_at = Column(String, nullable=False)

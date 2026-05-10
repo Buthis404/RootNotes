@@ -11,6 +11,8 @@ from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.utils import new_id
 from ..core.notifications import dispatch_sync
+from ..core.result_normalizer import normalize as _normalize_result
+from ..core.artifact_extractor import extract as _extract_artifacts, sha256_bytes as _sha256
 
 # Ports → auto-tags
 _PORT_TAGS: list[tuple[set[int], str]] = [
@@ -87,6 +89,13 @@ def apply_writeback(db, job: models.Job, result: dict) -> None:
     # ── attacker_ssh exec: link cred to host on success ───────────────
     elif connector == "attacker_ssh" and operation == "exec" and status == "done":
         _writeback_exec_cred_link(db, pid, req, result)
+
+    # ── structured result: always populate after all writeback rules ──
+    _apply_structured_result(db, job, result)
+
+    # ── artifact extraction: auto-create Loot records from output ─────
+    if status == "done" and job.output:
+        _save_extracted_artifacts(db, job)
 
 
 # ── Rule implementations ──────────────────────────────────────────────
@@ -192,4 +201,54 @@ def _writeback_exec_cred_link(db, pid: str, req: dict, result: dict) -> None:
     current_ids = list(cred.host_ids or [])
     if host_id not in current_ids:
         cred.host_ids = current_ids + [host_id]
+
+
+def _apply_structured_result(db, job: models.Job, result: dict) -> None:
+    try:
+        sr = _normalize_result(job)
+        merged = dict(result)
+        merged["structured"] = sr.to_dict()
+        job.result_json = merged
+        db.add(job)
         db.commit()
+    except Exception:
+        pass
+        db.commit()
+
+
+def _save_extracted_artifacts(db, job: models.Job) -> None:
+    try:
+        artifacts = _extract_artifacts(job.output, job)
+        if not artifacts:
+            return
+        ts = job.finished_at or job.created_at
+        playbook_run_id = (job.request_json or {}).get("playbook_run_id", "")
+        for art in artifacts:
+            sha = _sha256(art.value.encode())
+            # Deduplicate within project by sha256 + artifact_type
+            exists = db.query(models.Loot).filter(
+                models.Loot.pid == job.pid,
+                models.Loot.sha256 == sha,
+                models.Loot.artifact_type == art.artifact_type,
+            ).first()
+            if exists:
+                continue
+            loot = models.Loot(
+                id=new_id("lt"),
+                pid=job.pid,
+                host_id=art.host_id,
+                cred_id=art.cred_id or "",
+                job_id=job.id,
+                playbook_run_id=playbook_run_id,
+                loot_type=art.loot_type,
+                artifact_type=art.artifact_type,
+                value=art.value,
+                description=art.description,
+                sha256=sha,
+                tags=art.tags,
+                ts=ts,
+            )
+            db.add(loot)
+        db.commit()
+    except Exception:
+        pass

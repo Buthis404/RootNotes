@@ -8,7 +8,6 @@ from ..core.ssh_exec import run_ssh_command
 from ..core.utils import new_id
 from ..core.writeback import apply_writeback
 
-_ACTIVE_TASKS: set[asyncio.Task] = set()
 _SUPPORTED_QUEUED_OPERATIONS = {
     ("nmap", "scan"),
     ("nuclei", "scan"),
@@ -26,9 +25,8 @@ def supports_queued_execution(connector_key: str, operation: str) -> bool:
 
 
 def schedule_job_run(job_id: str) -> None:
-    task = asyncio.create_task(run_queued_job(job_id))
-    _ACTIVE_TASKS.add(task)
-    task.add_done_callback(_ACTIVE_TASKS.discard)
+    from .worker_pool import get_pool
+    get_pool().submit(job_id)
 
 
 async def run_queued_job(job_id: str) -> None:

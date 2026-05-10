@@ -8,6 +8,7 @@ import C2HostActionsPanel from '../components/C2HostActionsPanel.jsx';
 import { api } from '../api.js';
 import { getCredBadges, getHostBadges, summarizeCreds, HOST_ROLES, normalizeDomain, domainsMatch } from '../utils/hostMeta.js';
 import { useColumnResize } from '../hooks/useColumnResize.js';
+import CollectionSelector from '../components/CollectionSelector.jsx';
 
 const BULK_TEMPLATES = {
   nmap:    { label: 'Nmap quick',  cmd: 'nmap -sV -sC -T4 {target}',       type: 'nmap',  activity: 'recon' },
@@ -368,6 +369,8 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
   const [showActivityComposer, setShowActivityComposer] = useState(false);
   const [activityTypeFilter, setActivityTypeFilter] = useState(null);
   const [activityStatusFilter, setActivityStatusFilter] = useState(null);
+  const [editCell, setEditCell] = useState(null); // {hostId, field}
+  const [editValue, setEditValue] = useState('');
 
   const { widths, startResize } = useColumnResize({ ip: 120, hostname: 140, os: 110, status: 160, services: 0, creds: 70, tags: 140 });
   const colBorder = '1px solid #14161b';
@@ -463,6 +466,31 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
     setShowAdd(false);
   };
 
+  useEffect(() => {
+    if (!editCell) return;
+    const handler = (e) => {
+      if (!e.target.closest('[data-inline-edit]')) setEditCell(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [editCell]);
+
+  const startEdit = useCallback((e, host, field) => {
+    e.stopPropagation();
+    setEditCell({ hostId: host.id, field });
+    setEditValue(host[field] || '');
+  }, []);
+
+  const commitEdit = useCallback((host, field, value) => {
+    setEditCell(null);
+    const trimmed = value.trim();
+    if (trimmed !== (host[field] || '').trim()) {
+      onUpdate(host.id, { [field]: trimmed });
+    }
+  }, [onUpdate]);
+
+  const cancelEdit = useCallback(() => setEditCell(null), []);
+
   const Col = ({ label, field, w = 100 }) => (
     <div style={{ width: w || undefined, flex: w ? undefined : 1, flexShrink: 0, fontSize: Math.max(9, fs - 4), color: sortBy === field ? accent : '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 4, position: 'relative', minWidth: 0 }}>
       <span onClick={() => setSortBy(field)} style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>{label}{sortBy === field && <span style={{ color: accent }}>↑</span>}</span>
@@ -496,6 +524,13 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
             return <button key={k} onClick={() => setFilterStatus(filterStatus === k ? null : k)} style={{ background: filterStatus === k ? `${v.color}22` : 'transparent', border: `1px solid ${filterStatus === k ? v.color + '88' : '#2a2d35'}`, borderRadius: 3, padding: '3px 8px', cursor: 'pointer', fontSize: Math.max(9, fs - 4), color: filterStatus === k ? v.color : '#505560', fontFamily: 'JetBrains Mono' }}>{v.label} <span style={{ opacity: .6 }}>{cnt}</span></button>;
           })}
         </div>
+        <CollectionSelector
+          pid={selectedProject}
+          accent={accent}
+          selectedIds={selectedIds}
+          onSelect={(ids) => setSelectedIds(ids)}
+          onClear={() => setSelectedIds([])}
+        />
         <div style={{ width: 220 }}><SearchBar value={search} onChange={setSearch} placeholder="IP, hostname..." /></div>
         <button onClick={() => setShowNmap(true)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#808590', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}><Icon name="terminal" size={10} color="currentColor" /> Nmap</button>
         <button onClick={() => setShowBloodHound(true)} style={{ background: 'transparent', border: '1px solid #c07af044', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#c07af0', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>🩸 BloodHound</button>
@@ -612,12 +647,69 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
                   }} style={{ width: 14, height: 14, cursor: 'pointer', accentColor: accent }} />
                 </div>
                 <div style={{ width: widths.ip, flexShrink: 0, fontFamily: 'JetBrains Mono', fontSize: Math.max(11, fs - 1), color: isSel ? accent : '#9098a8', fontWeight: isSel ? 600 : 400, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center' }}>{host.ip}</div>
-                <div style={{ width: widths.hostname, flexShrink: 0, fontSize: Math.max(11, fs - 1), color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center' }}>{host.hostname || <span style={{ color: '#303540' }}>—</span>}</div>
-                <div style={{ width: widths.os, flexShrink: 0, fontSize: Math.max(10, fs - 2), color: '#606570', display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
-                  {OS_ICONS[host.os]} {host.os}
+                {/* Hostname — inline edit on double-click */}
+                <div style={{ width: widths.hostname, flexShrink: 0, minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center' }}>
+                  {editCell?.hostId === host.id && editCell?.field === 'hostname' ? (
+                    <input
+                      autoFocus
+                      value={editValue}
+                      onChange={e => setEditValue(e.target.value)}
+                      onBlur={() => commitEdit(host, 'hostname', editValue)}
+                      onKeyDown={e => { if (e.key === 'Enter') commitEdit(host, 'hostname', editValue); if (e.key === 'Escape') cancelEdit(); e.stopPropagation(); }}
+                      onClick={e => e.stopPropagation()}
+                      style={{ width: '100%', background: '#0a0c10', border: `1px solid ${accent}`, borderRadius: 3, padding: '2px 6px', color: '#e0e4ec', fontSize: Math.max(11, fs - 1), fontFamily: 'JetBrains Mono', outline: 'none' }}
+                    />
+                  ) : (
+                    <span
+                      onDoubleClick={e => startEdit(e, host, 'hostname')}
+                      title="Double-click to edit"
+                      style={{ fontSize: Math.max(11, fs - 1), color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'text', width: '100%' }}
+                    >
+                      {host.hostname || <span style={{ color: '#303540' }}>—</span>}
+                    </span>
+                  )}
                 </div>
-                <div style={{ width: widths.status, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, overflow: 'hidden', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
-                  <HostStatusBadge status={host.status} />
+
+                {/* OS — inline edit on double-click */}
+                <div style={{ width: widths.os, flexShrink: 0, minWidth: 0, overflow: 'hidden', borderRight: colBorder, paddingRight: 12, marginRight: 12, display: 'flex', alignItems: 'center' }}>
+                  {editCell?.hostId === host.id && editCell?.field === 'os' ? (
+                    <input
+                      autoFocus
+                      value={editValue}
+                      onChange={e => setEditValue(e.target.value)}
+                      onBlur={() => commitEdit(host, 'os', editValue)}
+                      onKeyDown={e => { if (e.key === 'Enter') commitEdit(host, 'os', editValue); if (e.key === 'Escape') cancelEdit(); e.stopPropagation(); }}
+                      onClick={e => e.stopPropagation()}
+                      style={{ width: '100%', background: '#0a0c10', border: `1px solid ${accent}`, borderRadius: 3, padding: '2px 6px', color: '#e0e4ec', fontSize: Math.max(10, fs - 2), fontFamily: 'JetBrains Mono', outline: 'none' }}
+                    />
+                  ) : (
+                    <span
+                      onDoubleClick={e => startEdit(e, host, 'os')}
+                      title="Double-click to edit"
+                      style={{ fontSize: Math.max(10, fs - 2), color: '#606570', display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'text', width: '100%' }}
+                    >
+                      {OS_ICONS[host.os]} {host.os}
+                    </span>
+                  )}
+                </div>
+
+                {/* Status — click badge to get dropdown */}
+                <div style={{ width: widths.status, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, overflow: 'hidden', borderRight: colBorder, paddingRight: 12, marginRight: 12, position: 'relative' }}>
+                  {editCell?.hostId === host.id && editCell?.field === 'status' ? (
+                    <div data-inline-edit style={{ position: 'absolute', top: 0, left: 0, zIndex: 50, background: '#0d0f14', border: `1px solid ${accent}44`, borderRadius: 6, padding: 6, display: 'flex', flexDirection: 'column', gap: 2, boxShadow: '0 4px 20px #00000088', minWidth: 110 }}>
+                      {Object.entries(NODE_STATUS).map(([k, v]) => (
+                        <button key={k} onClick={e => { e.stopPropagation(); onUpdate(host.id, { status: k }); setEditCell(null); }}
+                          style={{ background: host.status === k ? v.color + '22' : 'transparent', border: `1px solid ${host.status === k ? v.color + '66' : 'transparent'}`, borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: v.color, fontSize: 10, fontFamily: 'JetBrains Mono', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: v.color, flexShrink: 0 }} />
+                          {v.label}
+                        </button>
+                      ))}
+                      <button onClick={e => { e.stopPropagation(); setEditCell(null); }} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 10, padding: '2px 4px', marginTop: 2 }}>Cancel</button>
+                    </div>
+                  ) : null}
+                  <span onClick={e => { e.stopPropagation(); setEditCell({ hostId: host.id, field: 'status' }); }} title="Click to change status" style={{ cursor: 'pointer' }}>
+                    <HostStatusBadge status={host.status} />
+                  </span>
                   {host.domain && <span title={host.domain} style={{ fontSize: 8, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af044', borderRadius: 3, padding: '1px 4px', fontFamily: 'JetBrains Mono', lineHeight: 1.2, display: 'inline-flex', alignItems: 'center' }}>AD</span>}
                 </div>
                 <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap', borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>

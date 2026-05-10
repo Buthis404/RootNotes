@@ -186,10 +186,27 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
   const [showNessus, setShowNessus] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [templates, setTemplates] = useState([]);
+  const [view, setView] = useState('findings'); // 'findings' | 'candidates'
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState(null);
 
   useEffect(() => {
     api.listFindingTemplates().then(setTemplates).catch(() => {});
   }, []);
+
+  const handleScan = async () => {
+    setScanning(true);
+    setScanResult(null);
+    try {
+      const r = await api.scanCandidates(selectedProject);
+      setScanResult(r);
+      setView('candidates');
+    } catch (e) {
+      setScanResult({ error: e?.message || 'Scan failed' });
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const handleNessusImport = async (items, allHosts) => {
     const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');
@@ -214,7 +231,8 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
     return { added };
   };
 
-  const projFindings = findings.filter(f => f.pid === selectedProject);
+  const projFindings = findings.filter(f => f.pid === selectedProject && f.status !== 'candidate');
+  const projCandidates = findings.filter(f => f.pid === selectedProject && f.status === 'candidate');
   const filtered = filterSev ? projFindings.filter(f => f.severity === filterSev) : projFindings;
   const sorted = [...filtered].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
   const projHosts = hosts.filter(h => h.pid === selectedProject);
@@ -299,21 +317,38 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
       {/* List */}
       <div style={{ width: 300, background: '#0a0c10', borderRight: '1px solid #1e2029', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
         <div style={{ padding: '12px 14px', borderBottom: '1px solid #1a1c22' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>Findings</span>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button onClick={() => setView('findings')}
+                style={{ background: view === 'findings' ? accent + '22' : 'none', border: `1px solid ${view === 'findings' ? accent + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: view === 'findings' ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                Findings {projFindings.length > 0 && `(${projFindings.length})`}
+              </button>
+              <button onClick={() => setView('candidates')}
+                style={{ background: view === 'candidates' ? '#f09a3a22' : 'none', border: `1px solid ${view === 'candidates' ? '#f09a3a66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: view === 'candidates' ? '#f09a3a' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                Candidates {projCandidates.length > 0 && `(${projCandidates.length})`}
+              </button>
+            </div>
             <div style={{ display: 'flex', gap: 5 }}>
-              <button onClick={() => setShowTemplates(true)}
-                style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                Templates
-              </button>
-              <button onClick={() => setShowNessus(true)}
-                style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                Nessus
-              </button>
-              <button onClick={() => { setSelected(null); setEditing(true); }}
-                style={{ background: accent, border: 'none', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'JetBrains Mono' }}>
-                <Icon name="plus" size={10} color="#fff" /> Add
-              </button>
+              {view === 'findings' && <>
+                <button onClick={() => setShowTemplates(true)}
+                  style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                  Templates
+                </button>
+                <button onClick={() => setShowNessus(true)}
+                  style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                  Nessus
+                </button>
+                <button onClick={() => { setSelected(null); setEditing(true); }}
+                  style={{ background: accent, border: 'none', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'JetBrains Mono' }}>
+                  <Icon name="plus" size={10} color="#fff" /> Add
+                </button>
+              </>}
+              {view === 'candidates' && (
+                <button onClick={handleScan} disabled={scanning}
+                  style={{ background: '#f09a3a', border: 'none', borderRadius: 4, padding: '3px 9px', cursor: scanning ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: scanning ? 0.7 : 1 }}>
+                  {scanning ? 'Scanning…' : '⚑ Scan'}
+                </button>
+              )}
             </div>
           </div>
           {/* Stats */}
@@ -327,23 +362,58 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
           </div>
         </div>
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {sorted.length === 0 && <div style={{ padding: 24, textAlign: 'center', color: '#404550', fontSize: 11 }}>No findings</div>}
-          {sorted.map(f => {
-            const act = f.id === selected;
-            const h = projHosts.find(h => h.id === f.host_id);
-            return (
-              <div key={f.id} onClick={() => setSelected(f.id)}
-                style={{ padding: '10px 14px', cursor: 'pointer', background: act ? '#ffffff0a' : 'transparent', borderBottom: '1px solid #14161b', borderLeft: act ? `2px solid ${accent}` : '2px solid transparent', transition: 'background .1s' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-                  <SevBadge severity={f.severity} />
-                  <StatusBadge status={f.status} />
+          {view === 'candidates' ? (
+            <>
+              {scanResult && !scanResult.error && (
+                <div style={{ padding: '6px 14px', background: '#0c1008', borderBottom: '1px solid #1e2910', fontSize: 9, color: '#39d353', fontFamily: 'JetBrains Mono' }}>
+                  Scan complete: {scanResult.created} new candidate{scanResult.created !== 1 ? 's' : ''}, {scanResult.skipped} already known
                 </div>
-                <div style={{ fontSize: 12, color: act ? '#f0f2f6' : '#b0b5c2', marginBottom: 3, fontWeight: act ? 600 : 400, lineHeight: 1.4 }}>{f.title}</div>
-                {h && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>{h.ip}</div>}
-                {f.cve && <div style={{ fontSize: 9, color: '#5b8af5', fontFamily: 'JetBrains Mono' }}>{f.cve}</div>}
-              </div>
-            );
-          })}
+              )}
+              {scanResult?.error && (
+                <div style={{ padding: '6px 14px', background: '#100808', borderBottom: '1px solid #2a1010', fontSize: 9, color: '#cc2233', fontFamily: 'JetBrains Mono' }}>{scanResult.error}</div>
+              )}
+              {projCandidates.length === 0 && (
+                <div style={{ padding: 24, textAlign: 'center', color: '#404550', fontSize: 11 }}>
+                  No candidates yet. Click ⚑ Scan to analyse the project.
+                </div>
+              )}
+              {[...projCandidates].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity)).map(f => {
+                const act = f.id === selected;
+                const h = projHosts.find(h => h.id === f.host_id);
+                return (
+                  <div key={f.id} onClick={() => setSelected(f.id)}
+                    style={{ padding: '10px 14px', cursor: 'pointer', background: act ? '#ffffff0a' : 'transparent', borderBottom: '1px solid #14161b', borderLeft: act ? `2px solid #f09a3a` : '2px solid transparent', transition: 'background .1s' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <SevBadge severity={f.severity} />
+                      <span style={{ fontSize: 8, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a44', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>CANDIDATE</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: act ? '#f0f2f6' : '#b0b5c2', marginBottom: 3, fontWeight: act ? 600 : 400, lineHeight: 1.4 }}>{f.title}</div>
+                    {h && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>{h.ip || h.hostname}</div>}
+                  </div>
+                );
+              })}
+            </>
+          ) : (
+            <>
+              {sorted.length === 0 && <div style={{ padding: 24, textAlign: 'center', color: '#404550', fontSize: 11 }}>No findings</div>}
+              {sorted.map(f => {
+                const act = f.id === selected;
+                const h = projHosts.find(h => h.id === f.host_id);
+                return (
+                  <div key={f.id} onClick={() => setSelected(f.id)}
+                    style={{ padding: '10px 14px', cursor: 'pointer', background: act ? '#ffffff0a' : 'transparent', borderBottom: '1px solid #14161b', borderLeft: act ? `2px solid ${accent}` : '2px solid transparent', transition: 'background .1s' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                      <SevBadge severity={f.severity} />
+                      <StatusBadge status={f.status} />
+                    </div>
+                    <div style={{ fontSize: 12, color: act ? '#f0f2f6' : '#b0b5c2', marginBottom: 3, fontWeight: act ? 600 : 400, lineHeight: 1.4 }}>{f.title}</div>
+                    {h && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>{h.ip}</div>}
+                    {f.cve && <div style={{ fontSize: 9, color: '#5b8af5', fontFamily: 'JetBrains Mono' }}>{f.cve}</div>}
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
         <div style={{ padding: '10px 14px', borderTop: '1px solid #1a1c22', display: 'flex', gap: 10 }}>
           {SEV_ORDER.map(s => (
@@ -361,20 +431,36 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
           <div style={{ padding: '10px 20px', borderBottom: '1px solid #1a1c22', background: '#0a0c10', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
             <SevBadge severity={selFinding.severity} size={11} />
             <span style={{ fontSize: 14, fontWeight: 600, color: '#f0f2f6', fontFamily: 'Space Grotesk', flex: 1 }}>{selFinding.title}</span>
-            <StatusBadge status={selFinding.status} />
-            <select value={selFinding.status}
-              onChange={e => onUpdate(selFinding.id, { status: e.target.value, ts: new Date().toISOString().slice(0,16).replace('T',' ') })}
-              style={{ background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono', cursor: 'pointer' }}>
-              {Object.entries(FINDING_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-            </select>
-            <button onClick={() => setEditing(true)}
-              style={{ background: 'none', border: `1px solid ${accent}55`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', color: accent, fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <Icon name="edit" size={11} color={accent} /> Edit
-            </button>
-            <button onClick={() => { onDelete(selFinding.id); setSelected(null); }}
-              style={{ background: 'none', border: '1px solid #cc233344', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#cc2233', display: 'flex' }}>
-              <Icon name="trash" size={13} color="currentColor" />
-            </button>
+            {selFinding.status === 'candidate' ? (
+              <>
+                <span style={{ fontSize: 8, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a44', borderRadius: 3, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>CANDIDATE</span>
+                <button onClick={() => { onUpdate(selFinding.id, { status: 'open', source: 'manual', ts: new Date().toISOString().slice(0,16).replace('T',' ') }); }}
+                  style={{ background: accent, border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>
+                  Promote → Finding
+                </button>
+                <button onClick={() => { onDelete(selFinding.id); setSelected(null); }}
+                  style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                  Dismiss
+                </button>
+              </>
+            ) : (
+              <>
+                <StatusBadge status={selFinding.status} />
+                <select value={selFinding.status}
+                  onChange={e => onUpdate(selFinding.id, { status: e.target.value, ts: new Date().toISOString().slice(0,16).replace('T',' ') })}
+                  style={{ background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono', cursor: 'pointer' }}>
+                  {Object.entries(FINDING_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </select>
+                <button onClick={() => setEditing(true)}
+                  style={{ background: 'none', border: `1px solid ${accent}55`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', color: accent, fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Icon name="edit" size={11} color={accent} /> Edit
+                </button>
+                <button onClick={() => { onDelete(selFinding.id); setSelected(null); }}
+                  style={{ background: 'none', border: '1px solid #cc233344', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#cc2233', display: 'flex' }}>
+                  <Icon name="trash" size={13} color="currentColor" />
+                </button>
+              </>
+            )}
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: '20px 28px' }}>
             {/* Meta row */}

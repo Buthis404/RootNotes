@@ -8,6 +8,7 @@ from ..core.utils import new_id, normalize_domain, domains_match
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 from ..core.permissions import get_membership, get_permissions_for_role
+from ..core.crypto import encrypt_str, decrypt_str
 
 router = APIRouter(prefix="/api/creds", tags=["creds"])
 
@@ -23,7 +24,9 @@ def _can_read_secret(user: models.User, pid: str, db: Session) -> bool:
 
 def _cred_out(cred: models.Cred, user: models.User, db: Session) -> dict:
     data = schemas.Cred.model_validate(cred).model_dump()
-    if not _can_read_secret(user, cred.pid, db):
+    if _can_read_secret(user, cred.pid, db):
+        data["secret"] = decrypt_str(data["secret"])
+    else:
         data["secret"] = ""
     return data
 
@@ -70,6 +73,8 @@ def create_cred(body: schemas.CredCreate, request: Request, db: Session = Depend
         if "@" in username:
             extracted = username.split("@", 1)[1]
             payload["domain"] = normalize_domain(extracted)
+    if payload.get("secret"):
+        payload["secret"] = encrypt_str(payload["secret"])
     cred = models.Cred(id=new_id("c"), **payload)
     if payload.get("is_domain"):
         _validate_domain_host_links(payload["pid"], payload.get("domain", ""), payload.get("host_ids") or [], db)
@@ -98,6 +103,8 @@ def update_cred(cid: str, body: schemas.CredUpdate, request: Request, db: Sessio
         if "@" in username:
             extracted = username.split("@", 1)[1]
             updates["domain"] = normalize_domain(extracted)
+    if "secret" in updates and updates["secret"]:
+        updates["secret"] = encrypt_str(updates["secret"])
     for k, v in updates.items():
         setattr(cred, k, v)
     if cred.is_domain:

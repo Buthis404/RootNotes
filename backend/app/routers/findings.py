@@ -12,14 +12,46 @@ router = APIRouter(prefix="/api/findings", tags=["findings"])
 
 
 @router.get("", response_model=list[schemas.Finding])
-def list_findings(pid: str | None = None, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+def list_findings(
+    pid: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     if pid:
         check_pid_access(db, pid, user, "findings.read")
-        return db.query(models.Finding).filter(models.Finding.pid == pid).all()
+        q = db.query(models.Finding).filter(models.Finding.pid == pid)
+        if status:
+            q = q.filter(models.Finding.status == status)
+        if source:
+            q = q.filter(models.Finding.source == source)
+        return q.order_by(models.Finding.ts.desc()).all()
     if user.role == "admin":
-        return db.query(models.Finding).all()
+        return db.query(models.Finding).order_by(models.Finding.ts.desc()).all()
     member_pids = get_user_member_pids(db, user)
-    return db.query(models.Finding).filter(models.Finding.pid.in_(member_pids)).all()
+    return db.query(models.Finding).filter(models.Finding.pid.in_(member_pids)).order_by(models.Finding.ts.desc()).all()
+
+
+@router.post("/scan-candidates", status_code=200)
+def scan_candidates(
+    pid: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Run project-wide candidate scanner and create/update Finding records with status='candidate'."""
+    check_pid_access(db, pid, user, "findings.create")
+    from ..core.candidate_scanner import run_scan
+    result = run_scan(db, pid)
+    log_event(db, pid, getattr(request.state, "username", None), "finding", "scan",
+              f"Candidate scan: {result.created} new, {result.skipped} already known",
+              {"created": result.created, "skipped": result.skipped})
+    return {
+        "created": result.created,
+        "skipped": result.skipped,
+        "candidates": result.candidates,
+    }
 
 
 @router.post("", response_model=schemas.Finding, status_code=201)

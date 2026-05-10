@@ -1,6 +1,7 @@
 import base64
 import logging
 import os
+from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -9,6 +10,9 @@ logger = logging.getLogger(__name__)
 _SENTINEL = "__enc__:"
 _fernet_instance: Fernet | None = None
 
+# Persist auto-generated key alongside uploaded data so it survives container restarts
+_KEY_FILE = Path(os.environ.get("UPLOAD_ROOT", "/data/uploads")).parent / "secret.key"
+
 
 def _get_fernet() -> Fernet:
     global _fernet_instance
@@ -16,22 +20,31 @@ def _get_fernet() -> Fernet:
         return _fernet_instance
 
     key = os.environ.get("ENCRYPTION_KEY", "").strip()
+
     if not key:
-        # Exactly 32 bytes → valid Fernet key, deterministic across restarts
-        key = base64.urlsafe_b64encode(b"rootnotes-insecure-fallback-key!").decode()
-        logger.warning(
-            "ENCRYPTION_KEY is not set — using insecure built-in key. "
-            "Set ENCRYPTION_KEY to a base64url Fernet key in production."
-        )
+        # Try to load from the persisted key file
+        try:
+            if _KEY_FILE.exists():
+                key = _KEY_FILE.read_text().strip()
+        except Exception:
+            pass
+
+    if not key:
+        # Generate a fresh random key and persist it for this deployment
+        key = Fernet.generate_key().decode()
+        try:
+            _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _KEY_FILE.write_text(key)
+            _KEY_FILE.chmod(0o600)
+            logger.info("ENCRYPTION_KEY not set — generated unique key, saved to %s", _KEY_FILE)
+        except Exception as exc:
+            logger.warning("Could not persist encryption key to %s: %s", _KEY_FILE, exc)
+
     try:
         _fernet_instance = Fernet(key.encode() if isinstance(key, str) else key)
     except Exception:
-        logger.error(
-            "ENCRYPTION_KEY has invalid format; falling back to insecure built-in key. "
-            "Fix ENCRYPTION_KEY env variable."
-        )
-        fallback = base64.urlsafe_b64encode(b"rootnotes-insecure-fallback-key!").decode()
-        _fernet_instance = Fernet(fallback.encode())
+        logger.error("ENCRYPTION_KEY has invalid format — generating a fresh in-memory key (data encrypted this session cannot be decrypted after restart)")
+        _fernet_instance = Fernet(Fernet.generate_key())
     return _fernet_instance
 
 

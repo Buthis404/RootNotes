@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
+from ..core.crypto import encrypt_str, decrypt_str
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast
 from ..core.utils import new_id, normalize_domain, ensure_under_upload_root, sync_project_ip_from_scopes, sync_scopes_from_project_ip
@@ -73,7 +74,7 @@ def export_project(pid: str, db: Session = Depends(get_db), user: models.User = 
 
         zf.writestr("creds.json", json.dumps([{
             "id": c.id, "host": c.host, "username": c.username,
-            "secret": c.secret if can_read_secret else "", "type": c.type, "service": c.service,
+            "secret": decrypt_str(c.secret) if can_read_secret else "", "type": c.type, "service": c.service,
             "notes": c.notes, "tags": c.tags, "cracked": c.cracked, "domain": c.domain,
             "host_ids": c.host_ids or [], "is_domain": c.is_domain,
         } for c in creds], ensure_ascii=False))
@@ -287,7 +288,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
             db.add(models.Cred(
                 id=new_cid, pid=new_pid,
                 host=c.get("host", ""), username=c.get("username", ""),
-                secret=c.get("secret", ""), type=c.get("type", "plain"),
+                secret=encrypt_str(c.get("secret", "")), type=c.get("type", "plain"),
                 service=c.get("service", ""), notes=c.get("notes", ""),
                 tags=c.get("tags", []), domain=normalize_domain(c.get("domain", "")),
                 cracked=c.get("cracked", False),

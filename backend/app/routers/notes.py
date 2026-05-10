@@ -103,7 +103,10 @@ async def upload_note_attachment(nid: str, file: UploadFile = File(...), db: Ses
     note_dir.mkdir(parents=True, exist_ok=True)
     disk_name = f"{att_id}{ext}"
     disk_path = ensure_under_upload_root(note_dir / disk_name)
+    MAX_UPLOAD = 50 * 1024 * 1024  # 50 MB
     content = await file.read()
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, "File exceeds 50 MB limit")
     disk_path.write_bytes(content)
     attachment = models.NoteAttachment(
         id=att_id,
@@ -113,7 +116,7 @@ async def upload_note_attachment(nid: str, file: UploadFile = File(...), db: Ses
         content_type=file.content_type or "application/octet-stream",
         file_size=len(content),
         storage_path=str(disk_path),
-        public_url=f"/uploads/{note.pid}/{nid}/{disk_name}",
+        public_url=f"/api/uploads/{note.pid}/{nid}/{disk_name}",
         ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
     )
     db.add(attachment)
