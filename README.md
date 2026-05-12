@@ -4,8 +4,6 @@
 
 Not a note-taking app. A platform where reconnaissance, operations, evidence, and reporting live in one space — and feed each other.
 
-![Attack Graph](docs/screenshots/attackgraph.png)
-
 ---
 
 ## The problem it solves
@@ -104,7 +102,7 @@ Executive summary built from real project data: compromised hosts, cracked crede
 
 ## The operational loop
 
-```
+```raw
 Reconnaissance  →  Collections  →  Operations  →  Results
      ↑                                               ↓
   Report    ←    Intelligence   ←   Graph State  ←──┘
@@ -131,7 +129,7 @@ open http://localhost:3000
 
 Default credentials (printed to backend logs on first start if `ADMIN_PASSWORD` is not set):
 
-```
+```raw
 admin / admin
 ```
 
@@ -153,7 +151,7 @@ admin / admin
 
 ## Architecture
 
-```
+```raw
 nginx ──► frontend   (React + Vite, static build)
      ──► backend    (FastAPI + SQLAlchemy + asyncio worker pool)
                 └──► PostgreSQL 16
