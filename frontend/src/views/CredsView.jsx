@@ -7,6 +7,7 @@ import { Badge, CredTypeBadge, SearchBar, FieldInput, TagEditor } from '../compo
 import { CRED_TYPES } from '../constants.js';
 import { getCredBadges, getCredTagMeta, normalizeDomain, domainsMatch } from '../utils/hostMeta.js';
 import { useColumnResize } from '../hooks/useColumnResize.js';
+import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
 
 const COMMON_SERVICES = ['SSH','SMB','RDP','HTTP','HTTPS','FTP','MySQL','PostgreSQL','MSSQL','Oracle','WinRM','LDAP','Kerberos','VNC','Telnet','WebApp'];
 
@@ -283,6 +284,8 @@ function ValidateCredPanel({ cred, projectHosts, selectedProject, accent, onClos
 }
 
 export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedProject, accent, hosts, fs = 14 }) {
+  const { can, isSuperAdmin } = useProjectPermissions();
+  const canReadSecret = isSuperAdmin || can('credentials.read_secret');
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState(null);
   const [filterDomain, setFilterDomain] = useState(false);
@@ -737,9 +740,13 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
 
                 {/* Secret */}
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12, overflow: 'hidden' }}>
-                  <span style={{ fontSize: Math.max(10, fs - 3), color: shown ? '#c8cdd6' : '#404550', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, filter: shown ? 'none' : 'blur(4px)', transition: 'filter .2s', userSelect: shown ? 'text' : 'none' }}>
-                    {cred.secret || '(empty)'}
-                  </span>
+                  {canReadSecret ? (
+                    <span style={{ fontSize: Math.max(10, fs - 3), color: shown ? '#c8cdd6' : '#404550', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, filter: shown ? 'none' : 'blur(4px)', transition: 'filter .2s', userSelect: shown ? 'text' : 'none' }}>
+                      {cred.secret || '(empty)'}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: Math.max(10, fs - 3), color: '#303540', fontFamily: 'JetBrains Mono', flex: 1 }}>••••••••</span>
+                  )}
                 </div>
 
                 {/* Cracked */}
@@ -752,18 +759,22 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
 
                 {/* Actions */}
                 <div style={{ width: 56, display: 'flex', alignItems: 'center', gap: 4 }} onClick={e => e.stopPropagation()}>
-                  <button onClick={() => toggleSecret(cred.id)} title={shown ? 'Hide' : 'Show'}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', display: 'flex', padding: 2 }}
-                    onMouseEnter={e => e.currentTarget.style.color = '#9098a8'}
-                    onMouseLeave={e => e.currentTarget.style.color = '#404550'}>
-                    <Icon name={shown ? 'eyeOff' : 'eye'} size={13} color="currentColor" />
-                  </button>
-                  <button onClick={() => copy(cred.secret, cred.id)} title="Copy"
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: isCopied ? '#39d353' : '#404550', display: 'flex', padding: 2 }}
-                    onMouseEnter={e => !isCopied && (e.currentTarget.style.color = '#9098a8')}
-                    onMouseLeave={e => !isCopied && (e.currentTarget.style.color = '#404550')}>
-                    <Icon name={isCopied ? 'check' : 'copy'} size={13} color="currentColor" />
-                  </button>
+                  {canReadSecret && (
+                    <button onClick={() => toggleSecret(cred.id)} title={shown ? 'Hide' : 'Show'}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', display: 'flex', padding: 2 }}
+                      onMouseEnter={e => e.currentTarget.style.color = '#9098a8'}
+                      onMouseLeave={e => e.currentTarget.style.color = '#404550'}>
+                      <Icon name={shown ? 'eyeOff' : 'eye'} size={13} color="currentColor" />
+                    </button>
+                  )}
+                  {canReadSecret && (
+                    <button onClick={() => copy(cred.secret, cred.id)} title="Copy"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: isCopied ? '#39d353' : '#404550', display: 'flex', padding: 2 }}
+                      onMouseEnter={e => !isCopied && (e.currentTarget.style.color = '#9098a8')}
+                      onMouseLeave={e => !isCopied && (e.currentTarget.style.color = '#404550')}>
+                      <Icon name={isCopied ? 'check' : 'copy'} size={13} color="currentColor" />
+                    </button>
+                  )}
                   <button onClick={() => { onDelete(cred.id); if (selectedId === cred.id) setSelectedId(null); }}
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#303540', display: 'flex', padding: 2 }}
                     onMouseEnter={e => e.currentTarget.style.color = '#cc2233'}
@@ -791,7 +802,10 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
                 {getCredBadges(selCred).map(b => <Badge key={b.label} label={b.label} color={b.color} />)}
               </div>
               <FieldInput label="Username" value={selCred.username} onChange={v => onUpdate(selCred.id, { username: v })} placeholder="DOMAIN\admin" />
-              <FieldInput label="Secret / Password / Hash" value={selCred.secret} onChange={v => onUpdate(selCred.id, { secret: v })} placeholder="P@ssw0rd or NTLM" />
+              {canReadSecret
+                ? <FieldInput label="Secret / Password / Hash" value={selCred.secret} onChange={v => onUpdate(selCred.id, { secret: v })} placeholder="P@ssw0rd or NTLM" />
+                : <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', padding: '6px 0' }}>Secret / Hash — <span style={{ color: '#303540' }}>access restricted</span></div>
+              }
 
               {/* Type */}
               <div>

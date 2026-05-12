@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { api, downloadUrl } from '../api.js';
 import Icon from '../components/Icon.jsx';
 import { SearchBar } from '../components/UI.jsx';
+import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
 
 async function downloadLoot(loot) {
   if (loot.public_url) {
@@ -54,6 +55,8 @@ function TypeBadge({ type }) {
 const EMPTY = { loot_type: 'file', value: '', description: '', source_path: '', host_id: null };
 
 export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, selectedProject, accent, fs = 14 }) {
+  const { can, isSuperAdmin } = useProjectPermissions();
+  const canReadSecret = isSuperAdmin || can('credentials.read_secret');
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -231,8 +234,8 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                     <span style={{ fontSize: 8, color: '#808590', background: '#80859018', border: '1px solid #80859033', borderRadius: 3, padding: '1px 4px', fontFamily: 'JetBrains Mono' }}>{loot.artifact_type.replace('_', ' ')}</span>
                   )}
                 </div>
-                <div style={{ flex: 1, minWidth: 0, fontFamily: 'JetBrains Mono', fontSize: Math.max(10, fs - 3), color: shown ? '#c8cdd6' : '#606570', filter: shown ? 'none' : 'blur(5px)', transition: 'filter .2s', userSelect: shown ? 'text' : 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {loot.value || '(empty)'}
+                <div style={{ flex: 1, minWidth: 0, fontFamily: 'JetBrains Mono', fontSize: Math.max(10, fs - 3), color: shown ? '#c8cdd6' : '#606570', filter: (canReadSecret && shown) ? 'none' : 'blur(5px)', transition: 'filter .2s', userSelect: (canReadSecret && shown) ? 'text' : 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {canReadSecret ? (loot.value || '(empty)') : '••••••••'}
                 </div>
                 <div style={{ width: 200, flexShrink: 0, fontSize: Math.max(10, fs - 3), color: '#808590', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {loot.description || '—'}
@@ -244,16 +247,20 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                   {hl || '—'}
                 </div>
                 <div style={{ width: 60, display: 'flex', gap: 4, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
-                  <button onClick={() => setShowValues(p => ({ ...p, [loot.id]: !p[loot.id] }))} title={shown ? 'Hide' : 'Show'}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', display: 'flex', padding: 2 }}
-                    onMouseEnter={e => e.currentTarget.style.color = '#9098a8'}
-                    onMouseLeave={e => e.currentTarget.style.color = '#404550'}>
-                    <Icon name={shown ? 'eyeOff' : 'eye'} size={12} color="currentColor" />
-                  </button>
-                  <button onClick={() => copy(loot.value, loot.id)} title="Copy"
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: isCopied ? '#39d353' : '#404550', display: 'flex', padding: 2 }}>
-                    <Icon name={isCopied ? 'check' : 'copy'} size={12} color="currentColor" />
-                  </button>
+                  {canReadSecret && (
+                    <button onClick={() => setShowValues(p => ({ ...p, [loot.id]: !p[loot.id] }))} title={shown ? 'Hide' : 'Show'}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', display: 'flex', padding: 2 }}
+                      onMouseEnter={e => e.currentTarget.style.color = '#9098a8'}
+                      onMouseLeave={e => e.currentTarget.style.color = '#404550'}>
+                      <Icon name={shown ? 'eyeOff' : 'eye'} size={12} color="currentColor" />
+                    </button>
+                  )}
+                  {canReadSecret && (
+                    <button onClick={() => copy(loot.value, loot.id)} title="Copy"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: isCopied ? '#39d353' : '#404550', display: 'flex', padding: 2 }}>
+                      <Icon name={isCopied ? 'check' : 'copy'} size={12} color="currentColor" />
+                    </button>
+                  )}
                   <button onClick={() => downloadLoot(loot)} title="Download"
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: loot.public_url ? '#5b8af5' : '#404550', display: 'flex', padding: 2 }}
                     onMouseEnter={e => e.currentTarget.style.color = '#5b8af5'}

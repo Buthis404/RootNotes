@@ -64,7 +64,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "editor": {
         "project.read", "project.export",
         "hosts.read", "hosts.create", "hosts.update", "hosts.delete",
-        "credentials.read", "credentials.create", "credentials.update", "credentials.delete",
+        "credentials.read", "credentials.read_secret", "credentials.create", "credentials.update", "credentials.delete",
         "findings.read", "findings.create", "findings.update", "findings.delete",
         "notes.read", "notes.create", "notes.update", "notes.delete",
         "loot.read", "loot.create", "loot.update", "loot.delete",
@@ -82,7 +82,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "operator": {
         "project.read",
         "hosts.read", "hosts.create", "hosts.update",
-        "credentials.read", "credentials.create", "credentials.update",
+        "credentials.read", "credentials.read_secret", "credentials.create", "credentials.update",
         "findings.read", "findings.create", "findings.update",
         "notes.read", "notes.create", "notes.update",
         "loot.read", "loot.create", "loot.update",
