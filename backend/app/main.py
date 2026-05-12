@@ -33,6 +33,7 @@ from .core.limiter import limiter
 from .core.security import decode_token, gen_password, hash_password
 from .core.deps import decode_ws_token
 from .core.utils import new_id
+from .core.crypto import encrypt_str, loot_value_is_sensitive, note_content_is_confidential
 from .plugins.registry import registry
 from .plugins.loader import initialize as init_plugins
 from .plugins.state import list_modules as list_module_state
@@ -63,6 +64,7 @@ with engine.begin() as conn:
     conn.execute(text("CREATE TABLE IF NOT EXISTS timeline_events (id TEXT PRIMARY KEY, pid TEXT NOT NULL, username TEXT, entity TEXT NOT NULL, action TEXT NOT NULL, label TEXT NOT NULL, meta JSONB NOT NULL DEFAULT '{}', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS objectives (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'flag', points INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'not_started', flag_value TEXT NOT NULL DEFAULT '', captured_by TEXT NOT NULL DEFAULT '', captured_at TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS host_activities (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, title TEXT NOT NULL DEFAULT '', activity_type TEXT NOT NULL DEFAULT 'recon', command TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'done', ts TEXT NOT NULL)"))
+    conn.execute(text("CREATE TABLE IF NOT EXISTS pivot_observations (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, source_host_id TEXT NOT NULL DEFAULT '', pivot_host_id TEXT NOT NULL DEFAULT '', target_host_id TEXT NOT NULL DEFAULT '', tool TEXT NOT NULL DEFAULT '', pivot_type TEXT NOT NULL DEFAULT 'route', label TEXT NOT NULL DEFAULT '', route_cidr TEXT NOT NULL DEFAULT '', bind_address TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', notes TEXT NOT NULL DEFAULT '', collector_target_id TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL, last_seen TEXT NOT NULL DEFAULT '')"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS attack_paths (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, name TEXT NOT NULL DEFAULT 'Attack Path', description TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS attack_steps (id TEXT PRIMARY KEY, path_id TEXT NOT NULL REFERENCES attack_paths(id) ON DELETE CASCADE, pid TEXT NOT NULL, step_order INTEGER NOT NULL DEFAULT 0, node_type TEXT NOT NULL DEFAULT 'host', label TEXT NOT NULL DEFAULT '', sublabel TEXT NOT NULL DEFAULT '', technique TEXT NOT NULL DEFAULT '', mitre_id TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS loots (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, loot_type TEXT NOT NULL DEFAULT 'file', value TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', source_path TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
@@ -363,14 +365,30 @@ async def lifespan(app: FastAPI):
                 logger.info("  Password: (from ADMIN_PASSWORD env var)")
             logger.info(border)
 
-        # Migrate: encrypt any plaintext cred secrets left from before P4
-        from .core.crypto import encrypt_str as _enc
+        # Migrate: encrypt any plaintext sensitive values left from before current security model.
         plaintext_creds = [c for c in db.query(models.Cred).all() if c.secret and not c.secret.startswith("__enc__:")]
         if plaintext_creds:
             for c in plaintext_creds:
-                c.secret = _enc(c.secret)
+                c.secret = encrypt_str(c.secret)
             db.commit()
             logger.info("Migrated %d plaintext credential secrets to encrypted storage", len(plaintext_creds))
+
+        plaintext_confidential_notes = [n for n in db.query(models.Note).all() if n.content and note_content_is_confidential(n.tags or []) and not n.content.startswith("__enc__:")]
+        if plaintext_confidential_notes:
+            for note in plaintext_confidential_notes:
+                note.content = encrypt_str(note.content)
+            db.commit()
+            logger.info("Migrated %d confidential notes to encrypted storage", len(plaintext_confidential_notes))
+
+        plaintext_loot_values = [
+            loot for loot in db.query(models.Loot).all()
+            if loot.value and loot_value_is_sensitive(loot.loot_type, loot.artifact_type, loot.filename, loot.storage_path, loot.public_url) and not loot.value.startswith("__enc__:")
+        ]
+        if plaintext_loot_values:
+            for loot in plaintext_loot_values:
+                loot.value = encrypt_str(loot.value)
+            db.commit()
+            logger.info("Migrated %d sensitive loot values to encrypted storage", len(plaintext_loot_values))
 
         # Backfill: make admin user owner of all projects without owners
         admin_users = db.query(models.User).filter(models.User.role == "admin", models.User.active == True).all()
@@ -507,8 +525,11 @@ async def download_upload(
         return JSONResponse({"detail": "User not found"}, status_code=401)
 
     from .core.access import check_pid_access as _check
+    from .core.events import log_event as _log_event
     try:
-        _check(db, pid, user, "notes.read")
+        entity = "loot" if path.startswith("loot/") else "note_attachment"
+        permission = "loot.read" if entity == "loot" else "notes.read"
+        _check(db, pid, user, permission)
     except Exception:
         return JSONResponse({"detail": "Access denied"}, status_code=403)
 
@@ -523,6 +544,9 @@ async def download_upload(
 
     if not safe.exists() or not safe.is_file():
         return JSONResponse({"detail": "File not found"}, status_code=404)
+
+    _log_event(db, pid, getattr(user, "username", None), "audit", "download_sensitive_file", f"Downloaded {entity}: {safe.name}", {"path": path, "entity": entity})
+    db.commit()
 
     return FileResponse(str(safe), filename=safe.name)
 
@@ -590,7 +614,7 @@ from .routers import (
     system_modules, attacker_exec, export, project_templates,
     scans, webhooks, c2, jobs, bulk_actions, playbooks, notifications,
     scheduled_playbooks, domains,
-    ai, import_scanners, attack_graph, kb, collections,
+    ai, import_scanners, attack_graph, kb, collections, pivots,
 )
 
 app.include_router(auth.router)
@@ -633,6 +657,7 @@ app.include_router(import_scanners.router)
 app.include_router(attack_graph.router)
 app.include_router(kb.router)
 app.include_router(collections.router)
+app.include_router(pivots.router)
 
 
 @app.get("/api/worker/status", tags=["worker"])

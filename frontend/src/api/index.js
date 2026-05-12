@@ -193,6 +193,12 @@ export const api = {
   getTopology:           (pid)          => req('GET',  `/projects/${pid}/topology`),
   getTopologySources:    (pid)          => req('GET',  `/projects/${pid}/topology/sources`),
 
+  // Pivot observations
+  listPivots:            (pid)          => req('GET',  `/projects/${pid}/pivots`),
+  createPivot:           (pid, data)    => req('POST', `/projects/${pid}/pivots`, data),
+  deletePivot:           (pid, pivotId) => req('DELETE', `/projects/${pid}/pivots/${pivotId}`),
+  collectPivots:         (pid, data)    => req('POST', `/projects/${pid}/pivots/collect`, data),
+
   // Project members
   getProjectMembers:       (pid)             => req('GET',    `/projects/${pid}/members`),
   getProjectAvailableUsers:(pid)             => req('GET',    `/projects/${pid}/available-users`),

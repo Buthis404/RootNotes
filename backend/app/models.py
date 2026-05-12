@@ -256,6 +256,27 @@ class HostActivity(Base):
     job_id = Column(String, nullable=False, default="")
 
 
+class PivotObservation(Base):
+    __tablename__ = "pivot_observations"
+
+    id = Column(String, primary_key=True)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    source_host_id = Column(String, nullable=False, default="")
+    pivot_host_id = Column(String, nullable=False, default="")
+    target_host_id = Column(String, nullable=False, default="")
+    tool = Column(String, nullable=False, default="")
+    pivot_type = Column(String, nullable=False, default="route")
+    label = Column(String, nullable=False, default="")
+    route_cidr = Column(String, nullable=False, default="")
+    bind_address = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="active")
+    notes = Column(Text, nullable=False, default="")
+    collector_target_id = Column(String, nullable=False, default="")
+    fingerprint = Column(String, nullable=False, default="")
+    ts = Column(String, nullable=False)
+    last_seen = Column(String, nullable=False, default="")
+
+
 class FindingTemplate(Base):
     __tablename__ = "finding_templates_custom"
 

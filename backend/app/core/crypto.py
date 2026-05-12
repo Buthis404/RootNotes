@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 _SENTINEL = "__enc__:"
 _fernet_instance: Fernet | None = None
+CONFIDENTIAL_NOTE_TAGS = {"confidential", "secret", "sensitive", "opsec", "restricted"}
 
 # Persist auto-generated key alongside uploaded data so it survives container restarts
 _KEY_FILE = Path(os.environ.get("UPLOAD_ROOT", "/data/uploads")).parent / "secret.key"
@@ -59,6 +60,10 @@ def encrypt_str(plaintext: str) -> str:
     return f"{_SENTINEL}{encrypted}"
 
 
+def is_encrypted(value: str) -> bool:
+    return bool(value) and value.startswith(_SENTINEL)
+
+
 def decrypt_str(value: str) -> str:
     """Decrypt a value encrypted with encrypt_str; returns original if not encrypted."""
     if not value or not value.startswith(_SENTINEL):
@@ -68,3 +73,22 @@ def decrypt_str(value: str) -> str:
     except (InvalidToken, Exception):
         logger.warning("Failed to decrypt value — returning raw (may be stale or corrupt)")
         return value
+
+
+def note_content_is_confidential(tags: list[str] | None) -> bool:
+    lowered = {str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()}
+    return bool(lowered & CONFIDENTIAL_NOTE_TAGS)
+
+
+def loot_value_is_sensitive(
+    loot_type: str = "",
+    artifact_type: str = "",
+    filename: str = "",
+    storage_path: str = "",
+    public_url: str = "",
+) -> bool:
+    if storage_path or public_url or filename:
+        return False
+    artifact = str(artifact_type or "").strip().lower()
+    ltype = str(loot_type or "").strip().lower()
+    return artifact != "file" and ltype != "file"

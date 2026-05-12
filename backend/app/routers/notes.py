@@ -9,6 +9,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
+from ..core.crypto import decrypt_str, encrypt_str, note_content_is_confidential
 from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
@@ -16,6 +17,13 @@ from ..core.access import check_pid_access, check_object_access, get_user_member
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["notes"])
+
+
+def _note_out(note: models.Note) -> dict:
+    data = schemas.Note.model_validate(note).model_dump()
+    if note_content_is_confidential(data.get("tags") or []):
+        data["content"] = decrypt_str(data.get("content") or "")
+    return data
 
 
 @router.get("/api/notes", response_model=list[schemas.Note])
@@ -26,24 +34,32 @@ def list_notes(
 ):
     if pid:
         check_pid_access(db, pid, user, "notes.read")
-        return db.query(models.Note).filter(models.Note.pid == pid).all()
+        notes = db.query(models.Note).filter(models.Note.pid == pid).all()
+        confidential_count = sum(1 for note in notes if note_content_is_confidential(note.tags or []))
+        if confidential_count:
+            log_event(db, pid, getattr(user, "username", None), "audit", "read_confidential_notes", f"Confidential notes viewed ({confidential_count})", {"count": confidential_count})
+            db.commit()
+        return [_note_out(note) for note in notes]
     if user.role == "admin":
-        return db.query(models.Note).all()
+        return [_note_out(note) for note in db.query(models.Note).all()]
     member_pids = get_user_member_pids(db, user)
-    return db.query(models.Note).filter(models.Note.pid.in_(member_pids)).all()
+    return [_note_out(note) for note in db.query(models.Note).filter(models.Note.pid.in_(member_pids)).all()]
 
 
 @router.post("/api/notes", response_model=schemas.Note, status_code=201)
 def create_note(body: schemas.NoteCreate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, body.pid, user, "notes.create")
-    note = models.Note(id=new_id("n"), **body.model_dump())
+    payload = body.model_dump()
+    if note_content_is_confidential(payload.get("tags") or []) and payload.get("content"):
+        payload["content"] = encrypt_str(payload["content"])
+    note = models.Note(id=new_id("n"), **payload)
     db.add(note)
     log_event(db, note.pid, getattr(request.state, "username", None), "note", "create", f"Note created: «{note.title}»", {"id": note.id})
     db.commit()
     db.refresh(note)
-    n = schemas.Note.model_validate(note)
-    bcast(note.pid, "note", "create", n.model_dump())
-    return note
+    payload = _note_out(note)
+    bcast(note.pid, "note", "create", payload)
+    return payload
 
 
 @router.patch("/api/notes/{nid}", response_model=schemas.Note)
@@ -56,6 +72,13 @@ def update_note(nid: str, body: schemas.NoteUpdate, request: Request, db: Sessio
         raise HTTPException(status_code=409, detail=schemas.Note.model_validate(note).model_dump())
     old_title = note.title
     patch = body.model_dump(exclude_none=True, exclude={"client_version"})
+    next_tags = patch.get("tags", note.tags or [])
+    next_content = patch.get("content", note.content or "")
+    if "content" in patch or "tags" in patch:
+        if note_content_is_confidential(next_tags) and next_content:
+            patch["content"] = encrypt_str(decrypt_str(next_content))
+        else:
+            patch["content"] = decrypt_str(next_content)
     for k, v in patch.items():
         setattr(note, k, v)
     note.version += 1
@@ -63,9 +86,9 @@ def update_note(nid: str, body: schemas.NoteUpdate, request: Request, db: Sessio
         log_event(db, note.pid, getattr(request.state, "username", None), "note", "update", f"Note renamed: «{old_title}» → «{note.title}»", {"id": note.id})
     db.commit()
     db.refresh(note)
-    n = schemas.Note.model_validate(note)
-    bcast(note.pid, "note", "update", n.model_dump())
-    return note
+    payload = _note_out(note)
+    bcast(note.pid, "note", "update", payload)
+    return payload
 
 
 @router.delete("/api/notes/{nid}", status_code=204)

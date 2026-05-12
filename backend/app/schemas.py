@@ -632,6 +632,48 @@ class HostActivity(HostActivityBase):
     model_config = {"from_attributes": True}
 
 
+# ── Pivot Observations ────────────────────────────────────────────────
+class PivotObservationBase(BaseModel):
+    source_host_id: str = ""
+    pivot_host_id: str
+    target_host_id: str = ""
+    tool: str = ""
+    pivot_type: str = "route"
+    label: str = ""
+    route_cidr: str = ""
+    bind_address: str = ""
+    status: str = "active"
+    notes: str = ""
+
+
+class PivotObservationCreate(PivotObservationBase):
+    pid: str
+
+
+class PivotObservationUpdate(BaseModel):
+    source_host_id: Optional[str] = None
+    pivot_host_id: Optional[str] = None
+    target_host_id: Optional[str] = None
+    tool: Optional[str] = None
+    pivot_type: Optional[str] = None
+    label: Optional[str] = None
+    route_cidr: Optional[str] = None
+    bind_address: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    last_seen: Optional[str] = None
+
+
+class PivotObservation(PivotObservationBase):
+    id: str
+    pid: str
+    collector_target_id: str = ""
+    fingerprint: str = ""
+    ts: str
+    last_seen: str = ""
+    model_config = {"from_attributes": True}
+
+
 # ── CredHostNote ──────────────────────────────────────────────────────
 class CredHostNoteCreate(BaseModel):
     cred_id: str

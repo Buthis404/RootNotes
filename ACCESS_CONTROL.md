@@ -98,12 +98,16 @@ GET    /api/projects/{pid}/permissions/me       - get my project permissions
 - No IDOR: a user cannot access objects from another project by direct ID
 - `GET /api/projects` returns only projects where the user is a member
 - `credentials.secret` is returned as an empty string without the `credentials.read_secret` permission
+- viewing decrypted credential secrets is audit-logged in the project timeline
+- viewing confidential note content is audit-logged in the project timeline
+- viewing sensitive text loot or downloading protected uploaded files is audit-logged in the project timeline
 - Export requires `project.export`; import requires `project.import`
 - WebSocket (`/ws/{pid}`) validates membership before connecting
 - When a project is created, the creator automatically becomes `owner`
 - When a new project is imported, the current user becomes `owner`
 - The last `owner` of a project cannot be removed
 - Global `admin` bypasses all project-level checks
+- `POST /api/projects/{pid}/purge` requires the same authority as project deletion and also removes project upload files from disk
 
 ---
 

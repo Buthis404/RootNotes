@@ -55,6 +55,9 @@ def list_creds(
     if pid:
         check_pid_access(db, pid, user, "credentials.read")
         creds = db.query(models.Cred).filter(models.Cred.pid == pid).all()
+        if creds and _can_read_secret(user, pid, db):
+            log_event(db, pid, getattr(user, "username", None), "audit", "read_credential_secrets", f"Credential secrets viewed ({len(creds)})", {"count": len(creds)})
+            db.commit()
     elif user.role == "admin":
         creds = db.query(models.Cred).all()
     else:

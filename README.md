@@ -173,3 +173,7 @@ nginx ──► frontend   (React + Vite, static build)
 - Designed for internal trusted networks — no public internet exposure assumed
 - All file downloads require a valid auth token (`?token=` or `Authorization` header)
 - Credentials encrypted at rest
+- Confidential note content is encrypted at rest when the note carries tags like `confidential`, `secret`, `sensitive`, `opsec`, or `restricted`
+- Sensitive text loot values are encrypted at rest for non-file artifacts
+- Read-audit events are recorded when users view credential secrets, confidential notes, sensitive loot, or download protected files
+- Project owners/admins can trigger `POST /api/projects/{pid}/purge` to remove a project and its uploaded files quickly after an operation

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
-from ..core.crypto import encrypt_str, decrypt_str
+from ..core.crypto import decrypt_str, encrypt_str, loot_value_is_sensitive, note_content_is_confidential
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast
 from ..core.utils import new_id, normalize_domain, ensure_under_upload_root, sync_project_ip_from_scopes, sync_scopes_from_project_ip
@@ -61,7 +61,7 @@ def export_project(pid: str, db: Session = Depends(get_db), user: models.User = 
         }, ensure_ascii=False))
 
         zf.writestr("notes.json", json.dumps([{
-            "id": n.id, "title": n.title, "content": n.content,
+            "id": n.id, "title": n.title, "content": decrypt_str(n.content) if note_content_is_confidential(n.tags or []) else n.content,
             "phase": n.phase, "tags": n.tags, "ts": n.ts, "starred": n.starred,
         } for n in notes], ensure_ascii=False))
 
@@ -116,7 +116,8 @@ def export_project(pid: str, db: Session = Depends(get_db), user: models.User = 
         for loot in loots:
             loot_entry = {
                 "id": loot.id, "host_id": loot.host_id, "loot_type": loot.loot_type,
-                "value": loot.value, "description": loot.description,
+                "value": decrypt_str(loot.value) if loot_value_is_sensitive(loot.loot_type, loot.artifact_type, loot.filename, loot.storage_path, loot.public_url) else loot.value,
+                "description": loot.description,
                 "source_path": loot.source_path, "filename": loot.filename,
                 "content_type": loot.content_type, "file_size": loot.file_size,
                 "public_url": loot.public_url, "ts": loot.ts,
@@ -222,7 +223,8 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
             note_id_map[n["id"]] = new_nid
             obj = models.Note(
                 id=new_nid, pid=new_pid,
-                title=n.get("title", ""), content=n.get("content", ""),
+                title=n.get("title", ""),
+                content=encrypt_str(n.get("content", "")) if note_content_is_confidential(n.get("tags", [])) and n.get("content", "") else n.get("content", ""),
                 phase=n.get("phase", "recon"), tags=n.get("tags", []),
                 ts=n.get("ts", ""), starred=n.get("starred", False),
             )
@@ -393,11 +395,19 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
             db.add(models.Loot(
                 id=new_lid, pid=new_pid,
                 host_id=host_id_map.get(old_hid) if old_hid else None,
-                loot_type=l.get("loot_type", "file"), value=l.get("value", ""),
+                loot_type=l.get("loot_type", "file"),
+                value=encrypt_str(l.get("value", "")) if loot_value_is_sensitive(l.get("loot_type", "file"), l.get("artifact_type", "file"), filename, storage_path, public_url) and l.get("value", "") else l.get("value", ""),
                 description=l.get("description", ""), source_path=source_path,
                 filename=filename, content_type=content_type, file_size=file_size,
                 storage_path=storage_path, public_url=public_url,
                 ts=l.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
+                artifact_type=l.get("artifact_type", "file"),
+                tags=l.get("tags", []),
+                job_id=l.get("job_id", ""),
+                cred_id=l.get("cred_id", ""),
+                finding_id=l.get("finding_id", ""),
+                playbook_run_id=l.get("playbook_run_id", ""),
+                sha256=l.get("sha256", ""),
             ))
 
         for s in scopes_data:

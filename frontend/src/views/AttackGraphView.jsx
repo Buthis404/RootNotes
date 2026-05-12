@@ -12,6 +12,12 @@ const CRED_COLOR = {
   key: '#5b8af5', kerberos: '#f09a3a',
 };
 
+const ACCESS_COLOR = {
+  verified: '#39d353',
+  inferred: '#f09a3a',
+  path: '#5b8af5',
+};
+
 const SEV_COLOR = {
   critical: '#cc2233', high: '#e8574a', medium: '#f09a3a', low: '#e8cc42', info: '#5b8af5',
 };
@@ -129,12 +135,18 @@ function HostNode({ node, selected, onMouseDown, onClick }) {
 }
 
 // ── Edge component ───────────────────────────────────────────────────────────
-function CredEdge({ edge, nodes }) {
+function GraphEdge({ edge, nodes }) {
   const src = nodes.find(n => n.id === (edge.source || edge.from));
   const tgt = nodes.find(n => n.id === (edge.target || edge.to));
   if (!src || !tgt || src === tgt) return null;
 
-  const color = CRED_COLOR[edge.cred_type] || CRED_COLOR.plain;
+  const isAccess = edge.kind === 'access';
+  const isPath = edge.kind === 'path';
+  const color = isAccess
+    ? (edge.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred)
+    : isPath
+      ? ACCESS_COLOR.path
+      : (CRED_COLOR[edge.cred_type] || CRED_COLOR.plain);
   const markerId = `arr-${color.replace('#', '')}`;
 
   // Connect right of src to left of tgt (or left-to-right, depending on position)
@@ -157,13 +169,14 @@ function CredEdge({ edge, nodes }) {
 
   return (
     <g>
-      <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeOpacity={0.55}
+      <path d={d} fill="none" stroke={color} strokeWidth={isAccess ? 2.2 : 1.5} strokeOpacity={isAccess ? 0.8 : 0.55}
+        strokeDasharray={isAccess && !edge.verified ? '6 4' : isPath ? '3 5' : undefined}
         markerEnd={`url(#${markerId})`} />
       {edge.label && (
         <>
-          <rect x={lx - 22} y={ly - 9} width={44} height={12} rx={3} fill="#07080b" opacity={0.85} />
+          <rect x={lx - 28} y={ly - 9} width={56} height={12} rx={3} fill="#07080b" opacity={0.9} />
           <text x={lx} y={ly} textAnchor="middle" fontSize={8} fill={color} fontFamily="JetBrains Mono" opacity={0.9}>
-            {edge.label.slice(0, 12)}
+            {edge.label.slice(0, 16)}
           </text>
         </>
       )}
@@ -302,13 +315,25 @@ export default function AttackGraphView({ selectedProject, accent }) {
     y: nodePos[n.id]?.y ?? n.y,
   }));
   const edges = graphData?.edges || [];
-  const arrowColors = [...new Set(edges.map(e => CRED_COLOR[e.cred_type] || CRED_COLOR.plain))];
+  const arrowColors = [...new Set(edges.map(e => {
+    if (e.kind === 'access') return e.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred;
+    if (e.kind === 'path') return ACCESS_COLOR.path;
+    return CRED_COLOR[e.cred_type] || CRED_COLOR.plain;
+  }))];
 
   const stats = {
     hosts: nodes.length,
     edges: edges.length,
     compromised: nodes.filter(n => n.status === 'pwned' || n.status === 'owned').length,
+    access: graphData?.stats?.access_edges || 0,
+    verifiedAccess: graphData?.stats?.verified_access_edges || 0,
+    creds: graphData?.stats?.credential_edges || 0,
   };
+
+  const selectedNodeEdges = selectedNode
+    ? edges.filter(e => e.from === selectedNode.id || e.to === selectedNode.id)
+    : [];
+  const selectedNodeAccessEdges = selectedNodeEdges.filter(e => e.kind === 'access');
 
   const linkedCreds = selectedNode
     ? allCreds.filter(c => (c.host_ids || []).includes(selectedNode.id))
@@ -352,6 +377,9 @@ export default function AttackGraphView({ selectedProject, accent }) {
           {[
             { label: 'hosts', val: stats.hosts, c: '#c8cdd6' },
             { label: 'connections', val: stats.edges, c: '#c8cdd6' },
+            { label: 'access', val: stats.access, c: ACCESS_COLOR.verified },
+            { label: 'verified', val: stats.verifiedAccess, c: ACCESS_COLOR.inferred },
+            { label: 'cred links', val: stats.creds, c: '#c07af0' },
             { label: 'compromised', val: stats.compromised, c: '#f09a3a' },
           ].map(({ label, val, c }) => (
             <span key={label} style={{ fontSize: 11, color: '#505560', fontFamily: 'JetBrains Mono' }}>
@@ -393,7 +421,7 @@ export default function AttackGraphView({ selectedProject, accent }) {
           {!loading && !error && nodes.length === 0 && (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 10, color: '#404550', fontFamily: 'JetBrains Mono', fontSize: 12 }}>
               <span style={{ fontSize: 30, opacity: 0.25 }}>◈</span>
-              <span>No data — add hosts and link credentials to build the graph</span>
+              <span>No data — add hosts and access edges to build the graph</span>
             </div>
           )}
 
@@ -410,7 +438,7 @@ export default function AttackGraphView({ selectedProject, accent }) {
               </defs>
               <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
                 {/* Edges first */}
-                {edges.map((e, i) => <CredEdge key={i} edge={e} nodes={nodes} />)}
+                {edges.map((e, i) => <GraphEdge key={i} edge={e} nodes={nodes} />)}
                 {/* Nodes on top */}
                 {nodes.map(n => (
                   <HostNode
@@ -443,13 +471,25 @@ export default function AttackGraphView({ selectedProject, accent }) {
             </span>
           </div>
 
-          {/* Cred-type legend */}
+          {/* Graph legend */}
           {nodes.length > 0 && (
             <div style={{
               position: 'absolute', bottom: 14, right: selectedNode ? 298 : 14,
               display: 'flex', gap: 10, background: '#0d0f1499', backdropFilter: 'blur(4px)',
               border: '1px solid #1e2029', borderRadius: 6, padding: '5px 10px',
             }}>
+              {[
+                ['access', ACCESS_COLOR.verified],
+                ['inferred', ACCESS_COLOR.inferred],
+                ['path', ACCESS_COLOR.path],
+                ['rN = reachable', '#5b8af5'],
+                ['vN = verified path', '#39d353'],
+              ].map(([type, color]) => (
+                <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <svg width={16} height={4}><rect width={16} height={2} y={1} rx={1} fill={color} /></svg>
+                  <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono', textTransform: 'uppercase' }}>{type}</span>
+                </div>
+              ))}
               {Object.entries(CRED_COLOR).map(([type, color]) => (
                 <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <svg width={16} height={4}><rect width={16} height={2} y={1} rx={1} fill={color} /></svg>
@@ -492,9 +532,20 @@ export default function AttackGraphView({ selectedProject, accent }) {
 
               {/* Host details */}
               <PanelSection title="Host">
+                <InfoRow label="Role" value={selectedNode.role} />
+                <InfoRow label="Zone" value={selectedNode.zone_type} />
                 <InfoRow label="OS" value={selectedNode.os} />
                 <InfoRow label="Hostname" value={selectedNode.label || selectedNode.hostname} />
                 <InfoRow label="IP" value={selectedNode.ip} />
+                {selectedNode.reachability?.is_root && <InfoRow label="Reach" value="attacker root" />}
+                {!selectedNode.reachability?.is_root && selectedNode.reachability?.reachable && (
+                  <InfoRow label="Reach" value={selectedNode.reachability?.reachable_via_verified_path
+                    ? `verified path (${selectedNode.reachability?.verified_distance} hop)`
+                    : `reachable (${selectedNode.reachability?.distance} hop)`} />
+                )}
+                {!selectedNode.reachability?.is_root && !selectedNode.reachability?.reachable && (
+                  <InfoRow label="Reach" value="unreachable from attacker" />
+                )}
                 {selectedNode.tags?.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 2 }}>
                     {selectedNode.tags.map(t => (
@@ -514,6 +565,35 @@ export default function AttackGraphView({ selectedProject, accent }) {
                       {selectedNode.ports.length > 20 && <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>+{selectedNode.ports.length - 20}</span>}
                     </div>
                   </div>
+                )}
+              </PanelSection>
+
+              <PanelSection title="Access" count={selectedNodeAccessEdges.length}>
+                {selectedNodeAccessEdges.length === 0 ? (
+                  <div style={{ fontSize: 10, color: '#353840', fontFamily: 'JetBrains Mono' }}>No access edges for this host</div>
+                ) : selectedNodeAccessEdges.slice(0, 8).map(edge => {
+                  const peerId = edge.from === selectedNode.id ? edge.to : edge.from;
+                  const peer = nodes.find(n => n.id === peerId);
+                  const outgoing = edge.from === selectedNode.id;
+                  const color = edge.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred;
+                  return (
+                    <div key={edge.id} style={{ background: '#0a0c10', border: `1px solid ${color}33`, borderRadius: 5, padding: '7px 9px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                        <span style={{ fontSize: 9, color, fontFamily: 'JetBrains Mono', textTransform: 'uppercase' }}>{outgoing ? 'out' : 'in'}</span>
+                        <span style={{ fontSize: 10, color: '#c8cdd6', fontWeight: 600 }}>{peer?.label || peer?.ip || peerId}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: edge.reason ? 5 : 0 }}>
+                        <span style={{ fontSize: 8, color, background: color + '18', border: `1px solid ${color}33`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{edge.access_type || edge.label}</span>
+                        <span style={{ fontSize: 8, color: edge.verified ? '#39d353' : '#808590', background: edge.verified ? '#39d35318' : '#80859018', border: `1px solid ${edge.verified ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{edge.verified ? 'verified' : 'inferred'}</span>
+                        {edge.state && <span style={{ fontSize: 8, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{edge.state}</span>}
+                        {edge.confidence != null && <span style={{ fontSize: 8, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{Math.round(Number(edge.confidence) * 100)}%</span>}
+                      </div>
+                      {edge.reason && <div style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>{edge.reason}</div>}
+                    </div>
+                  );
+                })}
+                {selectedNodeAccessEdges.length > 8 && (
+                  <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>+{selectedNodeAccessEdges.length - 8} more</div>
                 )}
               </PanelSection>
 

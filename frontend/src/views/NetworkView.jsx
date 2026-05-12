@@ -131,7 +131,7 @@ function LateralPathsPanel({ hostId, projectId, accent }) {
   );
 }
 
-function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, deleteEdge, onClose, onAddActivity, onUpdateActivity, onDeleteActivity }) {
+function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, deleteEdge, onClose, onAddActivity, onUpdateActivity, onDeleteActivity, pivots = [], projectHosts = [] }) {
   const [activeTab, setActiveTab] = useState('details');
   const [creds, setCreds] = useState(null);
   const [credsLoading, setCredsLoading] = useState(false);
@@ -213,6 +213,10 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
     () => selectedNode ? edges.filter(e => e.from === selectedNode.id || e.to === selectedNode.id) : [],
     [edges, selectedNode],
   );
+  const selectedNodePivots = useMemo(() => {
+    if (!selectedNode || !hostObj) return [];
+    return pivots.filter(p => p.pivot_host_id === hostObj.id || p.source_host_id === hostObj.id || p.target_host_id === hostObj.id);
+  }, [hostObj, pivots, selectedNode]);
 
   if (!selectedNode && !selectedRegion) return null;
 
@@ -368,6 +372,27 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                 );
               })}
             </div>
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Pivot Observations</div>
+              {selectedNodePivots.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No pivot data for this host</div>}
+              {selectedNodePivots.map(pivot => {
+                const src = projectHosts.find(h => h.id === pivot.source_host_id);
+                const tgt = projectHosts.find(h => h.id === pivot.target_host_id);
+                return (
+                  <div key={pivot.id} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 10px', marginBottom: 8 }}>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
+                      <span style={{ fontSize: 8, color: '#e8cc42', background: '#e8cc4218', border: '1px solid #e8cc4233', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.tool || 'pivot'}</span>
+                      <span style={{ fontSize: 8, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.pivot_type}</span>
+                      <span style={{ fontSize: 8, color: pivot.status === 'active' ? '#39d353' : '#808590', background: pivot.status === 'active' ? '#39d35318' : '#80859018', border: `1px solid ${pivot.status === 'active' ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.status}</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: '#c8cdd6', fontWeight: 600, marginBottom: 4 }}>{pivot.label || `${pivot.tool} ${pivot.pivot_type}`}</div>
+                    {pivot.route_cidr && <div style={{ fontSize: 9, color: '#9098a8', fontFamily: 'JetBrains Mono', marginBottom: 3 }}>route {pivot.route_cidr}</div>}
+                    {pivot.bind_address && <div style={{ fontSize: 9, color: '#9098a8', fontFamily: 'JetBrains Mono', marginBottom: 3 }}>bind {pivot.bind_address}</div>}
+                    {(src || tgt) && <div style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>{src ? `from ${src.hostname || src.ip}` : 'from ?'}{tgt ? ` -> ${tgt.hostname || tgt.ip}` : ''}</div>}
+                  </div>
+                );
+              })}
+            </div>
             <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, padding: '7px 9px' }}><div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', marginBottom: 5 }}>Lazy data</div><div style={{ fontSize: 10, color: '#606570' }}>Credentials and activity stay out of the render path until their tab is opened.</div></div>
           </>}
 
@@ -406,7 +431,7 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
   );
 }
 
-function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData, accessOverlay, overlayMode }) {
+function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData, accessOverlay, overlayMode, pivots = [], projectHosts = [] }) {
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [connecting, setConnecting] = useState(null);
@@ -1382,6 +1407,8 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
           onAddActivity={onAddActivity}
           onUpdateActivity={onUpdateActivity}
           onDeleteActivity={onDeleteActivity}
+          pivots={pivots}
+          projectHosts={projectHosts}
         />
       </div>
     </div>
@@ -1397,8 +1424,9 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [smartBuilding, setSmartBuilding] = useState(false);
   const [topologyEnabled, setTopologyEnabled] = useState(true);
   const [accessOverlay, setAccessOverlay] = useState(false);
-  const [overlayMode, setOverlayMode] = useState('none'); // 'none'|'threats'|'sessions'|'access'|'roles'
+  const [overlayMode, setOverlayMode] = useState('none'); // 'none'|'threats'|'sessions'|'access'|'pivots'|'roles'
   const [allActivities, setAllActivities] = useState([]);
+  const [pivots, setPivots] = useState([]);
 
   useEffect(() => {
     if (networks.length > 0) {
@@ -1419,6 +1447,11 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     });
     return () => { cancelled = true; };
   }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    api.listPivots(projectId).then(data => setPivots(data?.items || [])).catch(() => setPivots([]));
+  }, [projectId, networks]);
 
   const activeNet = networks.find(n => n.id === activeNetId);
   const projectHosts = hosts;
@@ -1503,6 +1536,14 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       }
     }
 
+    if (overlayMode === 'pivots') {
+      for (const pivot of pivots) {
+        if (pivot.source_host_id) set(pivot.source_host_id, { color: '#c07af0', label: 'Pivot source', priority: 3 });
+        if (pivot.pivot_host_id) set(pivot.pivot_host_id, { color: '#e8cc42', label: pivot.route_cidr ? `Pivot ${pivot.route_cidr}` : 'Pivot node', priority: 5 });
+        if (pivot.target_host_id) set(pivot.target_host_id, { color: '#5b8af5', label: 'Pivot target', priority: 2 });
+      }
+    }
+
     if (overlayMode === 'roles') {
       for (const host of projectHosts) {
         const color = ROLE_COLORS[host.role] || '#606570';
@@ -1512,7 +1553,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     }
 
     return map.size > 0 ? map : null;
-  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities]);
+  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities, pivots]);
 
   const mappedIps = useMemo(
     () => new Set((activeNet?.nodes || []).map(n => n.ip).filter(Boolean)),
@@ -1553,27 +1594,43 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     }
   };
 
+  const handleCollectPivots = async () => {
+    try {
+      await api.collectPivots(projectId, {});
+      const data = await api.listPivots(projectId);
+      setPivots(data?.items || []);
+      await onRefreshNetworks?.();
+    } catch (e) {
+      console.error('Pivot collection failed:', e);
+    }
+  };
+
   const startRename = (net) => { setEditingName(net.id); setNameVal(net.name); };
   const commitRename = (id) => { if (nameVal.trim()) onUpdateNetwork(id, { name: nameVal.trim() }); setEditingName(null); };
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Row 1: network tabs + background picker + add network */}
       <div style={{ display: 'flex', alignItems: 'center', background: '#0a0b0f', borderBottom: '1px solid #1a1c22', flexShrink: 0, paddingLeft: 4 }}>
         <div style={{ display: 'flex', flex: 1, overflowX: 'auto' }}>
           {networks.map(net => { const isActive = net.id === activeNetId; return <div key={net.id} style={{ display: 'flex', alignItems: 'center', borderRight: '1px solid #1a1c22', flexShrink: 0 }}><span style={{ width: 8, alignSelf: 'stretch', background: net.background || '#07080b' }} />{editingName === net.id ? <input autoFocus value={nameVal} onChange={e => setNameVal(e.target.value)} onBlur={() => commitRename(net.id)} onKeyDown={e => { if (e.key === 'Enter') commitRename(net.id); if (e.key === 'Escape') setEditingName(null); }} style={{ background: '#0e1016', border: '1px solid ' + accent, outline: 'none', color: '#f0f2f6', fontSize: 11, fontFamily: 'JetBrains Mono', padding: '6px 10px', width: 140 }} /> : <button onClick={() => setActiveNetId(net.id)} onDoubleClick={() => startRename(net)} style={{ background: isActive ? '#12141a' : 'transparent', border: 'none', borderBottom: isActive ? `2px solid ${accent}` : '2px solid transparent', padding: '9px 14px', cursor: 'pointer', color: isActive ? '#f0f2f6' : '#606570', fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: isActive ? 600 : 400 }}>{net.name}<span style={{ fontSize: 9, color: isActive ? accent + '99' : '#404550', marginLeft: 6 }}>{net.nodes?.length || 0}</span></button>}{isActive && networks.length > 1 && <button onClick={() => onDeleteNetwork(net.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', padding: '0 6px', display: 'flex' }}><Icon name="close" size={10} color="currentColor" /></button>}</div>; })}
         </div>
         {activeNet && <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingRight: 10 }}>{NETWORK_BACKGROUNDS.map(bg => <button key={bg} onClick={() => onUpdateNetwork(activeNet.id, { background: bg })} style={{ width: 14, height: 14, borderRadius: 3, background: bg, border: `1px solid ${(activeNet.background || '#07080b') === bg ? accent : '#2a2d35'}`, cursor: 'pointer' }} />)}</div>}
         <button onClick={() => onCreateNetwork({ pid: projectId, name: `Network ${networks.length + 1}`, background: NETWORK_BACKGROUNDS[networks.length % NETWORK_BACKGROUNDS.length] })} style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="plus" size={11} color="currentColor" /> Network</button>
+      </div>
 
+      {/* Row 2: topology controls + overlay selector */}
+      {topologyEnabled && (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', background: '#0a0b0f', borderBottom: '1px solid #1a1c22', flexShrink: 0, overflowX: 'auto' }}>
         {/* Auto-layout button — amber when unmapped hosts exist */}
-        {topologyEnabled && projectHosts.length > 0 && (
+        {projectHosts.length > 0 && (
           <button
             onClick={handleAutoBuild}
             disabled={autoBuilding}
             title={unmappedHosts.length > 0
               ? `Place ${unmappedHosts.length} unmapped hosts on map and re-run layout`
               : 'Re-run layout algorithm for all nodes'}
-            style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: autoBuilding ? 'default' : 'pointer', color: unmappedHosts.length > 0 ? '#f09a3a' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: autoBuilding ? 0.6 : 1, transition: 'color .15s' }}
+            style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: autoBuilding ? 'default' : 'pointer', color: unmappedHosts.length > 0 ? '#f09a3a' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: autoBuilding ? 0.6 : 1, transition: 'color .15s', flexShrink: 0 }}
           >
             <Icon name="reset" size={11} color="currentColor" />
             {autoBuilding ? 'Building…' : 'Auto-layout'}
@@ -1585,25 +1642,25 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           </button>
         )}
 
-        {/* Smart Build — full pentest-aware topology from all data sources */}
-        {topologyEnabled && projectHosts.length > 0 && (
+        {/* Smart Build */}
+        {projectHosts.length > 0 && (
           <button
             onClick={handleSmartBuild}
             disabled={smartBuilding}
             title="Smart Build: topology from creds, host activities, jobs, scope CIDRs and subnet inference"
-            style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: smartBuilding ? 'default' : 'pointer', color: smartBuilding ? '#404550' : '#39d353', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: smartBuilding ? 0.6 : 1, transition: 'color .15s' }}
+            style={{ background: smartBuilding ? 'transparent' : '#39d35310', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: smartBuilding ? 'default' : 'pointer', color: smartBuilding ? '#404550' : '#39d353', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: smartBuilding ? 0.6 : 1, transition: 'color .15s', flexShrink: 0 }}
           >
             <Icon name="target" size={11} color="currentColor" />
             {smartBuilding ? 'Building…' : 'Smart Build'}
           </button>
         )}
 
-        {/* Access Graph Overlay — dim non-access edges */}
-        {topologyEnabled && (activeNet?.edges?.length ?? (activeNet?.edges_json?.length ?? 0)) > 0 && (
+        {/* Access Graph */}
+        {(activeNet?.edges?.length ?? (activeNet?.edges_json?.length ?? 0)) > 0 && (
           <button
             onClick={() => setAccessOverlay(v => !v)}
             title="Access Graph: show only access edges (ssh, winrm, c2_session, lateral…)"
-            style={{ background: accessOverlay ? '#39d35312' : 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: accessOverlay ? '#39d353' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s' }}
+            style={{ background: accessOverlay ? '#39d35312' : 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: 'pointer', color: accessOverlay ? '#39d353' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', flexShrink: 0 }}
           >
             <Icon name="link" size={11} color="currentColor" />
             Access Graph
@@ -1611,28 +1668,44 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
         )}
 
         {/* Node overlay mode selector */}
-        {topologyEnabled && (() => {
+        {(() => {
           const modes = [
             { key: 'none',     label: 'No overlay',  color: '#404550' },
             { key: 'threats',  label: '⚑ Threats',   color: '#e8574a' },
             { key: 'sessions', label: '⊙ Sessions',  color: '#39d353' },
             { key: 'access',   label: '✓ Access',    color: '#f09a3a' },
+            { key: 'pivots',   label: '⇄ Pivots',    color: '#e8cc42' },
             { key: 'roles',    label: '◈ Roles',     color: '#6fc8f0' },
           ];
           return (
-            <div style={{ display: 'flex', alignItems: 'center', borderLeft: '1px solid #1a1c22' }}>
+            <div style={{ display: 'flex', alignItems: 'center', borderRight: '1px solid #1a1c22' }}>
               {modes.map(m => (
                 <button key={m.key} onClick={() => setOverlayMode(m.key)}
                   title={`Overlay: ${m.label}`}
-                  style={{ background: overlayMode === m.key ? m.color + '18' : 'transparent', border: 'none', padding: '9px 11px', cursor: 'pointer', color: overlayMode === m.key ? m.color : '#404550', fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', borderRight: '1px solid #1a1c2244' }}>
+                  style={{ background: overlayMode === m.key ? m.color + '18' : 'transparent', border: 'none', padding: '7px 11px', cursor: 'pointer', color: overlayMode === m.key ? m.color : '#404550', fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', flexShrink: 0 }}>
                   {m.label}
                 </button>
               ))}
             </div>
           );
         })()}
-        {topologyEnabled && <button onClick={() => setShowTopologyBuilder(true)} title="Build topology from scan" style={{ background: 'transparent', border: 'none', borderLeft: '1px solid #1a1c22', padding: '9px 14px', cursor: 'pointer', color: '#5b8af5', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono' }}><Icon name="target" size={11} color="currentColor" /> Topology</button>}
+
+        {/* Collect Pivots */}
+        <button
+          onClick={handleCollectPivots}
+          title="Collect pivot observations from the project SSH collector target (best-effort chisel / ligolo discovery)"
+          style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: 'pointer', color: '#e8cc42', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', flexShrink: 0 }}
+        >
+          <Icon name="link" size={11} color="currentColor" />
+          Collect Pivots
+        </button>
+
+        {/* Topology builder */}
+        <button onClick={() => setShowTopologyBuilder(true)} title="Build topology from scan" style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: 'pointer', color: '#5b8af5', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', flexShrink: 0 }}>
+          <Icon name="target" size={11} color="currentColor" /> Topology
+        </button>
       </div>
+      )}
 
       {topologyEnabled && showTopologyBuilder && (
         <TopologyBuilderModal
@@ -1662,7 +1735,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       )}
 
       {activeNet
-        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} accessOverlay={accessOverlay} overlayMode={overlayMode} />
+        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} accessOverlay={accessOverlay} overlayMode={overlayMode} pivots={pivots} projectHosts={projectHosts} />
         : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 14, color: '#303540' }}>
             <Icon name="network" size={40} color="#2a2d35" />
