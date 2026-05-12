@@ -548,7 +548,74 @@ async def download_upload(
     _log_event(db, pid, getattr(user, "username", None), "audit", "download_sensitive_file", f"Downloaded {entity}: {safe.name}", {"path": path, "entity": entity})
     db.commit()
 
-    return FileResponse(str(safe), filename=safe.name)
+    # Look up original content_type and filename from DB
+    from fastapi.responses import Response, StreamingResponse as _SR
+    import mimetypes
+    disk_name = safe.name
+    content_type = None
+    orig_filename = disk_name
+    if entity == "loot":
+        loot_rec = db.query(models.Loot).filter(
+            models.Loot.pid == pid,
+            models.Loot.storage_path.like(f"%{disk_name}")
+        ).first()
+        if loot_rec:
+            content_type = loot_rec.content_type or None
+            orig_filename = loot_rec.filename or disk_name
+    if not content_type:
+        content_type = mimetypes.guess_type(orig_filename)[0] or "application/octet-stream"
+
+    file_size = safe.stat().st_size
+    range_header = request.headers.get("Range")
+
+    def _iter_file(start: int, end: int, chunk: int = 1024 * 1024):
+        with open(safe, "rb") as f:
+            f.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                data = f.read(min(chunk, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    disposition = f'attachment; filename="{orig_filename}"'
+
+    if range_header:
+        # Parse Range: bytes=start-end
+        try:
+            byte_range = range_header.replace("bytes=", "").strip()
+            start_str, end_str = byte_range.split("-")
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+            end = min(end, file_size - 1)
+        except Exception:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+        if start > end or start >= file_size:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+        length = end - start + 1
+        return _SR(
+            _iter_file(start, end),
+            status_code=206,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": disposition,
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Content-Length": str(length),
+                "Accept-Ranges": "bytes",
+            },
+        )
+
+    return _SR(
+        _iter_file(0, file_size - 1),
+        status_code=200,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": disposition,
+            "Content-Length": str(file_size),
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────

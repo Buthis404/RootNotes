@@ -16,6 +16,7 @@ const ACCESS_COLOR = {
   verified: '#39d353',
   inferred: '#f09a3a',
   path: '#5b8af5',
+  domain_admin: '#e8574a',
 };
 
 const SEV_COLOR = {
@@ -142,8 +143,13 @@ function GraphEdge({ edge, nodes }) {
 
   const isAccess = edge.kind === 'access';
   const isPath = edge.kind === 'path';
+  const isDomainAdmin = isAccess && edge.access_type === 'domain_admin';
   const color = isAccess
-    ? (edge.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred)
+    ? (edge.access_type === 'exploit' ? '#cc2233'
+      : isDomainAdmin ? ACCESS_COLOR.domain_admin
+      : (edge.access_type === 'lateral' || edge.access_type === 'pivot') ? '#e8cc42'
+      : edge.access_type === 'tunnel' ? '#5b8af5'
+      : edge.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred)
     : isPath
       ? ACCESS_COLOR.path
       : (CRED_COLOR[edge.cred_type] || CRED_COLOR.plain);
@@ -169,8 +175,15 @@ function GraphEdge({ edge, nodes }) {
 
   return (
     <g>
-      <path d={d} fill="none" stroke={color} strokeWidth={isAccess ? 2.2 : 1.5} strokeOpacity={isAccess ? 0.8 : 0.55}
-        strokeDasharray={isAccess && !edge.verified ? '6 4' : isPath ? '3 5' : undefined}
+      <path d={d} fill="none" stroke={color}
+        strokeWidth={isDomainAdmin ? 2.5 : isAccess ? 2.2 : 1.5}
+        strokeOpacity={isAccess || isDomainAdmin ? 0.8 : 0.55}
+        strokeDasharray={
+          isDomainAdmin && !edge.verified ? '6 4'
+          : isAccess && !edge.verified ? '6 4'
+          : isPath ? '3 5'
+          : undefined
+        }
         markerEnd={`url(#${markerId})`} />
       {edge.label && (
         <>
@@ -260,11 +273,6 @@ export default function AttackGraphView({ selectedProject, accent }) {
     setZoom(z => Math.max(0.15, Math.min(4, z * (e.deltaY > 0 ? 0.9 : 1.11))));
   };
 
-  const handleCanvasMouseDown = e => {
-    if (e.button !== 0 || draggingNode.current) return;
-    isPanning.current = true;
-    panStart.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
-  };
 
   const handleNodeMouseDown = (e, node) => {
     e.stopPropagation();
@@ -272,34 +280,42 @@ export default function AttackGraphView({ selectedProject, accent }) {
     const ny = nodePos[node.id]?.y ?? node.y;
     draggingNode.current = { nodeId: node.id, smx: e.clientX, smy: e.clientY, snx: nx, sny: ny };
     dragMoved.current = false;
-  };
 
-  const handleMouseMove = e => {
-    if (draggingNode.current) {
-      const dx = (e.clientX - draggingNode.current.smx) / zoom;
-      const dy = (e.clientY - draggingNode.current.smy) / zoom;
+    const onMove = ev => {
+      const dn = draggingNode.current;
+      if (!dn) return;
+      const dx = (ev.clientX - dn.smx) / zoom;
+      const dy = (ev.clientY - dn.smy) / zoom;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved.current = true;
-      setNodePos(prev => ({
-        ...prev,
-        [draggingNode.current.nodeId]: {
-          x: draggingNode.current.snx + dx,
-          y: draggingNode.current.sny + dy,
-        },
-      }));
-    } else if (isPanning.current) {
-      setPan({
-        x: panStart.current.px + (e.clientX - panStart.current.x),
-        y: panStart.current.py + (e.clientY - panStart.current.y),
-      });
-    }
+      const id = dn.nodeId;
+      setNodePos(prev => ({ ...prev, [id]: { x: dn.snx + dx, y: dn.sny + dy } }));
+    };
+    const onUp = () => {
+      if (draggingNode.current && dragMoved.current) savePos(selectedProject, { ...nodePos });
+      draggingNode.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
-  const handleMouseUp = () => {
-    if (draggingNode.current && dragMoved.current) {
-      savePos(selectedProject, { ...nodePos });
-    }
-    draggingNode.current = null;
-    isPanning.current = false;
+  const handleCanvasMouseDown = e => {
+    if (e.button !== 0 || draggingNode.current) return;
+    isPanning.current = true;
+    panStart.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+
+    const onMove = ev => {
+      if (!isPanning.current || !panStart.current) return;
+      setPan({ x: panStart.current.px + (ev.clientX - panStart.current.x), y: panStart.current.py + (ev.clientY - panStart.current.y) });
+    };
+    const onUp = () => {
+      isPanning.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
   const handleNodeClick = node => {
@@ -315,11 +331,20 @@ export default function AttackGraphView({ selectedProject, accent }) {
     y: nodePos[n.id]?.y ?? n.y,
   }));
   const edges = graphData?.edges || [];
-  const arrowColors = [...new Set(edges.map(e => {
-    if (e.kind === 'access') return e.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred;
+
+  const getEdgeColor = e => {
+    if (e.kind === 'access') {
+      if (e.access_type === 'exploit') return '#cc2233';
+      if (e.access_type === 'domain_admin') return ACCESS_COLOR.domain_admin;
+      if (e.access_type === 'lateral' || e.access_type === 'pivot') return '#e8cc42';
+      if (e.access_type === 'tunnel') return '#5b8af5';
+      return e.verified ? ACCESS_COLOR.verified : ACCESS_COLOR.inferred;
+    }
     if (e.kind === 'path') return ACCESS_COLOR.path;
     return CRED_COLOR[e.cred_type] || CRED_COLOR.plain;
-  }))];
+  };
+
+  const arrowColors = [...new Set(edges.map(e => getEdgeColor(e)))];
 
   const stats = {
     hosts: nodes.length,
@@ -402,9 +427,6 @@ export default function AttackGraphView({ selectedProject, accent }) {
           }}
           onWheel={handleWheel}
           onMouseDown={handleCanvasMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
         >
           {/* States */}
           {loading && (
@@ -481,6 +503,7 @@ export default function AttackGraphView({ selectedProject, accent }) {
               {[
                 ['access', ACCESS_COLOR.verified],
                 ['inferred', ACCESS_COLOR.inferred],
+                ['domain admin', ACCESS_COLOR.domain_admin],
                 ['path', ACCESS_COLOR.path],
                 ['rN = reachable', '#5b8af5'],
                 ['vN = verified path', '#39d353'],

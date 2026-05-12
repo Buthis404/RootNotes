@@ -31,10 +31,18 @@ _ACCESS_EDGE_SOURCES = {"cred_validation", "bulk_exec", "host_activity"}
 _BIDIRECTIONAL_ACCESS_EDGE_TYPES = {"lateral", "pivot"}
 
 
+_ACCESS_EDGE_STYLES = {"exploit", "lateral", "tunnel"}
+
+
 def _is_access_edge(edge: dict) -> bool:
     edge_type = str(edge.get("type") or "").strip().lower()
     edge_source = str(edge.get("source") or "").strip().lower()
-    return edge_type in _ACCESS_EDGE_TYPES or edge_source in _ACCESS_EDGE_SOURCES
+    edge_style = str(edge.get("style") or "").strip().lower()
+    return (
+        edge_type in _ACCESS_EDGE_TYPES
+        or edge_source in _ACCESS_EDGE_SOURCES
+        or edge_style in _ACCESS_EDGE_STYLES
+    )
 
 
 def _build_reachability(access_edges: list[dict], root_host_ids: set[str]) -> tuple[dict[str, int], dict[str, int]]:
@@ -190,8 +198,8 @@ def get_attack_graph(
             continue
         seen_access_edges.add(dedupe_key)
         edge_id_counter += 1
-        access_type = str(edge.get("type") or "access")
-        verified = bool(edge.get("verified"))
+        access_type = str(edge.get("type") or edge.get("style") or "access")
+        verified = bool(edge.get("verified")) or str(edge.get("style") or "") in ("exploit", "lateral")
         edges.append({
             "id": edge.get("id") or f"access_edge_{edge_id_counter}",
             "from": from_host_id,

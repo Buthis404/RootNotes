@@ -50,13 +50,16 @@ export default function ProjectsView({ projects, notes, hosts, creds, scopes, se
     e.stopPropagation();
     setExportingId(pid);
     try {
-      const blob = await api.exportProject(pid);
+      const { blob, password } = await api.exportProject(pid);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `${pname.replace(/[^a-zA-Z0-9_-]/g, '_')}_export.zip`;
       a.click();
       URL.revokeObjectURL(url);
+      if (password) {
+        setTimeout(() => alert(`Archive is password-protected.\n\nPassword: ${password}\n\nSave it — it won't be shown again.`), 300);
+      }
     } catch (err) {
       toastError('Export error: ' + err.message);
     } finally {

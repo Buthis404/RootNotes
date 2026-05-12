@@ -1,12 +1,13 @@
 import io
 import json
 import re
+import secrets
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -25,11 +26,180 @@ router = APIRouter(tags=["import-export"])
 
 
 @router.get("/api/export/{pid}")
-def export_project(pid: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+def export_project(
+    pid: str,
+    password: str | None = Query(default=None, description="ZIP password. If omitted and project has secrets, one is auto-generated."),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
     check_pid_access(db, pid, user, "project.export")
+
+    # Determine if user can read secrets
+    can_read_secret = True
+    if user.role != "admin":
+        m = get_membership(db, pid, user.id)
+        can_read_secret = bool(m and "credentials.read_secret" in get_permissions_for_role(m.role))
+
+    notes           = db.query(models.Note).filter(models.Note.pid == pid).all()
+    hosts           = db.query(models.Host).filter(models.Host.pid == pid).all()
+    creds           = db.query(models.Cred).filter(models.Cred.pid == pid).all()
+    networks        = db.query(models.Network).filter(models.Network.pid == pid).all()
+    attachments     = db.query(models.NoteAttachment).filter(models.NoteAttachment.pid == pid).all()
+    findings        = db.query(models.Finding).filter(models.Finding.pid == pid).all()
+    objectives      = db.query(models.Objective).filter(models.Objective.pid == pid).all()
+    host_activities = db.query(models.HostActivity).filter(models.HostActivity.pid == pid).all()
+    attack_paths    = db.query(models.AttackPath).filter(models.AttackPath.pid == pid).all()
+    attack_steps    = db.query(models.AttackStep).filter(models.AttackStep.pid == pid).all()
+    loots           = db.query(models.Loot).filter(models.Loot.pid == pid).all()
+    scopes          = db.query(models.Scope).filter(models.Scope.pid == pid).all()
+    checklist       = db.query(models.ChecklistItem).filter(models.ChecklistItem.pid == pid).all()
+    cred_host_notes = db.query(models.CredHostNote).filter(models.CredHostNote.pid == pid).all()
+
+    # Determine if encryption is needed: any cred has a non-empty secret
+    has_secrets = can_read_secret and any(
+        bool(decrypt_str(c.secret)) for c in creds if c.secret
+    )
+
+    zip_password: str | None = None
+    if has_secrets:
+        zip_password = password if password else secrets.token_urlsafe(16)
+
+    def _build_zip(zf):
+        zf.writestr("project.json", json.dumps({
+            "id": project.id, "name": project.name, "ip": project.ip,
+            "os": project.os, "status": project.status,
+            "added": project.added, "description": project.description,
+        }, ensure_ascii=False))
+
+        zf.writestr("notes.json", json.dumps([{
+            "id": n.id, "title": n.title, "content": decrypt_str(n.content) if note_content_is_confidential(n.tags or []) else n.content,
+            "phase": n.phase, "tags": n.tags, "ts": n.ts, "starred": n.starred,
+        } for n in notes], ensure_ascii=False))
+
+        zf.writestr("hosts.json", json.dumps([{
+            "id": h.id, "ip": h.ip, "ips": h.ips, "hostname": h.hostname,
+            "os": h.os, "status": h.status, "ports": h.ports,
+            "services": h.services, "tags": h.tags, "notes": h.notes,
+            "domain": h.domain, "role": h.role, "is_attacker": h.is_attacker,
+        } for h in hosts], ensure_ascii=False))
+
+        zf.writestr("creds.json", json.dumps([{
+            "id": c.id, "host": c.host, "username": c.username,
+            "secret": decrypt_str(c.secret) if can_read_secret else "", "type": c.type, "service": c.service,
+            "notes": c.notes, "tags": c.tags, "cracked": c.cracked, "domain": c.domain,
+            "host_ids": c.host_ids or [], "is_domain": c.is_domain,
+        } for c in creds], ensure_ascii=False))
+
+        nets_out = [schemas.Network.from_orm_obj(n).model_dump() for n in networks]
+        zf.writestr("networks.json", json.dumps(nets_out, ensure_ascii=False))
+
+        zf.writestr("findings.json", json.dumps([{
+            "id": f.id, "host_id": f.host_id, "title": f.title,
+            "severity": f.severity, "cvss": f.cvss, "cve": f.cve,
+            "description": f.description, "proof": f.proof,
+            "recommendation": f.recommendation, "status": f.status, "ts": f.ts,
+        } for f in findings], ensure_ascii=False))
+
+        zf.writestr("objectives.json", json.dumps([{
+            "id": o.id, "host_id": o.host_id, "title": o.title,
+            "description": o.description, "category": o.category,
+            "points": o.points, "status": o.status, "flag_value": o.flag_value,
+            "captured_by": o.captured_by, "captured_at": o.captured_at, "ts": o.ts,
+        } for o in objectives], ensure_ascii=False))
+
+        zf.writestr("host_activities.json", json.dumps([{
+            "id": a.id, "host_id": a.host_id, "title": a.title,
+            "activity_type": a.activity_type, "command": a.command,
+            "summary": a.summary, "output": a.output, "status": a.status, "ts": a.ts,
+        } for a in host_activities], ensure_ascii=False))
+
+        zf.writestr("attack_paths.json", json.dumps([{
+            "id": ap.id, "name": ap.name, "description": ap.description, "ts": ap.ts,
+        } for ap in attack_paths], ensure_ascii=False))
+
+        zf.writestr("attack_steps.json", json.dumps([{
+            "id": s.id, "path_id": s.path_id, "step_order": s.step_order,
+            "node_type": s.node_type, "label": s.label, "sublabel": s.sublabel,
+            "technique": s.technique, "mitre_id": s.mitre_id, "notes": s.notes, "ts": s.ts,
+        } for s in attack_steps], ensure_ascii=False))
+
+        loots_meta = []
+        for loot in loots:
+            loot_entry = {
+                "id": loot.id, "host_id": loot.host_id, "loot_type": loot.loot_type,
+                "value": decrypt_str(loot.value) if loot_value_is_sensitive(loot.loot_type, loot.artifact_type, loot.filename, loot.storage_path, loot.public_url) else loot.value,
+                "description": loot.description,
+                "source_path": loot.source_path, "filename": loot.filename,
+                "content_type": loot.content_type, "file_size": loot.file_size,
+                "public_url": loot.public_url, "ts": loot.ts,
+            }
+            disk = Path(loot.storage_path) if loot.storage_path else None
+            if disk and disk.exists():
+                zip_entry = f"loot/{loot.id}{Path(loot.filename or loot.value or 'loot.bin').suffix}"
+                zf.write(disk, zip_entry)
+                loot_entry["zip_entry"] = zip_entry
+            loots_meta.append(loot_entry)
+        zf.writestr("loots.json", json.dumps(loots_meta, ensure_ascii=False))
+
+        zf.writestr("scopes.json", json.dumps([{
+            "id": s.id, "value": s.value, "scope_type": s.scope_type,
+            "in_scope": s.in_scope, "description": s.description,
+        } for s in scopes], ensure_ascii=False))
+
+        zf.writestr("checklist.json", json.dumps([{
+            "id": c.id, "phase": c.phase, "text": c.text,
+            "done": c.done, "order_idx": c.order_idx,
+        } for c in checklist], ensure_ascii=False))
+
+        zf.writestr("cred_host_notes.json", json.dumps([{
+            "id": n.id, "cred_id": n.cred_id, "host_id": n.host_id,
+            "notes": n.notes, "access": n.access,
+        } for n in cred_host_notes], ensure_ascii=False))
+
+        atts_meta = []
+        for att in attachments:
+            ext = Path(att.filename).suffix
+            zip_entry = f"attachments/{att.id}{ext}"
+            atts_meta.append({
+                "id": att.id, "note_id": att.note_id, "filename": att.filename,
+                "content_type": att.content_type, "file_size": att.file_size,
+                "public_url": att.public_url, "ts": att.ts, "zip_entry": zip_entry,
+            })
+            disk = Path(att.storage_path)
+            if disk.exists():
+                zf.write(disk, zip_entry)
+        zf.writestr("attachments.json", json.dumps(atts_meta, ensure_ascii=False))
+
+    buf = io.BytesIO()
+    if zip_password:
+        try:
+            import pyzipper
+            with pyzipper.AESZipFile(buf, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
+                zf.setpassword(zip_password.encode())
+                _build_zip(zf)
+        except ImportError:
+            # fallback: plain zip if pyzipper not available
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                _build_zip(zf)
+            zip_password = None
+    else:
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            _build_zip(zf)
+
+    buf.seek(0)
+    safe_name = re.sub(r"[^\w\-.]", "_", project.name)
+    filename = f"{safe_name}_export.zip"
+    from urllib.parse import quote
+    encoded_name = quote(filename, safe='')
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+    }
+    if zip_password:
+        headers["X-Zip-Password"] = zip_password
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
     # Determine if user can read secrets
     can_read_secret = True
@@ -159,12 +329,6 @@ def export_project(pid: str, db: Session = Depends(get_db), user: models.User = 
                 zf.write(disk, zip_entry)
 
         zf.writestr("attachments.json", json.dumps(atts_meta, ensure_ascii=False))
-
-    buf.seek(0)
-    safe_name = re.sub(r"[^\w\-.]", "_", project.name)
-    filename = f"{safe_name}_export.zip"
-    return StreamingResponse(buf, media_type="application/zip",
-                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @router.post("/api/import_project", status_code=201)

@@ -171,7 +171,15 @@ export const api = {
 
   // Batch import & project export/import
   batchImport:   (pid, data) => req('POST', `/import/${pid}`, data),
-  exportProject: (pid)       => download(`/export/${pid}`),
+  exportProject: async (pid) => {
+    const res = await fetch(`/api/export/${pid}`, {
+      headers: { 'Authorization': `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const password = res.headers.get('X-Zip-Password') || null;
+    return { blob, password };
+  },
   importProject: (file)      => upload('/import_project', file),
 
   // Topology
