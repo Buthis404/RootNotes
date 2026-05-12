@@ -133,6 +133,9 @@ Default credentials (printed to backend logs on first start if `ADMIN_PASSWORD` 
 admin / admin
 ```
 
+> [!IMPORTANT]  
+> When rebuilding the image, the keys inside the container will change; please remember to make backups
+
 ---
 
 ## Environment variables
