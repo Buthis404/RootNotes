@@ -181,6 +181,10 @@ Recommended next:
 5. route-aware pivot graph semantics (SOCKS, tunnels, routed segments)
 6. AD-aware edge building from SharpHound/BloodHound data
 
+Recent correction:
+- C2 inventory sessions are no longer auto-rendered as attacker-host access edges during smart-build
+- CIDR scopes can now carry explicit `gateway_ip`, which overrides gateway heuristics during subnet topology construction
+
 ---
 
 ## Stage 4. Expand domain-aware identity model

@@ -74,6 +74,7 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS storage_path TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("ALTER TABLE loots ADD COLUMN IF NOT EXISTS public_url TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS scopes (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, value TEXT NOT NULL, scope_type TEXT NOT NULL DEFAULT 'cidr', in_scope BOOLEAN NOT NULL DEFAULT TRUE, description TEXT NOT NULL DEFAULT '')"))
+    conn.execute(text("ALTER TABLE scopes ADD COLUMN IF NOT EXISTS gateway_ip TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("CREATE TABLE IF NOT EXISTS cred_host_notes (id TEXT PRIMARY KEY, cred_id TEXT NOT NULL REFERENCES creds(id) ON DELETE CASCADE, host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, notes TEXT NOT NULL DEFAULT '', access TEXT[] NOT NULL DEFAULT '{}')"))
     conn.execute(text("ALTER TABLE cred_host_notes ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''"))
     conn.execute(text("ALTER TABLE cred_host_notes ADD COLUMN IF NOT EXISTS access TEXT[] NOT NULL DEFAULT '{}'"))

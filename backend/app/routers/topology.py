@@ -254,6 +254,23 @@ def _is_gateway(host: dict) -> bool:
 
 _GW_IP_SUFFIXES = {1, 2, 254, 253, 252}
 
+_SCOPE_REGION_PALETTE = [
+    ("#5b8af5", "#5b8af522"),
+    ("#39d353", "#39d3531c"),
+    ("#f09a3a", "#f09a3a1c"),
+    ("#c07af0", "#c07af01c"),
+    ("#6fc8f0", "#6fc8f01c"),
+    ("#e8574a", "#e8574a1c"),
+]
+
+
+def _scope_region_colors(cidr: str, in_scope: bool) -> tuple[str, str]:
+    idx = sum(ord(ch) for ch in (cidr or "")) % len(_SCOPE_REGION_PALETTE)
+    stroke, fill = _SCOPE_REGION_PALETTE[idx]
+    if in_scope:
+        return stroke, fill
+    return ("#cc2233", "#cc22331a")
+
 
 def _pick_gateway(group: list[dict]) -> dict:
     """
@@ -297,7 +314,7 @@ def _pick_gateway(group: list[dict]) -> dict:
     ))
 
 
-def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
+def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str] | None = None) -> list[TopologyLinkDiff]:
     """
     Hub-and-spoke link inference using full host metadata.
 
@@ -311,7 +328,16 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
     if not hosts:
         return []
 
+    manual_gateway_by_subnet = manual_gateway_by_subnet or {}
     subnet_hosts: dict[str, list[dict]] = {}
+    host_by_ip: dict[str, dict] = {}
+    for h in hosts:
+        primary_ip = h.get("ip", "")
+        if primary_ip:
+            host_by_ip[primary_ip] = h
+        for extra_ip in (h.get("ips") or []):
+            if extra_ip:
+                host_by_ip[extra_ip] = h
     for h in hosts:
         ip = h.get("ip", "")
         if not ip:
@@ -340,7 +366,9 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
         if len(group) < 2:
             continue
 
-        gw = _pick_gateway(group)
+        manual_gw_ip = (manual_gateway_by_subnet.get(subnet) or "").strip()
+        manual_gw = host_by_ip.get(manual_gw_ip) if manual_gw_ip else None
+        gw = manual_gw or _pick_gateway(group)
         gw_ip = gw.get("ip", "")
         gw_hostname = gw.get("hostname", "") or gw_ip
 
@@ -348,7 +376,9 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
             subnet_gw[subnet] = gw_ip
 
         # Explain why this host was chosen as gateway
-        if _is_gateway(gw):
+        if manual_gw is not None:
+            gw_reason = f"manual scope gateway {gw_hostname}"
+        elif _is_gateway(gw):
             gw_reason = f"gateway role/tag/OS on {gw_hostname}"
         else:
             last_octet = gw_ip.split(".")[-1] if gw_ip else ""
@@ -1069,6 +1099,7 @@ def _run_smart_build(
                         "cidr": val, "net_obj": net_obj,
                         "description": s.description or "",
                         "in_scope": s.in_scope,
+                        "gateway_ip": (s.gateway_ip or "").strip(),
                     })
                 except ValueError:
                     pass
@@ -1091,6 +1122,7 @@ def _run_smart_build(
         hosts_meta.append({
             "id": h.id, "ip": h.ip, "hostname": h.hostname, "os": h.os,
             "status": h.status, "role": h.role, "is_attacker": h.is_attacker,
+            "ips": h.ips or [],
             "ports": h.ports or [], "services": h.services or [],
             "tags": h.tags or [], "domain": h.domain or "",
             "subnet": _annotate_subnet(h.ip or ""),
@@ -1252,8 +1284,8 @@ def _run_smart_build(
 
     # ── P3: Host activity evidence edges (incl. C2 sessions) ─────────
     if include_access_edges and attacker_nids:
-        _exec_types = {"exec", "postex", "lateral", "c2"}
-        _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral", "c2": "c2_session"}
+        _exec_types = {"exec", "postex", "lateral"}
+        _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral"}
         acts = db.query(models.HostActivity).filter(
             models.HostActivity.pid == pid,
             models.HostActivity.status == "done",
@@ -1316,7 +1348,12 @@ def _run_smart_build(
 
     # ── P5: Subnet proximity edges (hub-and-spoke) ───────────────────
     if include_subnet_edges:
-        for link in infer_links_smart(hosts_meta):
+        manual_gateway_by_subnet = {
+            item["cidr"]: item.get("gateway_ip", "")
+            for item in scope_region_defs
+            if item.get("gateway_ip")
+        }
+        for link in infer_links_smart(hosts_meta, manual_gateway_by_subnet):
             src_nid = ip_to_nid.get(link.source_ip)
             dst_nid = ip_to_nid.get(link.target_ip)
             if not src_nid or not dst_nid:
@@ -1360,14 +1397,15 @@ def _run_smart_build(
             max_x = max(p[0] for p in node_positions) + 160 + pad
             max_y = max(p[1] for p in node_positions) + 100 + pad
             in_scope = sr["in_scope"]
+            scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope)
             existing_regions.append({
                 "id": new_id("r"),
                 "x": min_x, "y": min_y,
                 "w": max_x - min_x, "h": max_y - min_y,
                 "label": sr["description"] or cidr_str,
                 "note": cidr_str,
-                "fill": "#0d1f0d" if in_scope else "#1f0d0d",
-                "stroke": "#1e3a1e" if in_scope else "#3a1e1e",
+                "fill": scope_fill,
+                "stroke": scope_stroke,
                 "zone_type": "scope",
                 "updated_at": datetime.utcnow().isoformat(),
                 "version": 1,
