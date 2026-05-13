@@ -1252,6 +1252,12 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                 <text x="14" y="22" fontSize="12" fill={region.stroke || '#5b8af5'} fontFamily="Space Grotesk" fontWeight="700" style={{ pointerEvents: 'none' }}>{region.label}</text>
                 {region.zone_type && <text x="14" y="36" fontSize="9" fill={region.stroke || '#5b8af5'} fontFamily="JetBrains Mono" fontWeight="600" style={{ pointerEvents: 'none', opacity: 0.8 }}>[{region.zone_type.toUpperCase()}]</text>}
                 {region.note ? <text x="14" y={region.zone_type ? 48 : 38} fontSize="9" fill="#c8cdd6" fontFamily="JetBrains Mono" style={{ pointerEvents: 'none' }}>{region.note}</text> : null}
+                {region.via_host_id ? (() => {
+                  const viaHost = projectHosts.find(h => h.id === region.via_host_id);
+                  const viaLabel = `⇄ via ${viaHost?.hostname || viaHost?.ip || 'pivot'}`;
+                  const yOff = (region.zone_type ? 48 : 38) + (region.note ? 13 : 0);
+                  return <text x="14" y={yOff} fontSize="9" fill="#c07af0" fontFamily="JetBrains Mono" fontWeight="600" style={{ pointerEvents: 'none' }}>{viaLabel}</text>;
+                })() : null}
                 {selectedRegionId === region.id && regionEditMode && ['nw','ne','sw','se'].map(corner => {
                   const pos = {
                     nw: { x: 0, y: 0 },
@@ -1424,6 +1430,95 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
   );
 }
 
+function AddPivotModal({ projectId, hosts, accent, onClose, onCreated }) {
+  const [form, setForm] = useState({ pivot_host_id: '', source_host_id: '', tool: 'chisel', pivot_type: 'socks5', route_cidr: '', bind_address: '', status: 'active', notes: '' });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!form.pivot_host_id) { setErr('Select pivot host'); return; }
+    setSaving(true); setErr('');
+    try {
+      await api.createPivot(projectId, { ...form, pid: projectId });
+      onCreated();
+      onClose();
+    } catch (e) {
+      setErr(e?.message || 'Failed to create pivot');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inp = { background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 8px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', width: '100%', boxSizing: 'border-box' };
+  const lbl = { fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 8, padding: 24, width: 400, boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 20 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#e0e4ec', fontFamily: 'Space Grotesk', flex: 1 }}>Add Pivot</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 16, padding: 0 }}>×</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <div style={lbl}>Pivot Host *</div>
+            <select value={form.pivot_host_id} onChange={e => setForm(s => ({ ...s, pivot_host_id: e.target.value }))} style={inp}>
+              <option value="">Select host…</option>
+              {hosts.map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip}{h.ip && h.hostname ? ` (${h.ip})` : ''}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={lbl}>Source Host (optional)</div>
+            <select value={form.source_host_id} onChange={e => setForm(s => ({ ...s, source_host_id: e.target.value }))} style={inp}>
+              <option value="">— attacker default —</option>
+              {hosts.filter(h => h.is_attacker).map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip} (attacker)</option>)}
+              {hosts.filter(h => !h.is_attacker).map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <div style={lbl}>Tool</div>
+              <select value={form.tool} onChange={e => setForm(s => ({ ...s, tool: e.target.value }))} style={inp}>
+                {['chisel', 'ligolo', 'ligolo-ng', 'metasploit', 'ssh', 'other'].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={lbl}>Type</div>
+              <select value={form.pivot_type} onChange={e => setForm(s => ({ ...s, pivot_type: e.target.value }))} style={inp}>
+                {['socks5', 'socks4', 'route', 'portfwd', 'reverse'].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <div style={lbl}>Route CIDR (network reachable via pivot)</div>
+            <input value={form.route_cidr} onChange={e => setForm(s => ({ ...s, route_cidr: e.target.value }))} placeholder="10.10.20.0/24" style={inp} />
+          </div>
+          <div>
+            <div style={lbl}>Bind Address (optional)</div>
+            <input value={form.bind_address} onChange={e => setForm(s => ({ ...s, bind_address: e.target.value }))} placeholder="127.0.0.1:1080" style={inp} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={lbl}>Status:</div>
+            {[['active', '#39d353'], ['inactive', '#808590']].map(([s, c]) => (
+              <button key={s} onClick={() => setForm(f => ({ ...f, status: s }))}
+                style={{ background: form.status === s ? c + '22' : 'transparent', border: `1px solid ${form.status === s ? c + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: form.status === s ? c : '#505560', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                {s}
+              </button>
+            ))}
+          </div>
+          {err && <div style={{ fontSize: 10, color: '#cc2233' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
+            <button onClick={save} disabled={saving} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 16px', cursor: saving ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: saving ? 0.7 : 1 }}>
+              {saving ? 'Saving…' : 'Add Pivot'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function NetworkView({ projectId, accent, accentGreen, networks, onCreateNetwork, onUpdateNetwork, onDeleteNetwork, onCreateHost, onUpdateHost, onSyncHostByIp, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, onRefreshHosts, onRefreshNetworks, markLocalOp, animateLinks = true, findings = [], objectives = [], creds = [], attackSteps = [] }) {
   const [activeNetId, setActiveNetId] = useState(null);
   const [editingName, setEditingName] = useState(null);
@@ -1435,6 +1530,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [overlayMode, setOverlayMode] = useState('none'); // 'none'|'threats'|'sessions'|'access'|'pivots'|'roles'
   const [allActivities, setAllActivities] = useState([]);
   const [pivots, setPivots] = useState([]);
+  const [showAddPivot, setShowAddPivot] = useState(false);
 
   useEffect(() => {
     if (networks.length > 0) {
@@ -1657,6 +1753,15 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           );
         })()}
 
+        {/* Add Pivot manually */}
+        <button
+          onClick={() => setShowAddPivot(true)}
+          title="Manually add a pivot observation"
+          style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: 'pointer', color: '#c07af0', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', flexShrink: 0 }}
+        >
+          <Icon name="plus" size={11} color="currentColor" />
+          Add Pivot
+        </button>
         {/* Collect Pivots */}
         <button
           onClick={handleCollectPivots}
@@ -1721,6 +1826,19 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           </div>
         )
       }
+
+      {showAddPivot && (
+        <AddPivotModal
+          projectId={projectId}
+          hosts={projectHosts}
+          accent={accent}
+          onClose={() => setShowAddPivot(false)}
+          onCreated={async () => {
+            const data = await api.listPivots(projectId).catch(() => ({ items: [] }));
+            setPivots(data?.items || []);
+          }}
+        />
+      )}
     </div>
   );
 }

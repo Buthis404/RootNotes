@@ -1186,6 +1186,7 @@ def _run_smart_build(
                         "in_scope": s.in_scope,
                         "gateway_ip": (s.gateway_ip or "").strip(),
                         "is_entry": bool(getattr(s, "is_entry", False)),
+                        "via_host_id": (getattr(s, "via_host_id", None) or "").strip(),
                     })
                 except ValueError:
                     pass
@@ -1459,6 +1460,31 @@ def _run_smart_build(
             }):
                 edges_added += 1
 
+    # ── P6: Via-host pivot edges for scopes visible only via specific host ──
+    for sr in scope_region_defs:
+        via_hid = sr.get("via_host_id", "").strip()
+        if not via_hid:
+            continue
+        via_nid = hid_to_nid.get(via_hid)
+        if not via_nid:
+            continue
+        net_obj = sr["net_obj"]
+        for h in hosts_meta:
+            if h["id"] == via_hid:
+                continue
+            if not h.get("ip") or not _ip_in_network(h["ip"], net_obj):
+                continue
+            dst_nid = hid_to_nid.get(h["id"])
+            if not dst_nid:
+                continue
+            if _add_edge(via_nid, dst_nid, {
+                "type": "pivot", "label": sr["cidr"],
+                "confidence": 0.8, "source": "scope_via",
+                "reason": f"network {sr['cidr']} reachable only via this host",
+                "state": "inferred", "verified": False, "is_manual": False,
+            }):
+                edges_added += 1
+
     # ── Regions from scope CIDRs ──────────────────────────────────────
     regions_added = 0
     if include_regions and scope_region_defs:
@@ -1491,7 +1517,7 @@ def _run_smart_build(
             max_y = max(p[1] for p in node_positions) + 100 + pad
             in_scope = sr["in_scope"]
             scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope)
-            existing_regions.append({
+            region_entry: dict = {
                 "id": new_id("r"),
                 "x": min_x, "y": min_y,
                 "w": max_x - min_x, "h": max_y - min_y,
@@ -1502,7 +1528,10 @@ def _run_smart_build(
                 "zone_type": "scope",
                 "updated_at": datetime.utcnow().isoformat(),
                 "version": 1,
-            })
+            }
+            if sr.get("via_host_id"):
+                region_entry["via_host_id"] = sr["via_host_id"]
+            existing_regions.append(region_entry)
             regions_added += 1
 
         network.regions_json = existing_regions

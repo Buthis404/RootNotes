@@ -212,6 +212,7 @@ class Scope(Base):
     description = Column(String, nullable=False, default="")
     gateway_ip = Column(String, nullable=False, default="")
     is_entry = Column(Boolean, nullable=False, default=False)
+    via_host_id = Column(String, nullable=False, default="")
 
 
 class CredHostNote(Base):

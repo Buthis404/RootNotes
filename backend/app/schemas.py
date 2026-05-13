@@ -535,6 +535,7 @@ class ScopeBase(BaseModel):
     description: str = ""
     gateway_ip: str = ""
     is_entry: bool = False
+    via_host_id: str = ""
 
 
 class ScopeCreate(ScopeBase):
@@ -565,6 +566,7 @@ class ScopeUpdate(BaseModel):
     description: Optional[str] = None
     gateway_ip: Optional[str] = None
     is_entry: Optional[bool] = None
+    via_host_id: Optional[str] = None
 
 class Scope(ScopeBase):
     id: str

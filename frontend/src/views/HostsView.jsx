@@ -371,9 +371,16 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
   const [activityStatusFilter, setActivityStatusFilter] = useState(null);
   const [editCell, setEditCell] = useState(null); // {hostId, field}
   const [editValue, setEditValue] = useState('');
+  const [panelTab, setPanelTab] = useState('details'); // 'details'|'activity'|'creds'|'path'
+  const [lateralPaths, setLateralPaths] = useState(null);
+  const [lateralLoading, setLateralLoading] = useState(false);
 
   const { widths, startResize } = useColumnResize({ ip: 120, hostname: 140, os: 110, status: 160, services: 0, creds: 70, tags: 140 });
   const colBorder = '1px solid #14161b';
+
+  useEffect(() => {
+    setLateralPaths(null);
+  }, [selected]);
 
   const projectHosts = hosts.filter(h => h.pid === selectedProject);
   const getHostCredCount = (host) => {
@@ -747,12 +754,26 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
         </div>
 
         {selHost && (
-          <div style={{ width: 300, background: '#0c0e13', borderLeft: '1px solid #1e2029', overflowY: 'auto', flexShrink: 0 }}>
-            <div style={{ padding: '12px 14px', borderBottom: '1px solid #1e2029', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: Math.max(11, fs - 2), fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>{selHost.ip}</span>
+          <div style={{ width: 300, background: '#0c0e13', borderLeft: '1px solid #1e2029', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+            {/* Panel header */}
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid #1e2029', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+              <div>
+                <span style={{ fontSize: Math.max(11, fs - 2), fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>{selHost.hostname || selHost.ip}</span>
+                {selHost.hostname && <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono', marginLeft: 6 }}>{selHost.ip}</span>}
+              </div>
               <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}><Icon name="close" size={12} color="#606570" /></button>
             </div>
-            <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* Tabs */}
+            <div style={{ display: 'flex', borderBottom: '1px solid #1e2029', flexShrink: 0 }}>
+              {[['details', 'Details'], ['activity', 'Activity'], ['creds', 'Creds'], ['path', 'Path']].map(([key, label]) => (
+                <button key={key} onClick={() => setPanelTab(key)}
+                  style={{ flex: 1, background: panelTab === key ? '#ffffff0a' : 'transparent', border: 'none', borderBottom: `2px solid ${panelTab === key ? accent : 'transparent'}`, padding: '7px 4px', cursor: 'pointer', color: panelTab === key ? accent : '#505560', fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s' }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {/* Tab: Details */}
+            {panelTab === 'details' && <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {getHostBadges(selHost).map(b => <Badge key={b.label} label={b.label} color={b.color} />)}
               </div>
@@ -883,6 +904,10 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
               <TagEditor label="Tags" tags={selHost.tags || []} onChange={tags => onUpdate(selHost.id, { tags })} placeholder="nginx, rce" />
               <FieldInput label="Notes" value={selHost.notes || ''} onChange={v => onUpdate(selHost.id, { notes: v })} placeholder="CVE, details..." textarea />
               <C2HostActionsPanel pid={selectedProject} host={selHost} accent={accent} />
+            </div>}
+
+            {/* Tab: Activity */}
+            {panelTab === 'activity' && <div style={{ flex: 1, overflowY: 'auto', padding: 14 }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                   <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Host activity log</div>
@@ -949,22 +974,66 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
                   </div>
                 ))}
               </div>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                  Linked creds
-                  {hostCreds.length > 0 && <span style={{ marginLeft: 6, color: accent }}>{hostCreds.length}</span>}
-                </div>
-                {hostCreds.length === 0 && <div style={{ fontSize: Math.max(10, fs - 3), color: '#404550' }}>No linked credentials</div>}
-                {hostCreds.map(c => (
-                  <div key={c.id} style={{ marginBottom: 6 }}>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
-                      {getCredBadges(c).slice(0, 5).map(b => <Badge key={`${c.id}-${b.label}`} label={b.label} color={b.color} />)}
-                    </div>
-                    <CredPanel cred={c} host={selHost} accent={accent} pid={selectedProject} linkType={c._linkType} />
+            </div>}
+
+            {/* Tab: Creds */}
+            {panelTab === 'creds' && <div style={{ flex: 1, overflowY: 'auto', padding: 14 }}>
+              {hostCredSummary.total > 0 && (
+                <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 4, padding: '7px 9px', marginBottom: 10 }}>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    <Badge label={`${hostCredSummary.total} linked`} color={accent} />
+                    {hostCredSummary.withSecrets > 0 && <Badge label={`${hostCredSummary.withSecrets} secrets`} color="#39d353" />}
+                    {hostCredSummary.passwords > 0 && <Badge label={`${hostCredSummary.passwords} passwords`} color="#5b8af5" />}
+                    {hostCredSummary.hashes > 0 && <Badge label={`${hostCredSummary.hashes} hashes`} color="#c07af0" />}
+                    {hostCredSummary.keys > 0 && <Badge label={`${hostCredSummary.keys} keys/tokens`} color="#f09a3a" />}
                   </div>
-                ))}
+                </div>
+              )}
+              {hostCreds.length === 0 && <div style={{ fontSize: Math.max(10, fs - 3), color: '#404550' }}>No linked credentials</div>}
+              {hostCreds.map(c => (
+                <div key={c.id} style={{ marginBottom: 6 }}>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
+                    {getCredBadges(c).slice(0, 5).map(b => <Badge key={`${c.id}-${b.label}`} label={b.label} color={b.color} />)}
+                  </div>
+                  <CredPanel cred={c} host={selHost} accent={accent} pid={selectedProject} linkType={c._linkType} />
+                </div>
+              ))}
+            </div>}
+
+            {/* Tab: Path */}
+            {panelTab === 'path' && <div style={{ flex: 1, overflowY: 'auto', padding: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', flex: 1 }}>Lateral paths from this host</span>
+                <button onClick={async () => {
+                  setLateralLoading(true);
+                  try {
+                    const data = await api.topologyLateralPaths(selectedProject, selHost.id, 3);
+                    setLateralPaths(data);
+                  } catch { setLateralPaths({ paths: [], error: true }); }
+                  finally { setLateralLoading(false); }
+                }} disabled={lateralLoading} style={{ background: accent, border: 'none', borderRadius: 4, padding: '4px 10px', cursor: lateralLoading ? 'default' : 'pointer', color: '#fff', fontSize: 9, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: lateralLoading ? 0.6 : 1 }}>
+                  {lateralLoading ? 'Scanning…' : 'Find paths'}
+                </button>
               </div>
-            </div>
+              {!lateralPaths && !lateralLoading && <div style={{ fontSize: 10, color: '#404550' }}>Click "Find paths" to compute lateral movement paths from this host.</div>}
+              {lateralPaths?.error && <div style={{ fontSize: 10, color: '#cc2233' }}>Failed to load paths.</div>}
+              {lateralPaths && !lateralPaths.error && lateralPaths.paths?.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No lateral paths found from this host.</div>}
+              {lateralPaths?.paths?.map((path, i) => (
+                <div key={i} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 10px', marginBottom: 8 }}>
+                  <div style={{ fontSize: 9, color: accent, fontFamily: 'JetBrains Mono', marginBottom: 6 }}>Path {i + 1} · {path.nodes?.length || 0} hops · conf {Math.round((path.confidence || 0) * 100)}%</div>
+                  {(path.nodes || []).map((node, ni) => (
+                    <div key={ni} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: ni < path.nodes.length - 1 ? 4 : 0 }}>
+                      <span style={{ width: 5, height: 5, borderRadius: '50%', background: ni === 0 ? '#39d353' : ni === path.nodes.length - 1 ? '#e8574a' : '#5b8af5', flexShrink: 0 }} />
+                      <span style={{ fontSize: 9, color: '#c8cdd6', fontFamily: 'JetBrains Mono', flex: 1 }}>{node.label || node.id}</span>
+                      {ni < path.nodes.length - 1 && <span style={{ fontSize: 8, color: '#404550' }}>→</span>}
+                    </div>
+                  ))}
+                  {path.steps?.map((step, si) => (
+                    <div key={`s${si}`} style={{ fontSize: 8, color: '#606570', fontFamily: 'JetBrains Mono', marginTop: 4, paddingLeft: 11 }}>{step.technique || step.type || step.label || ''}</div>
+                  ))}
+                </div>
+              ))}
+            </div>}
           </div>
         )}
       </div>
