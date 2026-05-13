@@ -42,7 +42,7 @@ const SCOPE_STATUS = {
   unknown:  { label: 'Unknown',     color: '#404550' },
 };
 
-const EMPTY = { value: '', scope_type: 'cidr', in_scope: true, description: '', gateway_ip: '' };
+const EMPTY = { value: '', scope_type: 'cidr', in_scope: true, description: '', gateway_ip: '', is_entry: false };
 
 export default function ScopeView({ scopes, hosts, onAdd, onUpdate, onDelete, selectedProject, accent, fs = 14 }) {
   const [newScope, setNewScope] = useState(EMPTY);
@@ -81,6 +81,7 @@ export default function ScopeView({ scopes, hosts, onAdd, onUpdate, onDelete, se
       in_scope: !!scope.in_scope,
       description: scope.description || '',
       gateway_ip: scope.gateway_ip || '',
+      is_entry: !!scope.is_entry,
     });
   };
 
@@ -97,6 +98,7 @@ export default function ScopeView({ scopes, hosts, onAdd, onUpdate, onDelete, se
       in_scope: editScope.in_scope,
       description: editScope.description,
       gateway_ip: editScope.gateway_ip,
+      is_entry: editScope.is_entry,
     });
     cancelEdit();
   };
@@ -159,6 +161,15 @@ export default function ScopeView({ scopes, hosts, onAdd, onUpdate, onDelete, se
                 <input value={newScope.gateway_ip} onChange={e => setNewScope(s => ({ ...s, gateway_ip: e.target.value }))}
                   placeholder="10.10.10.1"
                   style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
+              </div>
+            )}
+            {newScope.scope_type === 'cidr' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase' }}>Entry point</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#9098a8', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+                  <input type="checkbox" checked={newScope.is_entry} onChange={e => setNewScope(s => ({ ...s, is_entry: e.target.checked }))} />
+                  Mark entry
+                </label>
               </div>
             )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -226,6 +237,12 @@ export default function ScopeView({ scopes, hosts, onAdd, onUpdate, onDelete, se
                         placeholder="Gateway IP"
                         style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 7px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', width: 120, flexShrink: 0 }} />
                     )}
+                    {editScope.scope_type === 'cidr' && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono', flexShrink: 0 }}>
+                        <input type="checkbox" checked={editScope.is_entry} onChange={e => setEditScope(s => ({ ...s, is_entry: e.target.checked }))} />
+                        Entry
+                      </label>
+                    )}
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
                       <button onClick={() => setEditScope(s => ({ ...s, in_scope: true }))}
                         style={{ background: editScope.in_scope ? '#39d35322' : 'transparent', border: `1px solid ${editScope.in_scope ? '#39d35366' : '#2a2d35'}`, borderRadius: 3, padding: '2px 7px', cursor: 'pointer', color: editScope.in_scope ? '#39d353' : '#505560', fontSize: 9, fontFamily: 'JetBrains Mono' }}>
@@ -249,7 +266,7 @@ export default function ScopeView({ scopes, hosts, onAdd, onUpdate, onDelete, se
                   <>
                     <span style={{ fontSize: 9, color: t.color, background: t.color + '18', border: `1px solid ${t.color}44`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', width: 60, textAlign: 'center', flexShrink: 0 }}>{t.label}</span>
                     <span style={{ fontSize: Math.max(11, fs - 1), color: '#e0e4ec', fontFamily: 'JetBrains Mono', flex: 1, fontWeight: 500 }}>{scope.value}</span>
-                    <span style={{ fontSize: 10, color: '#808590', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{scope.description || '—'}{scope.gateway_ip ? ` · gw ${scope.gateway_ip}` : ''}</span>
+                    <span style={{ fontSize: 10, color: '#808590', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{scope.description || '—'}{scope.gateway_ip ? ` · gw ${scope.gateway_ip}` : ''}{scope.is_entry ? ' · entry' : ''}</span>
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
                       {[[true, '✓ In Scope', '#39d353'], [false, '✗ Exclude', '#cc2233']].map(([v, l, c]) => (
                         <button key={String(v)} onClick={() => onUpdate(scope.id, { in_scope: v })}

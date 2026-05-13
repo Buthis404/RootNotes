@@ -25,6 +25,11 @@ def list_scopes(pid: str | None = None, db: Session = Depends(get_db), user: mod
 @router.post("", response_model=schemas.Scope, status_code=201)
 def create_scope(body: schemas.ScopeCreate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, body.pid, user, "scopes.update")
+    if body.is_entry:
+        db.query(models.Scope).filter(
+            models.Scope.pid == body.pid,
+            models.Scope.is_entry == True,
+        ).update({"is_entry": False})
     scope = models.Scope(**body.model_dump(), id=new_id("sc"))
     db.add(scope)
     sync_project_ip_from_scopes(db, scope.pid)
@@ -42,6 +47,12 @@ def update_scope(sid: str, body: schemas.ScopeUpdate, db: Session = Depends(get_
     if not scope:
         raise HTTPException(404)
     check_object_access(db, scope.pid, user, "scopes.update")
+    if body.is_entry is True:
+        db.query(models.Scope).filter(
+            models.Scope.pid == scope.pid,
+            models.Scope.id != sid,
+            models.Scope.is_entry == True,
+        ).update({"is_entry": False})
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(scope, k, v)
     sync_project_ip_from_scopes(db, scope.pid)

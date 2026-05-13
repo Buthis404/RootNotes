@@ -1,5 +1,93 @@
 # RootNotes — Changelog
 
+## v0.2.0 — 2026-05-13
+
+### SSH Pivot — исправление зависания агента при скане через SOCKS-прокси
+
+**Проблема:** при запуске сканирования через pivot-хост с SOCKS4/5-прокси gunicorn-воркер зависал намертво — процесс SSH оставался живым после таймаута и держал pipe открытым, блокируя `communicate()`.
+
+**Причина:** `setsid -w` оборачивал SSH-процесс, делая его внуком (не прямым ребёнком). `proc.kill()` убивал setsid, но SSH оставался сиротой с открытыми pipe'ами.
+
+**Исправления (`backend/app/core/ssh_exec.py`):**
+- Убран `setsid -w` — SSH теперь прямой дочерний процесс
+- Добавлен `start_new_session=True` во все три точки запуска (`run_ssh_command`, `run_ssh_command_cancellable`, `run_ssh_command_streaming`) — даёт тот же изоляционный эффект, но с правильной иерархией процессов
+- `proc.kill()` теперь гарантированно закрывает pipe'ы и разблокирует `communicate()`
+
+**Таймаут proxychains (`backend/app/core/exec_context.py`):**
+- В конфиг proxychains добавлены `tcp_connect_time_out 5000` и `tcp_read_time_out 15000`
+- При недоступном SOCKS-прокси команда теперь завершается за ~5 с вместо вечного ожидания
+
+---
+
+### Scope — точка входа в инфраструктуру (`is_entry`)
+
+**Новое поле `is_entry` на Scope** (Boolean, default false):
+- Отмечает scope, через который проходит входящий трафик атакующего (VPN-шлюз, DMZ и т.п.)
+- Только один scope на проект может иметь `is_entry=true` — при установке флага у другого scope старый сбрасывается автоматически (как в `create`, так и в `update`)
+- В UI отображается бейдж `· entry` в списке scope'ов; чекбокс в форме создания/редактирования
+
+**Backend:**
+- `ALTER TABLE scopes ADD COLUMN is_entry BOOLEAN NOT NULL DEFAULT FALSE` — добавлено в `main.py`
+- `models.py`, `schemas.py` — поле добавлено в `Scope`, `ScopeCreate`, `ScopeUpdate`
+- `routers/scopes.py` — авто-сброс предыдущего `is_entry` при POST и PATCH
+
+---
+
+### Topology Smart Build — исправления и улучшения
+
+#### Исправление crash в транзитном блоке
+- `float(region.get("x", 0))` заменено на `float(region.get("x") or 0)` во всех вспомогательных функциях (`_region_center`, `_place_between_regions`, `_place_on_region_edge`) — `dict.get(key, default)` возвращает `None` (не default) при `key: null` в JSON
+- Транзитный блок обёрнут в `try/except Exception` — ошибки позиционирования не ломают build целиком
+
+#### Статусы нод больше не сбрасываются после Smart Build (двойная защита)
+
+**Backend (`topology.py`):**
+- Добавлена иерархия приоритетов `_STATUS_RANK` (unknown < alive < up < scanned < access < owned/pwned < attacker)
+- При синхронизации `Host.status → node.status` статус ноды обновляется только если хост-статус ≥ текущего статуса ноды — исключает откат "scanned" → "unknown"
+
+**Frontend (`applySyncEvent.js`):**
+- При получении `layout_applied` / `topology_rebuilt` фронтенд сравнивает текущий статус ноды с входящим и берёт лучший — по `node.id` и `node.host_id`
+- `layout_reset` по-прежнему полностью заменяет состояние (намеренный полный сброс)
+
+#### Направление трафика соответствует логике атаки
+
+**Раньше:** uplink-ребро вело `Attacker → transit-хост` (VPN-GW), минуя entry-gateway.
+
+**Теперь:** uplink ведёт к **entry scope gateway** (`gateway_ip` scope с `is_entry=true`). Полная цепочка видна на карте:
+```
+Attacker → GW_EXTERNAL (entry)  →  VPN-GW (pivot)  →  Internal hosts
+```
+Если entry-gateway не настроен — fallback на transit-хост (прежнее поведение).
+
+---
+
+### SSH Proxy — многоуровневая поддержка прокси для attacker-цели
+
+**Новая система маршрутизации SSH-команд** (`backend/app/core/`):
+
+- `exec_context.py` — экспортирует переменные окружения `ROOTNOTES_EXEC_*` (jump-host, proxy) перед выполнением команды; оборачивает команду в proxychains при SOCKS4/5
+- `route_selection.py` — алгоритм выбора маршрута: direct → jump → proxy; учитывает доступность из attacker-цели
+- `socks_proxy.py` — Python SOCKS5-клиент для `ProxyCommand` в OpenSSH (без внешних зависимостей)
+
+**Поддерживаемые прокси для attacker SSH-target:**
+| Тип | Описание |
+|-----|----------|
+| `jump` | SSH Jump Host (ProxyJump / ProxyCommand) |
+| `socks5` | SOCKS5 через `socks_proxy.py` ProxyCommand |
+| `socks4` | SOCKS4 через proxychains |
+
+**SystemModulesView:** в UI attacker-targets добавлены поля proxy-конфигурации с валидацией.
+
+---
+
+### C2 — уточнение семантики статусов хостов
+
+- При синхронизации C2-агентов (CS/Sliver/MSF/Adaptix) статус хоста выставляется строго по иерархии: если хост уже `owned/pwned`, агент C2 не понижает статус до `access`
+- Корректная обработка `last_seen` и `is_active` для разных коннекторов
+- Исправлен тайпо endpoint в Cobalt Strike коннекторе: `/api/v1/beacon` → `/api/v1/beacons`
+
+---
+
 ## 2026-05-09 — Smart topology build + Full-text job output search + Attacker SSH improvements
 
 ### Smart topology build (`POST /topology/smart-build`)

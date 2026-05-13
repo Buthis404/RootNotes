@@ -37,7 +37,7 @@ def build_remote_execution_command(config: dict, command: str) -> str:
         proxy_line = f"{exec_proxy_type} {exec_proxy_host} {exec_proxy_port}"
         if exec_proxy_username:
             proxy_line += f" {exec_proxy_username} {exec_proxy_password}"
-        proxy_cfg = "strict_chain\nproxy_dns\n[ProxyList]\n" + proxy_line + "\n"
+        proxy_cfg = "strict_chain\nproxy_dns\ntcp_connect_time_out 5000\ntcp_read_time_out 15000\n[ProxyList]\n" + proxy_line + "\n"
         base_command = (
             "cfg=$(mktemp) || exit 1; "
             f"printf %s {shlex.quote(proxy_cfg)} > \"$cfg\"; "
