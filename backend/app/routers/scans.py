@@ -19,10 +19,13 @@ from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
+from ..core.exec_context import build_remote_execution_command
+from ..core.route_selection import choose_route_aware_target
 from ..core.utils import new_id
 from ..database import get_db
 from ..plugins.registry import registry
 from ..plugins.state import list_attacker_targets
+from .pivots import get_pivot_item, normalize_pivot_proxy_type
 
 
 router = APIRouter(prefix="/api/projects/{pid}/scans", tags=["scans"])
@@ -34,7 +37,7 @@ def _require_attacker_ssh():
         raise HTTPException(404, "Attacker SSH module is disabled")
 
 
-def _get_ssh_config(pid: str, target_id: Optional[str]) -> dict:
+def _get_ssh_config(pid: str, target_id: Optional[str], db: Session | None = None, target_hint: str = "") -> dict:
     targets = list_attacker_targets()
     if not targets:
         raise HTTPException(400, "No attacker SSH targets configured")
@@ -46,7 +49,56 @@ def _get_ssh_config(pid: str, target_id: Optional[str]) -> dict:
     project_targets = [t for t in targets if not t.get("project_ids") or pid in t.get("project_ids", [])]
     if not project_targets:
         raise HTTPException(400, "No attacker SSH target assigned to this project")
+    if db is not None and target_hint:
+        selected = choose_route_aware_target(pid, project_targets, db, target_hint)
+        if selected:
+            return selected
     return project_targets[0]
+
+
+def _build_scan_execution_command(
+    pid: str,
+    db: Session,
+    ssh_config: dict,
+    command: str,
+    execution_source: str = "attacker",
+    pivot_observation_id: str | None = None,
+) -> str:
+    source = (execution_source or "attacker").strip().lower()
+    if source == "attacker":
+        return command
+    if source != "pivot_listener":
+        raise HTTPException(400, "Invalid execution_source")
+    if not pivot_observation_id:
+        raise HTTPException(400, "pivot_observation_id is required for pivot_listener execution")
+
+    obs = get_pivot_item(pid, pivot_observation_id, db)
+    if not obs:
+        raise HTTPException(404, "Pivot observation not found")
+    pivot_proxy_type = normalize_pivot_proxy_type(obs.get("pivot_type") or "")
+    if pivot_proxy_type not in {"socks4", "socks5"}:
+        raise HTTPException(400, f"Selected pivot tunnel type is not supported for scans: {obs.get('pivot_type') or 'unknown'}")
+    bind = str(obs.get("bind_address") or "").strip()
+    if not bind:
+        raise HTTPException(400, "Selected pivot listener does not expose a bind address")
+    if ":" in bind:
+        proxy_host, proxy_port_raw = bind.rsplit(":", 1)
+    else:
+        proxy_host, proxy_port_raw = "127.0.0.1", bind
+    try:
+        proxy_port = int(proxy_port_raw)
+    except ValueError:
+        raise HTTPException(400, "Invalid pivot listener port")
+
+    exec_cfg = {
+        **ssh_config,
+        "exec_proxy_type": pivot_proxy_type,
+        "exec_proxy_host": proxy_host or "127.0.0.1",
+        "exec_proxy_port": proxy_port,
+        "exec_proxy_username": "",
+        "exec_proxy_password": "",
+    }
+    return build_remote_execution_command(exec_cfg, command)
 
 
 def _upsert_host(db: Session, pid: str, ip: str, **kwargs) -> models.Host:
@@ -73,6 +125,8 @@ class NmapScanBody(BaseModel):
     target: str
     flags: str = "-sV -sC -T4 --open"
     target_id: Optional[str] = None
+    execution_source: str = "attacker"
+    pivot_observation_id: Optional[str] = None
     timeout_seconds: int = 180
 
 
@@ -144,13 +198,13 @@ async def run_nmap_scan(
     _require_attacker_ssh()
     check_pid_access(db, pid, user, "hosts.create")
 
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     target = body.target.strip()
     if not target:
         raise HTTPException(400, "target is required")
 
     username = getattr(request.state, "username", None)
-    cmd = f"nmap {body.flags} -oX - {target} 2>/dev/null"
+    cmd = _build_scan_execution_command(pid, db, ssh_config, f"nmap {body.flags} -oX - {target} 2>/dev/null", body.execution_source, body.pivot_observation_id)
     job = start_job(
         db, pid, "nmap", f"Nmap: {target}",
         target=target, command=cmd, created_by=username or "",
@@ -237,6 +291,8 @@ class NucleiScanBody(BaseModel):
     templates: str = ""
     severity: str = "critical,high,medium"
     target_id: Optional[str] = None
+    execution_source: str = "attacker"
+    pivot_observation_id: Optional[str] = None
     timeout_seconds: int = 300
     extra_flags: str = ""
 
@@ -289,14 +345,14 @@ async def run_nuclei_scan(
     _require_attacker_ssh()
     check_pid_access(db, pid, user, "findings.create")
 
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     target = body.target.strip()
     if not target:
         raise HTTPException(400, "target is required")
 
     username = getattr(request.state, "username", None)
     tpl_flag = f"-t {body.templates}" if body.templates.strip() else ""
-    cmd = f"nuclei -u {target} {tpl_flag} -severity {body.severity} -jsonl {body.extra_flags} 2>/dev/null"
+    cmd = _build_scan_execution_command(pid, db, ssh_config, f"nuclei -u {target} {tpl_flag} -severity {body.severity} -jsonl {body.extra_flags} 2>/dev/null", body.execution_source, body.pivot_observation_id)
     job = start_job(
         db, pid, "nuclei", f"Nuclei: {target}",
         target=target, command=cmd, created_by=username or "",
@@ -370,6 +426,8 @@ class CmeScanBody(BaseModel):
     protocol: str = "smb"
     extra_flags: str = "--users --groups"
     target_id: Optional[str] = None
+    execution_source: str = "attacker"
+    pivot_observation_id: Optional[str] = None
     timeout_seconds: int = 120
 
 
@@ -436,7 +494,7 @@ async def run_cme_scan(
     _require_attacker_ssh()
     check_pid_access(db, pid, user, "hosts.create")
 
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     target = body.target.strip()
     if not target:
         raise HTTPException(400, "target is required")
@@ -451,7 +509,7 @@ async def run_cme_scan(
         auth = f"-u '{body.username}'"
 
     domain = f"-d {body.domain}" if body.domain else ""
-    cmd = f"nxc {body.protocol} {target} {auth} {domain} {body.extra_flags} 2>/dev/null"
+    cmd = _build_scan_execution_command(pid, db, ssh_config, f"nxc {body.protocol} {target} {auth} {domain} {body.extra_flags} 2>/dev/null", body.execution_source, body.pivot_observation_id)
     job = start_job(
         db, pid, "cme", f"NetExec ({body.protocol}): {target}",
         target=target, command=cmd, created_by=username or "",
@@ -607,12 +665,12 @@ async def run_httpx(
 ):
     _require_attacker_ssh()
     check_pid_access(db, pid, current_user)
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     username = current_user.username
     target = body.target.strip()
 
     flags = body.flags or "-title -status-code -tech-detect -follow-redirects"
-    cmd = f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1"
+    cmd = build_remote_execution_command(ssh_config, f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1")
 
     job = start_job(
         db, pid, "httpx", f"httpx: {target}",
@@ -738,13 +796,13 @@ async def run_ffuf(
 ):
     _require_attacker_ssh()
     check_pid_access(db, pid, current_user)
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target_url)
     username = current_user.username
     target_url = body.target_url.strip().rstrip("/")
 
     ext_flag = f"-e {body.extensions}" if body.extensions.strip() else ""
     url = f"{target_url}/FUZZ"
-    cmd = f"ffuf -u '{url}' -w '{body.wordlist}' {ext_flag} {body.flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+    cmd = build_remote_execution_command(ssh_config, f"ffuf -u '{url}' -w '{body.wordlist}' {ext_flag} {body.flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json")
 
     job = start_job(
         db, pid, "ffuf", f"ffuf: {target_url}",

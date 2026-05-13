@@ -30,6 +30,11 @@ from ..plugins.registry import registry
 
 AUTO_LINK_SUPPRESSIONS_KEY = "suppressed_auto_links"
 
+_STATUS_RANK = {
+    "unknown": 0, "alive": 1, "up": 2, "scanned": 3,
+    "access": 4, "owned": 5, "pwned": 5, "attacker": 6,
+}
+
 
 def _node_ref(node: dict | None) -> str:
     if not node:
@@ -254,6 +259,103 @@ def _is_gateway(host: dict) -> bool:
 
 _GW_IP_SUFFIXES = {1, 2, 254, 253, 252}
 
+_SCOPE_REGION_PALETTE = [
+    ("#5b8af5", "#5b8af522"),
+    ("#39d353", "#39d3531c"),
+    ("#f09a3a", "#f09a3a1c"),
+    ("#c07af0", "#c07af01c"),
+    ("#6fc8f0", "#6fc8f01c"),
+    ("#e8574a", "#e8574a1c"),
+]
+
+
+def _scope_region_colors(cidr: str, in_scope: bool) -> tuple[str, str]:
+    idx = sum(ord(ch) for ch in (cidr or "")) % len(_SCOPE_REGION_PALETTE)
+    stroke, fill = _SCOPE_REGION_PALETTE[idx]
+    if in_scope:
+        return stroke, fill
+    return ("#cc2233", "#cc22331a")
+
+
+def _host_matches_gateway_ip(host: dict, gateway_ip: str) -> bool:
+    if not gateway_ip:
+        return False
+    if (host.get("ip") or "") == gateway_ip:
+        return True
+    return gateway_ip in {str(ip).strip() for ip in (host.get("ips") or []) if str(ip).strip()}
+
+
+def _region_center(region: dict) -> tuple[float, float]:
+    return (
+        float(region.get("x") or 0) + float(region.get("w") or 0) / 2.0,
+        float(region.get("y") or 0) + float(region.get("h") or 0) / 2.0,
+    )
+
+
+def _place_between_regions(region_a: dict, region_b: dict) -> tuple[float, float]:
+    ax = float(region_a.get("x") or 0)
+    ay = float(region_a.get("y") or 0)
+    aw = float(region_a.get("w") or 0)
+    ah = float(region_a.get("h") or 0)
+    bx = float(region_b.get("x") or 0)
+    by = float(region_b.get("y") or 0)
+    bw = float(region_b.get("w") or 0)
+    bh = float(region_b.get("h") or 0)
+
+    if ax + aw <= bx:
+        x = (ax + aw + bx) / 2.0
+        overlap_top = max(ay, by)
+        overlap_bottom = min(ay + ah, by + bh)
+        y = (overlap_top + overlap_bottom) / 2.0 if overlap_bottom > overlap_top else (ay + ah / 2.0 + by + bh / 2.0) / 2.0
+        return x, y
+    if bx + bw <= ax:
+        x = (bx + bw + ax) / 2.0
+        overlap_top = max(ay, by)
+        overlap_bottom = min(ay + ah, by + bh)
+        y = (overlap_top + overlap_bottom) / 2.0 if overlap_bottom > overlap_top else (ay + ah / 2.0 + by + bh / 2.0) / 2.0
+        return x, y
+    if ay + ah <= by:
+        y = (ay + ah + by) / 2.0
+        overlap_left = max(ax, bx)
+        overlap_right = min(ax + aw, bx + bw)
+        x = (overlap_left + overlap_right) / 2.0 if overlap_right > overlap_left else (ax + aw / 2.0 + bx + bw / 2.0) / 2.0
+        return x, y
+    y = (by + bh + ay) / 2.0
+    overlap_left = max(ax, bx)
+    overlap_right = min(ax + aw, bx + bw)
+    x = (overlap_left + overlap_right) / 2.0 if overlap_right > overlap_left else (ax + aw / 2.0 + bx + bw / 2.0) / 2.0
+    return x, y
+
+
+def _place_on_region_edge(region: dict, side: str) -> tuple[float, float]:
+    x = float(region.get("x") or 0)
+    y = float(region.get("y") or 0)
+    w = float(region.get("w") or 0)
+    h = float(region.get("h") or 0)
+    if side == "left":
+        return x - 12.0, y + h / 2.0
+    if side == "right":
+        return x + w + 12.0, y + h / 2.0
+    if side == "top":
+        return x + w / 2.0, y - 12.0
+    return x + w / 2.0, y + h + 12.0
+
+
+def _host_scope_memberships(host: dict, scope_defs: list[dict]) -> list[str]:
+    memberships = []
+    all_ips = [str(host.get("ip") or "").strip(), *[str(ip).strip() for ip in (host.get("ips") or []) if str(ip).strip()]]
+    uniq_ips = [ip for ip in dict.fromkeys(all_ips) if ip]
+    for scope in scope_defs:
+        net_obj = scope.get("net_obj")
+        cidr = scope.get("cidr") or ""
+        if not net_obj or not cidr:
+            continue
+        for ip in uniq_ips:
+            if _ip_in_network(ip, net_obj):
+                memberships.append(cidr)
+                break
+    return memberships
+
 
 def _pick_gateway(group: list[dict]) -> dict:
     """
@@ -297,7 +399,7 @@ def _pick_gateway(group: list[dict]) -> dict:
     ))
 
 
-def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
+def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str] | None = None) -> list[TopologyLinkDiff]:
     """
     Hub-and-spoke link inference using full host metadata.
 
@@ -311,7 +413,16 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
     if not hosts:
         return []
 
+    manual_gateway_by_subnet = manual_gateway_by_subnet or {}
     subnet_hosts: dict[str, list[dict]] = {}
+    host_by_ip: dict[str, dict] = {}
+    for h in hosts:
+        primary_ip = h.get("ip", "")
+        if primary_ip:
+            host_by_ip[primary_ip] = h
+        for extra_ip in (h.get("ips") or []):
+            if extra_ip:
+                host_by_ip[extra_ip] = h
     for h in hosts:
         ip = h.get("ip", "")
         if not ip:
@@ -340,7 +451,9 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
         if len(group) < 2:
             continue
 
-        gw = _pick_gateway(group)
+        manual_gw_ip = (manual_gateway_by_subnet.get(subnet) or "").strip()
+        manual_gw = host_by_ip.get(manual_gw_ip) if manual_gw_ip else None
+        gw = manual_gw or _pick_gateway(group)
         gw_ip = gw.get("ip", "")
         gw_hostname = gw.get("hostname", "") or gw_ip
 
@@ -348,7 +461,9 @@ def infer_links_smart(hosts: list[dict]) -> list[TopologyLinkDiff]:
             subnet_gw[subnet] = gw_ip
 
         # Explain why this host was chosen as gateway
-        if _is_gateway(gw):
+        if manual_gw is not None:
+            gw_reason = f"manual scope gateway {gw_hostname}"
+        elif _is_gateway(gw):
             gw_reason = f"gateway role/tag/OS on {gw_hostname}"
         else:
             last_octet = gw_ip.split(".")[-1] if gw_ip else ""
@@ -1069,6 +1184,8 @@ def _run_smart_build(
                         "cidr": val, "net_obj": net_obj,
                         "description": s.description or "",
                         "in_scope": s.in_scope,
+                        "gateway_ip": (s.gateway_ip or "").strip(),
+                        "is_entry": bool(getattr(s, "is_entry", False)),
                     })
                 except ValueError:
                     pass
@@ -1091,6 +1208,7 @@ def _run_smart_build(
         hosts_meta.append({
             "id": h.id, "ip": h.ip, "hostname": h.hostname, "os": h.os,
             "status": h.status, "role": h.role, "is_attacker": h.is_attacker,
+            "ips": h.ips or [],
             "ports": h.ports or [], "services": h.services or [],
             "tags": h.tags or [], "domain": h.domain or "",
             "subnet": _annotate_subnet(h.ip or ""),
@@ -1119,6 +1237,13 @@ def _run_smart_build(
                 en["domain"] = p["domain"]
             if p.get("tags"):
                 en["tags"] = p["tags"]
+            if p.get("ips"):
+                en["ips"] = p["ips"]
+            if p.get("status"):
+                host_rank = _STATUS_RANK.get(p["status"], 0)
+                node_rank = _STATUS_RANK.get(en.get("status") or "unknown", 0)
+                if host_rank >= node_rank:
+                    en["status"] = p["status"]
             inferred_role = _infer_node_role(p)
             if inferred_role and inferred_role not in ("unknown", "server"):
                 en["role"] = inferred_role
@@ -1127,10 +1252,10 @@ def _run_smart_build(
             inferred_role = _infer_node_role(p)
             new_node = {
                 "id": new_id("nd"), "host_id": h_id,
-                "label": p.get("hostname") or h_ip, "ip": h_ip, "ips": [],
+                "label": p.get("hostname") or h_ip, "ip": h_ip, "ips": p.get("ips") or [h_ip],
                 "ports": p.get("ports", []), "services": p.get("services", []),
                 "subnet": p.get("subnet") or _get_subnet(h_ip),
-                "status": p.get("status", "unknown"),
+                "status": p.get("status") or "unknown",
                 "role": inferred_role,
                 "type": _node_type_for(p), "notes": "",
                 "is_attacker": bool(p.get("is_attacker")),
@@ -1252,8 +1377,8 @@ def _run_smart_build(
 
     # ── P3: Host activity evidence edges (incl. C2 sessions) ─────────
     if include_access_edges and attacker_nids:
-        _exec_types = {"exec", "postex", "lateral", "c2"}
-        _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral", "c2": "c2_session"}
+        _exec_types = {"exec", "postex", "lateral"}
+        _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral"}
         acts = db.query(models.HostActivity).filter(
             models.HostActivity.pid == pid,
             models.HostActivity.status == "done",
@@ -1316,7 +1441,12 @@ def _run_smart_build(
 
     # ── P5: Subnet proximity edges (hub-and-spoke) ───────────────────
     if include_subnet_edges:
-        for link in infer_links_smart(hosts_meta):
+        manual_gateway_by_subnet = {
+            item["cidr"]: item.get("gateway_ip", "")
+            for item in scope_region_defs
+            if item.get("gateway_ip")
+        }
+        for link in infer_links_smart(hosts_meta, manual_gateway_by_subnet):
             src_nid = ip_to_nid.get(link.source_ip)
             dst_nid = ip_to_nid.get(link.target_ip)
             if not src_nid or not dst_nid:
@@ -1360,14 +1490,15 @@ def _run_smart_build(
             max_x = max(p[0] for p in node_positions) + 160 + pad
             max_y = max(p[1] for p in node_positions) + 100 + pad
             in_scope = sr["in_scope"]
+            scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope)
             existing_regions.append({
                 "id": new_id("r"),
                 "x": min_x, "y": min_y,
                 "w": max_x - min_x, "h": max_y - min_y,
                 "label": sr["description"] or cidr_str,
                 "note": cidr_str,
-                "fill": "#0d1f0d" if in_scope else "#1f0d0d",
-                "stroke": "#1e3a1e" if in_scope else "#3a1e1e",
+                "fill": scope_fill,
+                "stroke": scope_stroke,
                 "zone_type": "scope",
                 "updated_at": datetime.utcnow().isoformat(),
                 "version": 1,
@@ -1375,6 +1506,92 @@ def _run_smart_build(
             regions_added += 1
 
         network.regions_json = existing_regions
+
+    try:
+        scope_gateway_host_ids: dict[str, str] = {}
+        for sr in scope_region_defs:
+            gw_ip = (sr.get("gateway_ip") or "").strip()
+            if not gw_ip:
+                continue
+            matched_host = next((host for host in hosts_meta if _host_matches_gateway_ip(host, gw_ip)), None)
+            if matched_host:
+                scope_gateway_host_ids[sr["cidr"]] = matched_host["id"]
+
+        region_by_cidr = {str(region.get("note") or "").strip(): region for region in (network.regions_json or []) if region.get("note")}
+        gateway_scopes_by_host: dict[str, list[str]] = {}
+        for cidr, host_id in scope_gateway_host_ids.items():
+            gateway_scopes_by_host.setdefault(host_id, []).append(cidr)
+
+        transit_scopes_by_host: dict[str, list[str]] = {}
+        for host in hosts_meta:
+            memberships = _host_scope_memberships(host, scope_region_defs)
+            if len(memberships) >= 2:
+                transit_scopes_by_host[host["id"]] = memberships
+
+        for node in existing_nodes:
+            if node.get("manually_positioned"):
+                continue
+            host_id = node.get("host_id") or ""
+            related_scopes = transit_scopes_by_host.get(host_id) or gateway_scopes_by_host.get(host_id, [])
+            if len(related_scopes) >= 2:
+                region_a = region_by_cidr.get(related_scopes[0])
+                region_b = region_by_cidr.get(related_scopes[1])
+                if region_a and region_b:
+                    node["x"], node["y"] = _place_between_regions(region_a, region_b)
+                    continue
+            if len(related_scopes) == 1:
+                region = region_by_cidr.get(related_scopes[0])
+                if region:
+                    centers = {cidr: _region_center(reg) for cidr, reg in region_by_cidr.items() if cidr != related_scopes[0]}
+                    if centers:
+                        own_cx, own_cy = _region_center(region)
+                        other_cidr, (other_cx, other_cy) = min(centers.items(), key=lambda item: abs(item[1][0] - own_cx) + abs(item[1][1] - own_cy))
+                        side = "right" if other_cx >= own_cx else "left"
+                        node["x"], node["y"] = _place_on_region_edge(region, side)
+                    else:
+                        node["x"], node["y"] = _place_on_region_edge(region, "left")
+
+        entry_scope_cidr = next((item["cidr"] for item in scope_region_defs if item.get("is_entry")), "")
+        entry_region = region_by_cidr.get(entry_scope_cidr) if entry_scope_cidr else None
+        leftmost_region = min(
+            (r for r in (network.regions_json or []) if r.get("zone_type") == "scope"),
+            key=lambda item: float(item.get("x") or 0),
+            default=None,
+        )
+        anchor_region = entry_region or leftmost_region
+        if anchor_region:
+            attacker_nodes = [node for node in existing_nodes if node.get("is_attacker") and not node.get("manually_positioned")]
+            base_x, base_y = _place_on_region_edge(anchor_region, "left")
+            for idx, node in enumerate(attacker_nodes):
+                node["x"] = base_x - 120.0
+                node["y"] = base_y + idx * 90.0
+
+            anchor_scope_cidr = str(anchor_region.get("note") or "").strip()
+            transit_candidates = [host_id for host_id, scopes in transit_scopes_by_host.items() if anchor_scope_cidr in scopes]
+            # Prefer entry scope gateway over transit hosts so that the uplink
+            # shows the actual first hop the attacker enters through.
+            entry_gw_host_id = scope_gateway_host_ids.get(anchor_scope_cidr)
+            preferred_uplink_host_id = entry_gw_host_id or (transit_candidates[0] if transit_candidates else None)
+            if preferred_uplink_host_id and attacker_nids:
+                preferred_uplink_nid = hid_to_nid.get(preferred_uplink_host_id)
+                if preferred_uplink_nid:
+                    is_gateway = preferred_uplink_host_id == entry_gw_host_id
+                    is_transit = preferred_uplink_host_id in transit_candidates
+                    uplink_label = "entry" if is_gateway else ("vpn access" if is_transit else "direct access")
+                    uplink_reason = (f"attacker enters {anchor_scope_cidr} via entry gateway"
+                                     if is_gateway else
+                                     f"attacker reaches entry scope {anchor_scope_cidr} via transit host"
+                                     if is_transit else
+                                     f"attacker reaches entry scope {anchor_scope_cidr} via configured gateway")
+                    if _add_edge(attacker_nids[0], preferred_uplink_nid, {
+                        "type": "uplink", "label": uplink_label,
+                        "confidence": 0.9, "source": "auto",
+                        "reason": uplink_reason,
+                        "state": "inferred", "verified": False, "is_manual": False,
+                    }):
+                        edges_added += 1
+    except Exception:
+        pass
 
     # ── Infer node zone_type from region containment ─────────────────
     regions_with_zone = [r for r in (network.regions_json or []) if r.get("zone_type") and r.get("zone_type") != "scope"]
