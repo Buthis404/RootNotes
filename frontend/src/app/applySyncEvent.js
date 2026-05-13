@@ -129,7 +129,24 @@ export function applySyncEvent(msg, ctx) {
         regions: (net.regions || []).filter(region => region.id !== data.region_id),
       }));
     }
-    if (action === 'layout_applied' || action === 'topology_rebuilt' || action === 'layout_reset') {
+    if (action === 'layout_applied' || action === 'topology_rebuilt') {
+      if (data.network) {
+        setNetworks(prev => prev.map(net => {
+          if (net.id !== data.network.id) return net;
+          const _RANK = { unknown: 0, alive: 1, up: 2, scanned: 3, access: 4, owned: 5, pwned: 5, attacker: 6 };
+          const statusById = new Map((net.nodes || []).map(n => [n.id, n.status]));
+          const statusByHostId = new Map((net.nodes || []).map(n => n.host_id ? [n.host_id, n.status] : null).filter(Boolean));
+          const nodes = (data.network.nodes || []).map(n => {
+            const cur = statusById.get(n.id) ?? statusByHostId.get(n.host_id);
+            const inc = n.status;
+            const status = cur && (_RANK[cur] ?? 0) >= (_RANK[inc] ?? 0) ? cur : inc;
+            return { ...n, status };
+          });
+          return { ...data.network, nodes };
+        }));
+      }
+    }
+    if (action === 'layout_reset') {
       if (data.network) setNetworks(prev => prev.map(net => net.id === data.network.id ? data.network : net));
     }
   }

@@ -181,6 +181,10 @@ Recommended next:
 5. route-aware pivot graph semantics (SOCKS, tunnels, routed segments)
 6. AD-aware edge building from SharpHound/BloodHound data
 
+Recent correction:
+- C2 inventory sessions are no longer auto-rendered as attacker-host access edges during smart-build
+- CIDR scopes can now carry explicit `gateway_ip`, which overrides gateway heuristics during subnet topology construction
+
 ---
 
 ## Stage 4. Expand domain-aware identity model
@@ -322,7 +326,7 @@ Recommended later:
 1. SSH through proxy / jump host / SOCKS
    - current status: transport-layer `jump` and authenticated `socks5` support implemented for attacker SSH targets
 2. separate execution-layer proxying from attacker host
-   - current status: execution SOCKS context implemented for attacker-exec and supported scans; execution jump context exported via env vars
+   - current status: scan-time execution source selector now models `attacker host` vs `pivot listener` instead of hiding scan-origin choice in attacker-host settings
 3. transport selection aware of pivots and routes
    - current status: initial route-aware ranking implemented for scans and attacker-exec when global attacker targets are auto-selected
 4. collector workflows for pivot-aware execution

@@ -44,6 +44,36 @@ const ResultBox = ({ result, error }) => {
   );
 };
 
+function ExecutionSourceRow({ executionSource, setExecutionSource, pivotObservationId, setPivotObservationId, pivotOptions = [], loading = false }) {
+  return (
+    <>
+      <FieldRow label="Execution source">
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {[
+            { id: 'attacker', label: 'Attacker host', color: '#5b8af5' },
+            { id: 'pivot_listener', label: 'Pivot listener', color: '#e8cc42' },
+          ].map(opt => (
+            <button key={opt.id} onClick={() => setExecutionSource(opt.id)}
+              style={{ background: executionSource === opt.id ? `${opt.color}22` : '#1a1c22', border: `1px solid ${executionSource === opt.id ? opt.color : '#2a2d35'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', color: executionSource === opt.id ? opt.color : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </FieldRow>
+      {executionSource === 'pivot_listener' && (
+        <FieldRow label="Pivot listener">
+          <select value={pivotObservationId} onChange={e => setPivotObservationId(e.target.value)} style={{ background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#c8cdd6', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', width: '100%', boxSizing: 'border-box' }}>
+            <option value="">{loading ? 'Loading listeners...' : 'Select pivot listener...'}</option>
+            {pivotOptions.map(item => (
+              <option key={item.id} value={item.id}>{item.label}</option>
+            ))}
+          </select>
+        </FieldRow>
+      )}
+    </>
+  );
+}
+
 // ── Nmap Panel ────────────────────────────────────────────────────────
 function NmapPanel({ pid, accent }) {
   const [target, setTarget] = useState('');
@@ -52,12 +82,26 @@ function NmapPanel({ pid, accent }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [executionSource, setExecutionSource] = useState('attacker');
+  const [pivotObservationId, setPivotObservationId] = useState('');
+  const [pivotOptions, setPivotOptions] = useState([]);
+  const [pivotLoading, setPivotLoading] = useState(false);
+
+  useEffect(() => {
+    if (executionSource !== 'pivot_listener' || !pid) return;
+    setPivotLoading(true);
+    api.listPivots(pid).then(data => {
+      const items = (data?.items || []).filter(item => item.status === 'active' && item.bind_address && ['socks4', 'socks5'].some(kind => String(item.pivot_type || '').toLowerCase().includes(kind)));
+      setPivotOptions(items.map(item => ({ id: item.id, label: `${item.tool || 'pivot'} :: ${item.bind_address}${item.route_cidr ? ` :: ${item.route_cidr}` : ''}` })));
+    }).catch(() => setPivotOptions([])).finally(() => setPivotLoading(false));
+  }, [executionSource, pid]);
 
   const run = async () => {
     if (!target.trim()) return;
+    if (executionSource === 'pivot_listener' && !pivotObservationId) return;
     setRunning(true); setResult(null); setError('');
     try {
-      const r = await api.runNmapScan(pid, { target, flags, timeout_seconds: timeout });
+      const r = await api.runNmapScan(pid, { target, flags, execution_source: executionSource, pivot_observation_id: executionSource === 'pivot_listener' ? pivotObservationId : null, timeout_seconds: timeout });
       setResult(`Hosts found: ${r.hosts_found}\nCreated: ${r.hosts_created}\nUpdated: ${r.hosts_updated}${r.stderr ? '\n\nSTDERR:\n' + r.stderr : ''}`);
     } catch (e) {
       setError(e.message || 'Scan failed');
@@ -73,6 +117,7 @@ function NmapPanel({ pid, accent }) {
       <FieldRow label="Nmap flags">
         <Input value={flags} onChange={setFlags} placeholder="-sV -sC -T4 --open" monospace />
       </FieldRow>
+      <ExecutionSourceRow executionSource={executionSource} setExecutionSource={setExecutionSource} pivotObservationId={pivotObservationId} setPivotObservationId={setPivotObservationId} pivotOptions={pivotOptions} loading={pivotLoading} />
       <FieldRow label="Timeout (seconds)">
         <Input value={String(timeout)} onChange={v => setTimeout_(parseInt(v) || 180)} />
       </FieldRow>
@@ -96,12 +141,26 @@ function NucleiPanel({ pid, accent }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [executionSource, setExecutionSource] = useState('attacker');
+  const [pivotObservationId, setPivotObservationId] = useState('');
+  const [pivotOptions, setPivotOptions] = useState([]);
+  const [pivotLoading, setPivotLoading] = useState(false);
+
+  useEffect(() => {
+    if (executionSource !== 'pivot_listener' || !pid) return;
+    setPivotLoading(true);
+    api.listPivots(pid).then(data => {
+      const items = (data?.items || []).filter(item => item.status === 'active' && item.bind_address && ['socks4', 'socks5'].some(kind => String(item.pivot_type || '').toLowerCase().includes(kind)));
+      setPivotOptions(items.map(item => ({ id: item.id, label: `${item.tool || 'pivot'} :: ${item.bind_address}${item.route_cidr ? ` :: ${item.route_cidr}` : ''}` })));
+    }).catch(() => setPivotOptions([])).finally(() => setPivotLoading(false));
+  }, [executionSource, pid]);
 
   const run = async () => {
     if (!target.trim()) return;
+    if (executionSource === 'pivot_listener' && !pivotObservationId) return;
     setRunning(true); setResult(null); setError('');
     try {
-      const r = await api.runNucleiScan(pid, { target, templates, severity, extra_flags: extra, timeout_seconds: timeout });
+      const r = await api.runNucleiScan(pid, { target, templates, severity, extra_flags: extra, execution_source: executionSource, pivot_observation_id: executionSource === 'pivot_listener' ? pivotObservationId : null, timeout_seconds: timeout });
       setResult(`Findings found: ${r.findings_found}\nCreated: ${r.findings_created}${r.stderr ? '\n\nSTDERR:\n' + r.stderr : ''}`);
     } catch (e) {
       setError(e.message || 'Scan failed');
@@ -123,6 +182,7 @@ function NucleiPanel({ pid, accent }) {
       <FieldRow label="Extra flags">
         <Input value={extra} onChange={setExtra} placeholder="-tags cve,rce" monospace />
       </FieldRow>
+      <ExecutionSourceRow executionSource={executionSource} setExecutionSource={setExecutionSource} pivotObservationId={pivotObservationId} setPivotObservationId={setPivotObservationId} pivotOptions={pivotOptions} loading={pivotLoading} />
       <FieldRow label="Timeout (seconds)">
         <Input value={String(timeout)} onChange={v => setTimeout_(parseInt(v) || 300)} />
       </FieldRow>
@@ -149,12 +209,26 @@ function CmePanel({ pid, accent }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [executionSource, setExecutionSource] = useState('attacker');
+  const [pivotObservationId, setPivotObservationId] = useState('');
+  const [pivotOptions, setPivotOptions] = useState([]);
+  const [pivotLoading, setPivotLoading] = useState(false);
+
+  useEffect(() => {
+    if (executionSource !== 'pivot_listener' || !pid) return;
+    setPivotLoading(true);
+    api.listPivots(pid).then(data => {
+      const items = (data?.items || []).filter(item => item.status === 'active' && item.bind_address && ['socks4', 'socks5'].some(kind => String(item.pivot_type || '').toLowerCase().includes(kind)));
+      setPivotOptions(items.map(item => ({ id: item.id, label: `${item.tool || 'pivot'} :: ${item.bind_address}${item.route_cidr ? ` :: ${item.route_cidr}` : ''}` })));
+    }).catch(() => setPivotOptions([])).finally(() => setPivotLoading(false));
+  }, [executionSource, pid]);
 
   const run = async () => {
     if (!target.trim()) return;
+    if (executionSource === 'pivot_listener' && !pivotObservationId) return;
     setRunning(true); setResult(null); setError('');
     try {
-      const r = await api.runCmeScan(pid, { target, username, password, domain, hash, protocol, extra_flags: extra, timeout_seconds: timeout });
+      const r = await api.runCmeScan(pid, { target, username, password, domain, hash, protocol, extra_flags: extra, execution_source: executionSource, pivot_observation_id: executionSource === 'pivot_listener' ? pivotObservationId : null, timeout_seconds: timeout });
       setResult(`Hosts found: ${r.hosts_found} (created: ${r.hosts_created})\nCreds found: ${r.creds_found} (created: ${r.creds_created})${r.stdout ? '\n\nOutput:\n' + r.stdout : ''}${r.stderr ? '\n\nSTDERR:\n' + r.stderr : ''}`);
     } catch (e) {
       setError(e.message || 'Scan failed');
@@ -186,6 +260,7 @@ function CmePanel({ pid, accent }) {
       <FieldRow label="Extra flags">
         <Input value={extra} onChange={setExtra} placeholder="--users --groups --shares" monospace />
       </FieldRow>
+      <ExecutionSourceRow executionSource={executionSource} setExecutionSource={setExecutionSource} pivotObservationId={pivotObservationId} setPivotObservationId={setPivotObservationId} pivotOptions={pivotOptions} loading={pivotLoading} />
       <button onClick={run} disabled={running || !target.trim()}
         style={{ background: running ? '#1a1c22' : '#c07af0', border: 'none', borderRadius: 5, padding: '8px 18px', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono', cursor: running ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
         <Icon name="hosts" size={12} color="#fff" />

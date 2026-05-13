@@ -48,28 +48,11 @@ function AttackerSSHPanel({ accent, enabled }) {
   };
 
   const transportAdvancedEnabled = form.proxy_type !== 'none';
-  const executionAdvancedEnabled = form.exec_proxy_type !== 'none' || !!form.exec_jump_host;
 
   const toggleTransportAdvanced = (checked) => {
     setForm(prev => checked
       ? { ...prev, proxy_type: prev.proxy_type === 'none' ? 'jump' : prev.proxy_type }
       : { ...prev, proxy_type: 'none', proxy_host: '', proxy_port: 1080, proxy_username: '', proxy_password: '', proxy_private_key: '' });
-  };
-
-  const toggleExecutionAdvanced = (checked) => {
-    setForm(prev => checked
-      ? { ...prev, exec_proxy_type: prev.exec_proxy_type === 'none' && !prev.exec_jump_host ? 'socks5' : prev.exec_proxy_type }
-      : {
-          ...prev,
-          exec_proxy_type: 'none',
-          exec_proxy_host: '',
-          exec_proxy_port: 1080,
-          exec_proxy_username: '',
-          exec_proxy_password: '',
-          exec_jump_host: '',
-          exec_jump_port: 22,
-          exec_jump_username: '',
-        });
   };
 
   const saveConfig = async () => {
@@ -213,66 +196,6 @@ function AttackerSSHPanel({ accent, enabled }) {
             </div>}
           </div>
 
-          <div style={{ marginBottom: 14, background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: enabled ? 'pointer' : 'default' }}>
-              <input type="checkbox" checked={executionAdvancedEnabled} disabled={!enabled} onChange={e => toggleExecutionAdvanced(e.target.checked)} />
-              <span style={{ fontSize: 11, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>Use separate execution proxy / jump context</span>
-            </label>
-            {executionAdvancedEnabled && <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
-              These settings are used after RootNotes has already connected to the attacker machine. They affect scans and command execution from that host.
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '140px 1.1fr 90px 1fr', gap: 10, marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Exec proxy</div>
-                <select style={inp} value={form.exec_proxy_type} onChange={e => setForm(prev => ({ ...prev, exec_proxy_type: e.target.value }))} disabled={!enabled}>
-                  <option value="none">none</option>
-                  <option value="socks5">socks5</option>
-                </select>
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Exec proxy host</div>
-                <input style={inp} value={form.exec_proxy_host} disabled={!enabled || form.exec_proxy_type === 'none'} onChange={e => setForm(prev => ({ ...prev, exec_proxy_host: e.target.value }))} placeholder="127.0.0.1 / proxy.internal" />
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Exec port</div>
-                <input style={inp} type="number" value={form.exec_proxy_port} disabled={!enabled || form.exec_proxy_type === 'none'} onChange={e => setForm(prev => ({ ...prev, exec_proxy_port: Number(e.target.value) || 1080 }))} />
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Exec proxy user</div>
-                <input style={inp} value={form.exec_proxy_username} disabled={!enabled || form.exec_proxy_type === 'none'} onChange={e => setForm(prev => ({ ...prev, exec_proxy_username: e.target.value }))} placeholder="Optional SOCKS5 auth" />
-              </div>
-            </div>
-            {form.exec_proxy_type !== 'none' && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                <div>
-                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Exec proxy password</div>
-                  <input style={inp} type="password" value={form.exec_proxy_password} onChange={e => setForm(prev => ({ ...prev, exec_proxy_password: e.target.value }))} disabled={!enabled} placeholder={isEditing && form.has_exec_proxy_password ? 'Stored - enter new to replace' : 'Optional for SOCKS5 auth'} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Jump host hint</div>
-                  <input style={inp} value={form.exec_jump_host} onChange={e => setForm(prev => ({ ...prev, exec_jump_host: e.target.value }))} disabled={!enabled} placeholder="Optional - exported as env for remote commands" />
-                </div>
-              </div>
-            )}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px', gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Jump username</div>
-                <input style={inp} value={form.exec_jump_username} onChange={e => setForm(prev => ({ ...prev, exec_jump_username: e.target.value }))} disabled={!enabled || !form.exec_jump_host} placeholder="Optional - exported for tools/scripts" />
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Jump port</div>
-                <input style={inp} type="number" value={form.exec_jump_port} onChange={e => setForm(prev => ({ ...prev, exec_jump_port: Number(e.target.value) || 22 }))} disabled={!enabled || !form.exec_jump_host} />
-              </div>
-            </div>
-            {(form.exec_proxy_type !== 'none' || form.exec_jump_host) && (
-              <div style={{ fontSize: 10, color: '#606570', marginTop: 8, fontFamily: 'JetBrains Mono' }}>
-                SOCKS execution context is applied automatically to scans and attacker-exec. Jump host execution settings are exported as `ROOTNOTES_EXEC_JUMP_*` / `ROOTNOTES_EXEC_SSH_JUMP_OPT` for remote commands and wrappers.
-              </div>
-            )}
-            </div>}
-          </div>
-
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
             <div>
               <div style={{ fontSize: 9, color: '#404550', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Password</div>
@@ -291,11 +214,6 @@ function AttackerSSHPanel({ accent, enabled }) {
           {isEditing && (form.has_proxy_password || form.has_proxy_private_key) && form.proxy_type === 'jump' && (
             <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
               Stored proxy credentials are also write-only. Leave fields blank to keep current jump-host secrets.
-            </div>
-          )}
-          {isEditing && form.has_exec_proxy_password && form.exec_proxy_type !== 'none' && (
-            <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
-              Stored execution proxy credentials are write-only. Leave the password blank to keep the current value.
             </div>
           )}
 

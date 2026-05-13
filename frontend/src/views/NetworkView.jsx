@@ -1429,7 +1429,6 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [editingName, setEditingName] = useState(null);
   const [nameVal, setNameVal] = useState('');
   const [showTopologyBuilder, setShowTopologyBuilder] = useState(false);
-  const [autoBuilding, setAutoBuilding] = useState(false);
   const [smartBuilding, setSmartBuilding] = useState(false);
   const [topologyEnabled, setTopologyEnabled] = useState(true);
   const [accessOverlay, setAccessOverlay] = useState(false);
@@ -1564,27 +1563,6 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     return map.size > 0 ? map : null;
   }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities, pivots]);
 
-  const mappedIps = useMemo(
-    () => new Set((activeNet?.nodes || []).map(n => n.ip).filter(Boolean)),
-    [activeNet],
-  );
-  const unmappedHosts = useMemo(
-    () => projectHosts.filter(h => h.ip && !mappedIps.has(h.ip)),
-    [projectHosts, mappedIps],
-  );
-
-  const handleAutoBuild = async () => {
-    setAutoBuilding(true);
-    try {
-      await api.topologyAutoBuild(projectId, { keep_manual_positions: true });
-      await onRefreshNetworks?.();
-    } catch (e) {
-      console.error('Auto-build failed:', e);
-    } finally {
-      setAutoBuilding(false);
-    }
-  };
-
   const handleSmartBuild = async () => {
     setSmartBuilding(true);
     try {
@@ -1631,26 +1609,6 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       {/* Row 2: topology controls + overlay selector */}
       {topologyEnabled && (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', background: '#0a0b0f', borderBottom: '1px solid #1a1c22', flexShrink: 0, overflowX: 'auto' }}>
-        {/* Auto-layout button — amber when unmapped hosts exist */}
-        {projectHosts.length > 0 && (
-          <button
-            onClick={handleAutoBuild}
-            disabled={autoBuilding}
-            title={unmappedHosts.length > 0
-              ? `Place ${unmappedHosts.length} unmapped hosts on map and re-run layout`
-              : 'Re-run layout algorithm for all nodes'}
-            style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: autoBuilding ? 'default' : 'pointer', color: unmappedHosts.length > 0 ? '#f09a3a' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: autoBuilding ? 0.6 : 1, transition: 'color .15s', flexShrink: 0 }}
-          >
-            <Icon name="reset" size={11} color="currentColor" />
-            {autoBuilding ? 'Building…' : 'Auto-layout'}
-            {unmappedHosts.length > 0 && !autoBuilding && (
-              <span style={{ background: '#f09a3a22', border: '1px solid #f09a3a55', borderRadius: 10, padding: '1px 6px', fontSize: 9, color: '#f09a3a', fontFamily: 'JetBrains Mono' }}>
-                +{unmappedHosts.length}
-              </span>
-            )}
-          </button>
-        )}
-
         {/* Smart Build */}
         {projectHosts.length > 0 && (
           <button
@@ -1733,12 +1691,12 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
             {projectHosts.length} project hosts are not on this map
           </span>
           <button
-            onClick={handleAutoBuild}
-            disabled={autoBuilding}
-            style={{ background: '#f09a3a', border: 'none', borderRadius: 5, padding: '6px 14px', cursor: autoBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, opacity: autoBuilding ? 0.7 : 1 }}
+            onClick={handleSmartBuild}
+            disabled={smartBuilding}
+            style={{ background: '#39d353', border: 'none', borderRadius: 5, padding: '6px 14px', cursor: smartBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, opacity: smartBuilding ? 0.7 : 1 }}
           >
-            <Icon name="reset" size={11} color="#fff" />
-            {autoBuilding ? 'Building…' : `Auto-layout ${projectHosts.length} hosts`}
+            <Icon name="target" size={11} color="#fff" />
+            {smartBuilding ? 'Building…' : 'Smart Build'}
           </button>
         </div>
       )}
@@ -1754,9 +1712,9 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
                 <Icon name="plus" size={12} color="currentColor" /> Create empty map
               </button>
               {topologyEnabled && projectHosts.length > 0 && (
-                <button onClick={handleAutoBuild} disabled={autoBuilding} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 18px', cursor: autoBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, opacity: autoBuilding ? 0.7 : 1 }}>
-                  <Icon name="reset" size={12} color="#fff" />
-                  {autoBuilding ? 'Building…' : `Auto-build from ${projectHosts.length} hosts`}
+                <button onClick={handleSmartBuild} disabled={smartBuilding} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 18px', cursor: smartBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, opacity: smartBuilding ? 0.7 : 1 }}>
+                  <Icon name="target" size={12} color="#fff" />
+                  {smartBuilding ? 'Building…' : 'Smart Build'}
                 </button>
               )}
             </div>

@@ -210,6 +210,8 @@ class Scope(Base):
     scope_type = Column(String, nullable=False, default="cidr")
     in_scope = Column(Boolean, nullable=False, default=True)
     description = Column(String, nullable=False, default="")
+    gateway_ip = Column(String, nullable=False, default="")
+    is_entry = Column(Boolean, nullable=False, default=False)
 
 
 class CredHostNote(Base):

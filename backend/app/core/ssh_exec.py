@@ -64,7 +64,7 @@ def _prepare_ssh(config: dict, command: str):
     temp_files: list[str] = []
     any_askpass_path = None
 
-    askpass_script = "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *\"$RT_SSH_PROXY_PROMPT\"*) printf '%s' \"$RT_SSH_PROXY_PASSWORD\" ;;\n  *) printf '%s' \"$RT_SSH_PASSWORD\" ;;\nesac\n"
+    askpass_script = "#!/bin/sh\nprompt=\"$1\"\nif [ -n \"$RT_SSH_PROXY_PROMPT\" ] && printf '%s' \"$prompt\" | grep -Fq \"$RT_SSH_PROXY_PROMPT\"; then\n  printf '%s' \"$RT_SSH_PROXY_PASSWORD\"\nelse\n  printf '%s' \"$RT_SSH_PASSWORD\"\nfi\n"
     askpass_path = _install_auth(config, ssh_cmd, env, temp_files, password_env='RT_SSH_PASSWORD', askpass_name=askpass_script)
     any_askpass_path = askpass_path or any_askpass_path
 
@@ -98,8 +98,11 @@ def _prepare_ssh(config: dict, command: str):
 
     ssh_cmd.append(f"{config['username']}@{config['host']}")
     ssh_cmd.append(command)
-    wrapped_cmd = ['setsid', '-w', *ssh_cmd] if any_askpass_path else ssh_cmd
-    return wrapped_cmd, env, temp_files
+    # Do not wrap with setsid — callers use start_new_session=True which creates a
+    # detached session for SSH so SSH_ASKPASS_REQUIRE=force is honoured.  Keeping
+    # SSH as the direct child ensures proc.kill() is guaranteed to close the pipes
+    # and unblock communicate() on timeout (setsid as parent left SSH orphaned).
+    return ssh_cmd, env, temp_files
 
 
 def is_transport_failure(result: dict) -> bool:
@@ -118,8 +121,12 @@ def run_ssh_command(config: dict, command: str, timeout_seconds: int) -> dict:
 
     temp_files = []
     try:
-        wrapped_cmd, env, temp_files = _prepare_ssh(config, command)
-        proc = subprocess.run(wrapped_cmd, capture_output=True, text=True, timeout=max(1, min(timeout_seconds, 300)), env=env)
+        ssh_cmd, env, temp_files = _prepare_ssh(config, command)
+        proc = subprocess.run(
+            ssh_cmd, capture_output=True, text=True,
+            timeout=max(1, min(timeout_seconds, 300)),
+            env=env, start_new_session=True,
+        )
         return {
             "ok": proc.returncode == 0,
             "exit_code": proc.returncode,
@@ -160,14 +167,15 @@ def run_ssh_command_cancellable(
 
     temp_files = []
     try:
-        wrapped_cmd, env, temp_files = _prepare_ssh(config, command)
+        ssh_cmd, env, temp_files = _prepare_ssh(config, command)
 
         proc = subprocess.Popen(
-            wrapped_cmd,
+            ssh_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            start_new_session=True,
         )
 
         # Background watcher: kill proc the moment cancel_token fires
@@ -242,18 +250,19 @@ def run_ssh_command_streaming(
 
     temp_files = []
     try:
-        wrapped_cmd, env, temp_files = _prepare_ssh(config, command)
+        ssh_cmd, env, temp_files = _prepare_ssh(config, command)
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
 
         try:
             proc = subprocess.Popen(
-                wrapped_cmd,
+                ssh_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
+                start_new_session=True,
             )
 
             def _read_stderr():
