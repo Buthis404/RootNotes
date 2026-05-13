@@ -1153,6 +1153,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     if (t === 'lateral' || t === 'pivot') return { stroke: '#e8cc42', sw: 2, dash: '5 3', anim: true };
     if (t === 'domain_member') return { stroke: '#8f7af5', sw: 1.5, dash: '8 4', anim: false };
     if (t === 'auth_path' || t === 'trust') return { stroke: '#c07af0', sw: 1.5, dash: '6 3', anim: false };
+    if (t === 'uplink') return { stroke: '#f09a3a', sw: 2, dash: '7 3', anim: true };
     if (t === 'same_subnet' || t === 'lan') return { stroke: '#3a4a5a', sw: 1, dash: '5 5', anim: false };
     if (t === 'routed') return { stroke: '#2a3a50', sw: 1, dash: '3 7', anim: false };
     // Legacy style string
@@ -1169,6 +1170,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     const t = typeof edge === 'string' ? '' : (edge?.type || '');
     if (s === 'exploit') return 'url(#me)';
     if (s === 'lateral' || t === 'lateral' || t === 'pivot') return 'url(#ml)';
+    if (t === 'uplink') return 'url(#morange)';
     if (s === 'tunnel') return 'url(#mt)';
     if (t === 'domain_admin') return 'url(#mred)';
     if (t === 'domain_member' || t === 'auth_path' || t === 'trust') return 'url(#mp)';
@@ -1242,7 +1244,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             <defs>
               <pattern id="sg" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#ffffff05" strokeWidth="1" /></pattern>
               <pattern id="lg" width="100" height="100" patternUnits="userSpaceOnUse"><path d="M 100 0 L 0 0 0 100" fill="none" stroke="#ffffff09" strokeWidth="1" /></pattern>
-              {[['mgreen', '#39d353'], ['me', '#cc2233'], ['ml', '#e8cc42'], ['mt', '#5b8af5'], ['mp', '#8f7af5'], ['mgray', '#2a3548'], ['mred', '#e8574a']].map(([id, c]) => <marker key={id} id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill={c} /></marker>)}
+              {[['mgreen', '#39d353'], ['me', '#cc2233'], ['ml', '#e8cc42'], ['mt', '#5b8af5'], ['mp', '#8f7af5'], ['mgray', '#2a3548'], ['mred', '#e8574a'], ['morange', '#f09a3a']].map(([id, c]) => <marker key={id} id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill={c} /></marker>)}
             </defs>
             <g ref={canvasGroupRef} transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
               <rect x="-50000" y="-50000" width="100000" height="100000" fill="url(#sg)" style={{ pointerEvents: 'none' }} />
@@ -1274,8 +1276,8 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                 const mx = (fn.x + tn.x) / 2;
                 const my = (fn.y + tn.y) / 2;
                 const edgeLabel = String(edge.label || '').trim();
-                const _ACCESS_EDGE_TYPES = new Set(['ssh','winrm','smb_admin','local_admin','shell','c2_session','lateral','pivot','auth_path']);
-                const isAccessEdge = _ACCESS_EDGE_TYPES.has(edge.type || '');
+                const _ACCESS_EDGE_TYPES = new Set(['ssh','winrm','smb_admin','local_admin','shell','c2_session','lateral','pivot','auth_path','uplink']);
+                const isAccessEdge = _ACCESS_EDGE_TYPES.has(edge.type || '') || edge.source === 'scope_via';
                 const edgeDimmed = attackPathSet
                   ? !attackPathSet.edges.has(edge.id)
                   : (accessOverlay && !isAccessEdge);
@@ -1360,7 +1362,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             </div>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Edges</div>
-              {[['Access (verified)', '#39d353'], ['Access (inferred)', '#39d35399'], ['Domain admin', '#e8574a'], ['Exploit', '#cc2233'], ['Lateral/Pivot', '#e8cc42'], ['Tunnel', '#5b8af5'], ['Domain', '#8f7af5'], ['Subnet', '#3a4a5a']].map(([l, c]) => <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 14, height: 1.5, background: c, display: 'inline-block' }} /><span style={{ fontSize: 9, color: '#606570' }}>{l}</span></div>)}
+              {[['Access (verified)', '#39d353'], ['Access (inferred)', '#39d35399'], ['Entry uplink', '#f09a3a'], ['Domain admin', '#e8574a'], ['Exploit', '#cc2233'], ['Lateral/Pivot', '#e8cc42'], ['Tunnel', '#5b8af5'], ['Domain', '#8f7af5'], ['Subnet', '#3a4a5a']].map(([l, c]) => <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 14, height: 1.5, background: c, display: 'inline-block' }} /><span style={{ fontSize: 9, color: '#606570' }}>{l}</span></div>)}
             </div>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Keyboard shortcuts</div>
@@ -1638,6 +1640,17 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
         if (host.status === 'pwned') set(host.id, { color: '#e8574a', label: 'Pwned', priority: 5 });
         else if (host.status === 'access') set(host.id, { color: '#f09a3a', label: 'Access', priority: 4 });
       }
+      // Entry gateway nodes — nodes that are the target of an uplink edge in the active network
+      const activeNetObj = networks.find(n => n.id === activeNetId);
+      const netEdges = activeNetObj?.edges || activeNetObj?.edges_json || [];
+      const netNodes = activeNetObj?.nodes || activeNetObj?.nodes_json || [];
+      const nodeById = new Map(netNodes.map(n => [n.id, n]));
+      for (const edge of netEdges) {
+        if ((edge.type || '') === 'uplink') {
+          const toNode = nodeById.get(String(edge.to || ''));
+          if (toNode?.host_id) set(toNode.host_id, { color: '#f09a3a', label: 'Entry gateway', priority: 6 });
+        }
+      }
     }
 
     if (overlayMode === 'pivots') {
@@ -1657,7 +1670,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     }
 
     return map.size > 0 ? map : null;
-  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities, pivots]);
+  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities, pivots, networks, activeNetId]);
 
   const handleSmartBuild = async () => {
     setSmartBuilding(true);
