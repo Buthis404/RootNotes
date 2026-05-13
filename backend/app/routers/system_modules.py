@@ -87,6 +87,20 @@ class AttackerSSHTargetBody(BaseModel):
     password: str = ""
     private_key: str = ""
     known_hosts_policy: str = "accept_new"
+    proxy_type: str = "none"
+    proxy_host: str = ""
+    proxy_port: int = 1080
+    proxy_username: str = ""
+    proxy_password: str = ""
+    proxy_private_key: str = ""
+    exec_proxy_type: str = "none"
+    exec_proxy_host: str = ""
+    exec_proxy_port: int = 1080
+    exec_proxy_username: str = ""
+    exec_proxy_password: str = ""
+    exec_jump_host: str = ""
+    exec_jump_port: int = 22
+    exec_jump_username: str = ""
     project_ids: list[str] = []
     enabled: bool = True
 
@@ -184,6 +198,30 @@ def _validate_attacker_target(body: AttackerSSHTargetBody):
         raise HTTPException(400, "Name, host and username are required")
     if body.port <= 0 or body.port > 65535:
         raise HTTPException(400, "Invalid SSH port")
+    if body.proxy_type not in {"none", "jump", "socks5"}:
+        raise HTTPException(400, "Invalid proxy_type")
+    if body.proxy_type != "none":
+        if not body.proxy_host.strip():
+            raise HTTPException(400, "Proxy host is required when proxy_type is enabled")
+        if body.proxy_port <= 0 or body.proxy_port > 65535:
+            raise HTTPException(400, "Invalid proxy port")
+    if body.proxy_type == "jump" and not body.proxy_username.strip():
+        raise HTTPException(400, "Proxy username is required for jump host mode")
+    if body.proxy_type == "jump" and not body.proxy_password and not body.proxy_private_key.strip():
+        raise HTTPException(400, "Proxy password or proxy private key is required for jump host mode")
+    if body.proxy_type == "socks5" and body.proxy_password and not body.proxy_username.strip():
+        raise HTTPException(400, "Proxy username is required when SOCKS5 password is provided")
+    if body.exec_proxy_type not in {"none", "socks5"}:
+        raise HTTPException(400, "Invalid exec_proxy_type")
+    if body.exec_proxy_type != "none":
+        if not body.exec_proxy_host.strip():
+            raise HTTPException(400, "Execution proxy host is required when exec_proxy_type is enabled")
+        if body.exec_proxy_port <= 0 or body.exec_proxy_port > 65535:
+            raise HTTPException(400, "Invalid execution proxy port")
+    if body.exec_proxy_type == "socks5" and body.exec_proxy_password and not body.exec_proxy_username.strip():
+        raise HTTPException(400, "Execution proxy username is required when execution proxy password is provided")
+    if body.exec_jump_host.strip() and body.exec_jump_port <= 0:
+        raise HTTPException(400, "Invalid execution jump port")
 
 
 @router.get("/attacker-ssh/config")
@@ -206,6 +244,20 @@ def admin_create_attacker_target(body: AttackerSSHTargetBody, admin: models.User
         "password": body.password,
         "private_key": body.private_key,
         "known_hosts_policy": body.known_hosts_policy,
+        "proxy_type": body.proxy_type,
+        "proxy_host": body.proxy_host.strip(),
+        "proxy_port": body.proxy_port,
+        "proxy_username": body.proxy_username.strip(),
+        "proxy_password": body.proxy_password,
+        "proxy_private_key": body.proxy_private_key,
+        "exec_proxy_type": body.exec_proxy_type,
+        "exec_proxy_host": body.exec_proxy_host.strip(),
+        "exec_proxy_port": body.exec_proxy_port,
+        "exec_proxy_username": body.exec_proxy_username.strip(),
+        "exec_proxy_password": body.exec_proxy_password,
+        "exec_jump_host": body.exec_jump_host.strip(),
+        "exec_jump_port": body.exec_jump_port,
+        "exec_jump_username": body.exec_jump_username.strip(),
         "project_ids": body.project_ids,
         "enabled": body.enabled,
         "created_at": datetime.utcnow().isoformat(),
@@ -224,8 +276,13 @@ def admin_update_attacker_target(target_id: str, body: AttackerSSHTargetBody, ad
             continue
         next_password = body.password if body.password else target.get("password", "")
         next_private_key = body.private_key if body.private_key.strip() else target.get("private_key", "")
+        next_proxy_password = body.proxy_password if body.proxy_password else target.get("proxy_password", "")
+        next_proxy_private_key = body.proxy_private_key if body.proxy_private_key.strip() else target.get("proxy_private_key", "")
+        next_exec_proxy_password = body.exec_proxy_password if body.exec_proxy_password else target.get("exec_proxy_password", "")
         if not next_password and not str(next_private_key).strip():
             raise HTTPException(400, "Password or private key is required")
+        if body.proxy_type == "jump" and not next_proxy_password and not str(next_proxy_private_key).strip():
+            raise HTTPException(400, "Proxy password or proxy private key is required for jump host mode")
         targets[idx] = {
             **target,
             "name": body.name.strip(),
@@ -235,6 +292,20 @@ def admin_update_attacker_target(target_id: str, body: AttackerSSHTargetBody, ad
             "password": next_password,
             "private_key": next_private_key,
             "known_hosts_policy": body.known_hosts_policy,
+            "proxy_type": body.proxy_type,
+            "proxy_host": body.proxy_host.strip(),
+            "proxy_port": body.proxy_port,
+            "proxy_username": body.proxy_username.strip(),
+            "proxy_password": next_proxy_password,
+            "proxy_private_key": next_proxy_private_key,
+            "exec_proxy_type": body.exec_proxy_type,
+            "exec_proxy_host": body.exec_proxy_host.strip(),
+            "exec_proxy_port": body.exec_proxy_port,
+            "exec_proxy_username": body.exec_proxy_username.strip(),
+            "exec_proxy_password": next_exec_proxy_password,
+            "exec_jump_host": body.exec_jump_host.strip(),
+            "exec_jump_port": body.exec_jump_port,
+            "exec_jump_username": body.exec_jump_username.strip(),
             "project_ids": body.project_ids,
             "enabled": body.enabled,
         }
@@ -275,6 +346,20 @@ def admin_test_attacker_ssh(body: AttackerSSHTargetBody, admin: models.User = De
             "password": body.password,
             "private_key": body.private_key,
             "known_hosts_policy": body.known_hosts_policy,
+            "proxy_type": body.proxy_type,
+            "proxy_host": body.proxy_host.strip(),
+            "proxy_port": body.proxy_port,
+            "proxy_username": body.proxy_username.strip(),
+            "proxy_password": body.proxy_password,
+            "proxy_private_key": body.proxy_private_key,
+            "exec_proxy_type": body.exec_proxy_type,
+            "exec_proxy_host": body.exec_proxy_host.strip(),
+            "exec_proxy_port": body.exec_proxy_port,
+            "exec_proxy_username": body.exec_proxy_username.strip(),
+            "exec_proxy_password": body.exec_proxy_password,
+            "exec_jump_host": body.exec_jump_host.strip(),
+            "exec_jump_port": body.exec_jump_port,
+            "exec_jump_username": body.exec_jump_username.strip(),
         }, "echo RootNotes SSH OK && whoami && hostname", 20)
     except ValueError as e:
         raise HTTPException(400, str(e))
