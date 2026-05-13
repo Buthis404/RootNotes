@@ -19,6 +19,8 @@ from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
+from ..core.exec_context import build_remote_execution_command
+from ..core.route_selection import choose_route_aware_target
 from ..core.utils import new_id
 from ..database import get_db
 from ..plugins.registry import registry
@@ -34,7 +36,7 @@ def _require_attacker_ssh():
         raise HTTPException(404, "Attacker SSH module is disabled")
 
 
-def _get_ssh_config(pid: str, target_id: Optional[str]) -> dict:
+def _get_ssh_config(pid: str, target_id: Optional[str], db: Session | None = None, target_hint: str = "") -> dict:
     targets = list_attacker_targets()
     if not targets:
         raise HTTPException(400, "No attacker SSH targets configured")
@@ -46,6 +48,10 @@ def _get_ssh_config(pid: str, target_id: Optional[str]) -> dict:
     project_targets = [t for t in targets if not t.get("project_ids") or pid in t.get("project_ids", [])]
     if not project_targets:
         raise HTTPException(400, "No attacker SSH target assigned to this project")
+    if db is not None and target_hint:
+        selected = choose_route_aware_target(pid, project_targets, db, target_hint)
+        if selected:
+            return selected
     return project_targets[0]
 
 
@@ -144,13 +150,13 @@ async def run_nmap_scan(
     _require_attacker_ssh()
     check_pid_access(db, pid, user, "hosts.create")
 
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     target = body.target.strip()
     if not target:
         raise HTTPException(400, "target is required")
 
     username = getattr(request.state, "username", None)
-    cmd = f"nmap {body.flags} -oX - {target} 2>/dev/null"
+    cmd = build_remote_execution_command(ssh_config, f"nmap {body.flags} -oX - {target} 2>/dev/null")
     job = start_job(
         db, pid, "nmap", f"Nmap: {target}",
         target=target, command=cmd, created_by=username or "",
@@ -289,14 +295,14 @@ async def run_nuclei_scan(
     _require_attacker_ssh()
     check_pid_access(db, pid, user, "findings.create")
 
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     target = body.target.strip()
     if not target:
         raise HTTPException(400, "target is required")
 
     username = getattr(request.state, "username", None)
     tpl_flag = f"-t {body.templates}" if body.templates.strip() else ""
-    cmd = f"nuclei -u {target} {tpl_flag} -severity {body.severity} -jsonl {body.extra_flags} 2>/dev/null"
+    cmd = build_remote_execution_command(ssh_config, f"nuclei -u {target} {tpl_flag} -severity {body.severity} -jsonl {body.extra_flags} 2>/dev/null")
     job = start_job(
         db, pid, "nuclei", f"Nuclei: {target}",
         target=target, command=cmd, created_by=username or "",
@@ -436,7 +442,7 @@ async def run_cme_scan(
     _require_attacker_ssh()
     check_pid_access(db, pid, user, "hosts.create")
 
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     target = body.target.strip()
     if not target:
         raise HTTPException(400, "target is required")
@@ -451,7 +457,7 @@ async def run_cme_scan(
         auth = f"-u '{body.username}'"
 
     domain = f"-d {body.domain}" if body.domain else ""
-    cmd = f"nxc {body.protocol} {target} {auth} {domain} {body.extra_flags} 2>/dev/null"
+    cmd = build_remote_execution_command(ssh_config, f"nxc {body.protocol} {target} {auth} {domain} {body.extra_flags} 2>/dev/null")
     job = start_job(
         db, pid, "cme", f"NetExec ({body.protocol}): {target}",
         target=target, command=cmd, created_by=username or "",
@@ -607,12 +613,12 @@ async def run_httpx(
 ):
     _require_attacker_ssh()
     check_pid_access(db, pid, current_user)
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     username = current_user.username
     target = body.target.strip()
 
     flags = body.flags or "-title -status-code -tech-detect -follow-redirects"
-    cmd = f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1"
+    cmd = build_remote_execution_command(ssh_config, f"httpx -u '{target}' {flags} -json -silent 2>/dev/null || httpx -u '{target}' {flags} -json 2>&1")
 
     job = start_job(
         db, pid, "httpx", f"httpx: {target}",
@@ -738,13 +744,13 @@ async def run_ffuf(
 ):
     _require_attacker_ssh()
     check_pid_access(db, pid, current_user)
-    ssh_config = _get_ssh_config(pid, body.target_id)
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target_url)
     username = current_user.username
     target_url = body.target_url.strip().rstrip("/")
 
     ext_flag = f"-e {body.extensions}" if body.extensions.strip() else ""
     url = f"{target_url}/FUZZ"
-    cmd = f"ffuf -u '{url}' -w '{body.wordlist}' {ext_flag} {body.flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+    cmd = build_remote_execution_command(ssh_config, f"ffuf -u '{url}' -w '{body.wordlist}' {ext_flag} {body.flags} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json")
 
     job = start_job(
         db, pid, "ffuf", f"ffuf: {target_url}",

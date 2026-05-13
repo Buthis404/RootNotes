@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -16,6 +17,91 @@ _TRANSPORT_ERROR_STRINGS = (
 )
 
 
+def _known_hosts_mode(config: dict) -> str:
+    return 'accept-new' if config.get('known_hosts_policy') == 'accept_new' else 'yes'
+
+
+def _base_ssh_cmd(config: dict) -> list[str]:
+    return [
+        'ssh',
+        '-p', str(config.get('port') or 22),
+        '-o', 'BatchMode=no',
+        '-o', f"StrictHostKeyChecking={_known_hosts_mode(config)}",
+        '-o', 'UserKnownHostsFile=/root/.ssh/known_hosts',
+        '-o', 'ConnectTimeout=10',
+    ]
+
+
+def _install_auth(config: dict, ssh_cmd: list[str], env: dict, temp_files: list[str], *, password_env: str, askpass_name: str):
+    askpass_path = None
+    private_key = (config.get('private_key') or '').strip()
+    if private_key:
+        key_file = tempfile.NamedTemporaryFile('w', delete=False)
+        key_file.write(private_key)
+        key_file.flush()
+        key_file.close()
+        os.chmod(key_file.name, 0o600)
+        temp_files.append(key_file.name)
+        ssh_cmd.extend(['-i', key_file.name])
+    elif config.get('password'):
+        askpass = tempfile.NamedTemporaryFile('w', delete=False)
+        askpass.write(askpass_name)
+        askpass.flush()
+        askpass.close()
+        os.chmod(askpass.name, 0o700)
+        askpass_path = askpass.name
+        temp_files.append(askpass_path)
+        env[password_env] = config['password']
+        env['SSH_ASKPASS'] = askpass_path
+        env['SSH_ASKPASS_REQUIRE'] = 'force'
+        env['DISPLAY'] = 'rt-askpass'
+    return askpass_path
+
+
+def _prepare_ssh(config: dict, command: str):
+    ssh_cmd = _base_ssh_cmd(config)
+    env = os.environ.copy()
+    temp_files: list[str] = []
+    any_askpass_path = None
+
+    askpass_script = "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *\"$RT_SSH_PROXY_PROMPT\"*) printf '%s' \"$RT_SSH_PROXY_PASSWORD\" ;;\n  *) printf '%s' \"$RT_SSH_PASSWORD\" ;;\nesac\n"
+    askpass_path = _install_auth(config, ssh_cmd, env, temp_files, password_env='RT_SSH_PASSWORD', askpass_name=askpass_script)
+    any_askpass_path = askpass_path or any_askpass_path
+
+    proxy_type = (config.get('proxy_type') or 'none').strip().lower()
+    if proxy_type == 'jump':
+        proxy_config = {
+            'host': config.get('proxy_host', ''),
+            'port': config.get('proxy_port') or 22,
+            'username': config.get('proxy_username', ''),
+            'password': config.get('proxy_password', ''),
+            'private_key': config.get('proxy_private_key', ''),
+            'known_hosts_policy': config.get('known_hosts_policy', 'accept_new'),
+        }
+        proxy_cmd = _base_ssh_cmd(proxy_config)
+        proxy_askpass_path = _install_auth(proxy_config, proxy_cmd, env, temp_files, password_env='RT_SSH_PROXY_PASSWORD', askpass_name=askpass_script)
+        any_askpass_path = proxy_askpass_path or any_askpass_path
+        env['RT_SSH_PROXY_PROMPT'] = f"{proxy_config['username']}@{proxy_config['host']}"
+        proxy_cmd.extend(['-W', '%h:%p', f"{proxy_config['username']}@{proxy_config['host']}"])
+        ssh_cmd.extend(['-o', f"ProxyCommand={' '.join(shlex.quote(part) for part in proxy_cmd)}"])
+    elif proxy_type == 'socks5':
+        proxy_host = (config.get('proxy_host') or '').strip()
+        proxy_port = int(config.get('proxy_port') or 1080)
+        proxy_username = (config.get('proxy_username') or '').strip()
+        proxy_password = config.get('proxy_password') or ''
+        helper_cmd = [
+            'python3', '-m', 'app.core.socks_proxy', '%h', '%p', proxy_host, str(proxy_port),
+        ]
+        if proxy_username:
+            helper_cmd.extend(['--username', proxy_username, '--password', proxy_password])
+        ssh_cmd.extend(['-o', f"ProxyCommand={' '.join(shlex.quote(part) for part in helper_cmd)}"])
+
+    ssh_cmd.append(f"{config['username']}@{config['host']}")
+    ssh_cmd.append(command)
+    wrapped_cmd = ['setsid', '-w', *ssh_cmd] if any_askpass_path else ssh_cmd
+    return wrapped_cmd, env, temp_files
+
+
 def is_transport_failure(result: dict) -> bool:
     """Return True if SSH failed due to unreachable host (not auth/command error)."""
     if result.get("exit_code") != 255:
@@ -30,45 +116,9 @@ def run_ssh_command(config: dict, command: str, timeout_seconds: int) -> dict:
     if not command.strip():
         raise ValueError("Command cannot be empty")
 
-    ssh_cmd = [
-        "ssh",
-        "-p", str(config.get("port") or 22),
-        "-o", "BatchMode=no",
-        "-o", f"StrictHostKeyChecking={'accept-new' if config.get('known_hosts_policy') == 'accept_new' else 'yes'}",
-        "-o", "UserKnownHostsFile=/root/.ssh/known_hosts",
-        "-o", "ConnectTimeout=10",
-    ]
-
-    env = os.environ.copy()
     temp_files = []
-    askpass_path = None
     try:
-        private_key = (config.get("private_key") or "").strip()
-        if private_key:
-            key_file = tempfile.NamedTemporaryFile("w", delete=False)
-            key_file.write(private_key)
-            key_file.flush()
-            key_file.close()
-            os.chmod(key_file.name, 0o600)
-            temp_files.append(key_file.name)
-            ssh_cmd.extend(["-i", key_file.name])
-        elif config.get("password"):
-            askpass = tempfile.NamedTemporaryFile("w", delete=False)
-            askpass.write("#!/bin/sh\nprintf '%s' \"$RT_SSH_PASSWORD\"\n")
-            askpass.flush()
-            askpass.close()
-            os.chmod(askpass.name, 0o700)
-            askpass_path = askpass.name
-            temp_files.append(askpass_path)
-            env["RT_SSH_PASSWORD"] = config["password"]
-            env["SSH_ASKPASS"] = askpass_path
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["DISPLAY"] = "rt-askpass"
-
-        ssh_cmd.append(f"{config['username']}@{config['host']}")
-        ssh_cmd.append(command)
-
-        wrapped_cmd = ["setsid", "-w", *ssh_cmd] if askpass_path else ssh_cmd
+        wrapped_cmd, env, temp_files = _prepare_ssh(config, command)
         proc = subprocess.run(wrapped_cmd, capture_output=True, text=True, timeout=max(1, min(timeout_seconds, 300)), env=env)
         return {
             "ok": proc.returncode == 0,
@@ -108,44 +158,9 @@ def run_ssh_command_cancellable(
     if not command.strip():
         raise ValueError("Command cannot be empty")
 
-    ssh_cmd = [
-        "ssh",
-        "-p", str(config.get("port") or 22),
-        "-o", "BatchMode=no",
-        "-o", f"StrictHostKeyChecking={'accept-new' if config.get('known_hosts_policy') == 'accept_new' else 'yes'}",
-        "-o", "UserKnownHostsFile=/root/.ssh/known_hosts",
-        "-o", "ConnectTimeout=10",
-    ]
-
-    env = os.environ.copy()
     temp_files = []
-    askpass_path = None
     try:
-        private_key = (config.get("private_key") or "").strip()
-        if private_key:
-            key_file = tempfile.NamedTemporaryFile("w", delete=False)
-            key_file.write(private_key)
-            key_file.flush()
-            key_file.close()
-            os.chmod(key_file.name, 0o600)
-            temp_files.append(key_file.name)
-            ssh_cmd.extend(["-i", key_file.name])
-        elif config.get("password"):
-            askpass = tempfile.NamedTemporaryFile("w", delete=False)
-            askpass.write("#!/bin/sh\nprintf '%s' \"$RT_SSH_PASSWORD\"\n")
-            askpass.flush()
-            askpass.close()
-            os.chmod(askpass.name, 0o700)
-            askpass_path = askpass.name
-            temp_files.append(askpass_path)
-            env["RT_SSH_PASSWORD"] = config["password"]
-            env["SSH_ASKPASS"] = askpass_path
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["DISPLAY"] = "rt-askpass"
-
-        ssh_cmd.append(f"{config['username']}@{config['host']}")
-        ssh_cmd.append(command)
-        wrapped_cmd = ["setsid", "-w", *ssh_cmd] if askpass_path else ssh_cmd
+        wrapped_cmd, env, temp_files = _prepare_ssh(config, command)
 
         proc = subprocess.Popen(
             wrapped_cmd,
@@ -225,45 +240,9 @@ def run_ssh_command_streaming(
     if not command.strip():
         raise ValueError("Command cannot be empty")
 
-    ssh_cmd = [
-        "ssh",
-        "-p", str(config.get("port") or 22),
-        "-o", "BatchMode=no",
-        "-o", f"StrictHostKeyChecking={'accept-new' if config.get('known_hosts_policy') == 'accept_new' else 'yes'}",
-        "-o", "UserKnownHostsFile=/root/.ssh/known_hosts",
-        "-o", "ConnectTimeout=10",
-    ]
-
-    env = os.environ.copy()
     temp_files = []
-    askpass_path = None
     try:
-        private_key = (config.get("private_key") or "").strip()
-        if private_key:
-            key_file = tempfile.NamedTemporaryFile("w", delete=False)
-            key_file.write(private_key)
-            key_file.flush()
-            key_file.close()
-            os.chmod(key_file.name, 0o600)
-            temp_files.append(key_file.name)
-            ssh_cmd.extend(["-i", key_file.name])
-        elif config.get("password"):
-            askpass = tempfile.NamedTemporaryFile("w", delete=False)
-            askpass.write("#!/bin/sh\nprintf '%s' \"$RT_SSH_PASSWORD\"\n")
-            askpass.flush()
-            askpass.close()
-            os.chmod(askpass.name, 0o700)
-            askpass_path = askpass.name
-            temp_files.append(askpass_path)
-            env["RT_SSH_PASSWORD"] = config["password"]
-            env["SSH_ASKPASS"] = askpass_path
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["DISPLAY"] = "rt-askpass"
-
-        ssh_cmd.append(f"{config['username']}@{config['host']}")
-        ssh_cmd.append(command)
-
-        wrapped_cmd = ["setsid", "-w", *ssh_cmd] if askpass_path else ssh_cmd
+        wrapped_cmd, env, temp_files = _prepare_ssh(config, command)
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
