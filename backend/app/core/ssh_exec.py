@@ -64,7 +64,7 @@ def _prepare_ssh(config: dict, command: str):
     temp_files: list[str] = []
     any_askpass_path = None
 
-    askpass_script = "#!/bin/sh\nprompt=\"$1\"\ncase \"$prompt\" in\n  *\"$RT_SSH_PROXY_PROMPT\"*) printf '%s' \"$RT_SSH_PROXY_PASSWORD\" ;;\n  *) printf '%s' \"$RT_SSH_PASSWORD\" ;;\nesac\n"
+    askpass_script = "#!/bin/sh\nprompt=\"$1\"\nif [ -n \"$RT_SSH_PROXY_PROMPT\" ] && printf '%s' \"$prompt\" | grep -Fq \"$RT_SSH_PROXY_PROMPT\"; then\n  printf '%s' \"$RT_SSH_PROXY_PASSWORD\"\nelse\n  printf '%s' \"$RT_SSH_PASSWORD\"\nfi\n"
     askpass_path = _install_auth(config, ssh_cmd, env, temp_files, password_env='RT_SSH_PASSWORD', askpass_name=askpass_script)
     any_askpass_path = askpass_path or any_askpass_path
 

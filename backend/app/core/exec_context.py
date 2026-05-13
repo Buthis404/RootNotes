@@ -33,19 +33,15 @@ def build_remote_execution_command(config: dict, command: str) -> str:
         ])
 
     base_command = command.strip()
-    if exec_proxy_type == 'socks5' and exec_proxy_host:
-        proxy_line = f"socks5 {exec_proxy_host} {exec_proxy_port}"
+    if exec_proxy_type in {'socks4', 'socks5'} and exec_proxy_host:
+        proxy_line = f"{exec_proxy_type} {exec_proxy_host} {exec_proxy_port}"
         if exec_proxy_username:
             proxy_line += f" {exec_proxy_username} {exec_proxy_password}"
+        proxy_cfg = "strict_chain\nproxy_dns\n[ProxyList]\n" + proxy_line + "\n"
         base_command = (
-            "cfg=$(mktemp) && "
-            "cat >\"$cfg\" <<'EOF'\n"
-            "strict_chain\n"
-            "proxy_dns\n"
-            "[ProxyList]\n"
-            f"{proxy_line}\n"
-            "EOF\n"
-            " && if command -v proxychains4 >/dev/null 2>&1; then "
+            "cfg=$(mktemp) || exit 1; "
+            f"printf %s {shlex.quote(proxy_cfg)} > \"$cfg\"; "
+            "if command -v proxychains4 >/dev/null 2>&1; then "
             f"proxychains4 -q -f \"$cfg\" sh -lc {shlex.quote(command)}; "
             "elif command -v proxychains >/dev/null 2>&1; then "
             f"proxychains -q -f \"$cfg\" sh -lc {shlex.quote(command)}; "

@@ -322,7 +322,7 @@ Recommended later:
 1. SSH through proxy / jump host / SOCKS
    - current status: transport-layer `jump` and authenticated `socks5` support implemented for attacker SSH targets
 2. separate execution-layer proxying from attacker host
-   - current status: execution SOCKS context implemented for attacker-exec and supported scans; execution jump context exported via env vars
+   - current status: scan-time execution source selector now models `attacker host` vs `pivot listener` instead of hiding scan-origin choice in attacker-host settings
 3. transport selection aware of pivots and routes
    - current status: initial route-aware ranking implemented for scans and attacker-exec when global attacker targets are auto-selected
 4. collector workflows for pivot-aware execution

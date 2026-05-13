@@ -65,6 +65,11 @@ def _status_from_c2_host(existing_status: str, host_data: dict) -> str:
     return "up" if host_data.get("alive", True) else "unknown"
 
 
+def _c2_owns_host_status(host: models.Host, source: str) -> bool:
+    tags = {str(tag).strip().lower() for tag in (host.tags or []) if str(tag).strip()}
+    return (host.import_source or "").strip().lower() == source.lower() or ({"c2", source.lower()} <= tags)
+
+
 def _require_c2():
     m = registry.get("c2_integration")
     if not m or not m.enabled:
@@ -1128,9 +1133,14 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 existing.domain = domain
             if os_clean and os_clean != "Unknown" and (not existing.os or existing.os in ("Linux", "Unknown", "")):
                 existing.os = os_clean
-            next_status = _status_from_c2_host(existing.status or "", h)
-            if next_status:
-                existing.status = next_status
+            derived_status = _status_from_c2_host("", h)
+            if _c2_owns_host_status(existing, source):
+                if derived_status:
+                    existing.status = derived_status
+            else:
+                next_status = _status_from_c2_host(existing.status or "", h)
+                if next_status:
+                    existing.status = next_status
             if new_notes and new_notes not in (existing.notes or ""):
                 existing.notes = ((existing.notes or "") + "\n\n---\n" + new_notes).strip()
             if source not in (existing.tags or []):

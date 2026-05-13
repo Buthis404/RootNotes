@@ -134,25 +134,20 @@ This is intended to support:
 
 ### Layer 2. Execution from attacker
 
-This controls how commands and scans launched on the attacker machine should reach downstream targets.
+Execution source for scans should no longer be configured globally inside the attacker-target settings.
 
-Current execution-layer support:
+Current direction:
 
-- execution SOCKS5 context
-  - automatically applied to attacker-exec and supported scan flows via `proxychains`
-  - supports optional SOCKS5 username/password
-- execution jump-host context
-  - exported into remote environment variables:
-    - `ROOTNOTES_EXEC_JUMP_HOST`
-    - `ROOTNOTES_EXEC_JUMP_PORT`
-    - `ROOTNOTES_EXEC_JUMP_USERNAME`
-    - `ROOTNOTES_EXEC_SSH_JUMP_OPT`
-  - intended for SSH-based snippets, wrappers, or tools invoked from the attacker host
+- scan-time execution source selection
+  - `attacker host`
+  - `pivot listener`
+- `pivot listener` options come from active `pivot_observations` with bind addresses
+- supported scan flows can wrap remote execution through the selected pivot listener
 
-Current execution-layer limitation:
+Current limitation:
 
-- generic jump-host chaining is not auto-applied to every scanner/tool family yet
-- automatic execution SOCKS wrapping currently depends on `proxychains` or `proxychains4` being installed on the attacker machine
+- this scan-time selector is currently the correct place for deciding where scans should run from
+- it is intentionally separate from the transport used to reach the attacker host itself
 
 ## Role in Jobs and Playbooks
 
