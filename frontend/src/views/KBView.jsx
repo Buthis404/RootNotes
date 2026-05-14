@@ -358,6 +358,7 @@ export default function KBView({ selectedProject, accent, currentUser, attackSte
   const [editing, setEditing] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const [editTitle, setEditTitle] = useState('');
   const [editCategory, setEditCategory] = useState('General');
@@ -437,6 +438,27 @@ export default function KBView({ selectedProject, accent, currentUser, attackSte
     } catch (e) { toastError(e.message); }
   };
 
+  const exportKB = async () => {
+    try {
+      const blob = await api.exportKB(selectedProject);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `kb-export-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { toastError(e.message); }
+  };
+
+  const importKB = async (file) => {
+    setImporting(true);
+    try {
+      await api.importKB(file, selectedProject);
+      await load();
+    } catch (e) { toastError(e.message); }
+    finally { setImporting(false); }
+  };
+
   const createArticle = async () => {
     setSaving(true);
     try {
@@ -494,6 +516,16 @@ export default function KBView({ selectedProject, accent, currentUser, attackSte
               </div>
             );
           })}
+        </div>
+        {/* Export / Import */}
+        <div style={{ padding: '8px 10px', borderTop: '1px solid #1e2029', display: 'flex', gap: 6, flexShrink: 0 }}>
+          <label style={{ flex: 1, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 0', cursor: importing ? 'wait' : 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, opacity: importing ? 0.7 : 1 }}>
+            {importing ? 'Importing…' : 'Import'}
+            <input type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && importKB(e.target.files[0])} disabled={importing} />
+          </label>
+          <button onClick={exportKB} style={{ flex: 1, background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 0', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+            Export
+          </button>
         </div>
       </div>
 

@@ -7,11 +7,14 @@ GET    /api/kb/{aid}               get single article
 PATCH  /api/kb/{aid}               update article
 DELETE /api/kb/{aid}               delete article (204)
 """
+import io
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -156,6 +159,74 @@ def create_kb_article(
     db.commit()
     db.refresh(article)
     return article
+
+
+# ── KB export / import ────────────────────────────────────────────────────────
+
+@router.get("/export")
+def export_kb(
+    pid: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    q = db.query(models.KBArticle)
+    if pid:
+        q = q.filter((models.KBArticle.pid == pid) | (models.KBArticle.pid == None))
+    articles = q.order_by(models.KBArticle.category, models.KBArticle.title).all()
+    data = [
+        {
+            "title": a.title, "content": a.content,
+            "category": a.category, "tags": a.tags or [],
+            "pid": a.pid,
+        }
+        for a in articles
+        if a.category != MITRE_CATEGORY  # skip auto-seeded MITRE — re-seed via /kb/seed/mitre
+    ]
+    payload = json.dumps({"format": "rootnotes-kb", "version": "1", "articles": data}, ensure_ascii=False, indent=2).encode()
+    return StreamingResponse(io.BytesIO(payload), media_type="application/json",
+                             headers={"Content-Disposition": 'attachment; filename="kb_articles.json"'})
+
+
+@router.post("/import", status_code=201)
+async def import_kb(
+    file: UploadFile = File(...),
+    pid: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    raw = json.loads((await file.read()).decode())
+    articles = raw if isinstance(raw, list) else raw.get("articles", [])
+    now = datetime.now(timezone.utc).isoformat()
+    created = skipped = 0
+    for item in articles:
+        title = (item.get("title") or "").strip()
+        category = (item.get("category") or "General").strip()
+        if not title or category == MITRE_CATEGORY:
+            skipped += 1
+            continue
+        target_pid = pid or item.get("pid")
+        existing = db.query(models.KBArticle).filter(
+            models.KBArticle.title == title,
+            models.KBArticle.category == category,
+            models.KBArticle.pid == target_pid,
+        ).first()
+        if existing:
+            skipped += 1
+            continue
+        db.add(models.KBArticle(
+            id=new_id("kb"),
+            pid=target_pid,
+            title=title,
+            content=item.get("content", ""),
+            category=category,
+            tags=item.get("tags", []),
+            created_by=user.username,
+            created_at=now,
+            updated_at=now,
+        ))
+        created += 1
+    db.commit()
+    return {"created": created, "skipped": skipped}
 
 
 @router.get("/{aid}", response_model=schemas.KBArticle)
