@@ -174,6 +174,14 @@ export const api = {
 
   // MITRE ATT&CK
   getMitreCoverage:  (pid) => req('GET', `/projects/${pid}/mitre/coverage`),
+  downloadReportPDF: async (pid) => {
+    const token = getToken();
+    const res = await fetch(`/api/projects/${pid}/report/pdf`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`PDF generation failed: ${res.status}`);
+    return res.blob();
+  },
 
   // Batch import & project export/import
   batchImport:   (pid, data) => req('POST', `/import/${pid}`, data),
