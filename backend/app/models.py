@@ -442,6 +442,19 @@ class HostCollection(Base):
     updated_at = Column(String, nullable=False)
 
 
+class OperationPack(Base):
+    __tablename__ = "operation_packs"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    steps = Column(JSONB, nullable=False, default=list)
+    tags = Column(ARRAY(String), nullable=False, default=list)
+    is_builtin = Column(Boolean, nullable=False, default=False)
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+
+
 class SavedSearch(Base):
     __tablename__ = "saved_searches"
 
