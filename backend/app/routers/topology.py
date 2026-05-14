@@ -430,12 +430,24 @@ def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str
         for extra_ip in (h.get("ips") or []):
             if extra_ip:
                 host_by_ip[extra_ip] = h
+    # L3: place each host in every subnet derived from its IP list (multi-homed).
+    seen_host_per_subnet: dict[str, set[str]] = {}
     for h in hosts:
-        ip = h.get("ip", "")
-        if not ip:
+        primary_ip = h.get("ip", "")
+        all_ips = list({primary_ip, *(h.get("ips") or [])} - {""})
+        if not all_ips:
             continue
-        subnet = h.get("subnet") or _get_subnet(ip)
-        subnet_hosts.setdefault(subnet, []).append(h)
+        for ip in all_ips:
+            subnet = _get_subnet(ip) if ip != primary_ip else (h.get("subnet") or _get_subnet(ip))
+            if not subnet:
+                continue
+            bucket = seen_host_per_subnet.setdefault(subnet, set())
+            if h.get("id") in bucket:
+                continue
+            bucket.add(h.get("id") or "")
+            entry = dict(h)
+            entry["ip"] = ip
+            subnet_hosts.setdefault(subnet, []).append(entry)
 
     links: list[TopologyLinkDiff] = []
     seen: set = set()
@@ -1109,6 +1121,40 @@ _JUNCTION_TAGS  = {"router", "gateway", "vpn", "firewall", "fw", "pivot"}
 _JUNCTION_KW    = ("vpn", "gw", "gateway", "router", "fw", "firewall", "pivot", "tunnel")
 
 
+_RFC1918_NETS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+]
+_PUBLIC_TAGS = {"public", "exposed", "internet", "internet-facing", "edge", "dmz-public"}
+
+
+def _is_rfc1918(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in n for n in _RFC1918_NETS)
+    except ValueError:
+        return True
+
+
+def _decay_confidence(c0: float, ts_iso: str, tau_days: float) -> tuple[float, bool]:
+    """Exponential confidence decay. Returns (decayed, is_stale)."""
+    if not tau_days or tau_days <= 0 or not ts_iso:
+        return c0, False
+    try:
+        ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+        if ts.tzinfo is not None:
+            ts = ts.replace(tzinfo=None)
+        delta_days = max(0.0, (datetime.utcnow() - ts).total_seconds() / 86400.0)
+    except (ValueError, TypeError):
+        return c0, False
+    import math
+    c = c0 * math.exp(-delta_days / tau_days)
+    return c, c < 0.4
+
+
 def _find_pivot_host(
     remote_net: ipaddress.IPv4Network,
     scope_region_defs: list[dict],
@@ -1195,6 +1241,9 @@ def _run_smart_build(
     include_domain_edges: bool = True,
     include_subnet_edges: bool = True,
     include_regions: bool = True,
+    include_internet_facing: bool = True,
+    confidence_decay_days: float = 14.0,
+    dry_run: bool = False,
 ) -> dict:
     """
     Pentest-aware topology build from all available project data sources.
@@ -1353,8 +1402,11 @@ def _run_smart_build(
     new_auto_edges = []
     seen_keys = set(manual_keys)
     edges_added = 0
+    edges_by_source: dict[str, int] = {}
+    edges_stale = 0
 
     def _add_edge(from_nid: str, to_nid: str, edge_data: dict) -> bool:
+        nonlocal edges_stale
         if not from_nid or not to_nid or from_nid == to_nid:
             return False
         key = (from_nid, to_nid)
@@ -1366,8 +1418,15 @@ def _run_smart_build(
             return False
         seen_keys.add(key)
         seen_keys.add(rkey)
+        src_key = str(edge_data.get("source") or "auto")
+        edges_by_source[src_key] = edges_by_source.get(src_key, 0) + 1
+        if edge_data.get("state") == "stale":
+            edges_stale += 1
         new_auto_edges.append({"id": new_id("edg"), "from": from_nid, "to": to_nid, **edge_data})
         return True
+
+    # L2: pairs written by P1 cred_validation — used to dedup P3 host_activity.
+    p1_access_pairs: set[tuple[str, str, str]] = set()
 
     # Identify attacker nodes — via host records AND via nodes marked is_attacker directly
     attacker_hids = {h.id for h in all_hosts if h.is_attacker or (h.role or "").lower() == "attacker"}
@@ -1414,6 +1473,7 @@ def _run_smart_build(
                 "access_roles": roles,
             }):
                 edges_added += 1
+                p1_access_pairs.add((from_nid, target_nid, primary))
 
     # ── P2: Access edges from bulk_exec Jobs ──────────────────────────
     if include_access_edges:
@@ -1435,11 +1495,16 @@ def _run_smart_build(
             to_nid = hid_to_nid.get(tgt_hid)
             if not from_nid or not to_nid:
                 continue
+            decayed, stale = _decay_confidence(
+                1.0, getattr(job, "finished_at", "") or "", confidence_decay_days
+            )
             if _add_edge(from_nid, to_nid, {
                 "type": role, "label": role.replace("_", " "),
-                "confidence": 1.0, "source": "bulk_exec",
+                "confidence": round(decayed, 3), "source": "bulk_exec",
                 "reason": f"Bulk exec success: {job.title or 'exec'} via {role}",
-                "state": "observed", "verified": True, "is_manual": False,
+                "state": "stale" if stale else "observed",
+                "verified": True, "is_manual": False,
+                "ts": getattr(job, "finished_at", "") or "",
             }):
                 edges_added += 1
 
@@ -1498,17 +1563,23 @@ def _run_smart_build(
 
             if from_nid == target_nid:
                 continue
+            # L2: skip if P1 cred_validation already wrote a verified edge
+            #     for the same (attacker, target, role) tuple.
+            if (from_nid, target_nid, etype) in p1_access_pairs:
+                continue
             # C2 session edges are auto-inferred (rebuilt each smart-build).
             # Other activity types (exec/lateral) are observed/verified.
             is_c2 = act.activity_type == "c2"
+            decayed, stale = _decay_confidence(0.9, act.ts or "", confidence_decay_days)
             if _add_edge(from_nid, target_nid, {
                 "type": etype, "label": etype.replace("_", " "),
-                "confidence": 0.9,
+                "confidence": round(decayed, 3),
                 "source": "auto" if is_c2 else "host_activity",
                 "reason": f"Host activity: {act.title or act.activity_type} [{act.ts}]",
-                "state": "inferred" if is_c2 else "observed",
-                "verified": False if is_c2 else True,
+                "state": "stale" if stale else ("inferred" if is_c2 else "observed"),
+                "verified": False if (is_c2 or stale) else True,
                 "is_manual": False,
+                "ts": act.ts or "",
             }):
                 edges_added += 1
 
@@ -1633,6 +1704,61 @@ def _run_smart_build(
                 "state": "inferred", "verified": False, "is_manual": False,
             }):
                 edges_added += 1
+
+    # ── P13: Internet-facing virtual node + edges ─────────────────────
+    if include_internet_facing:
+        public_hosts: list[dict] = []
+        for h in hosts_meta:
+            tags = {t.lower() for t in (h.get("tags") or [])}
+            ip = h.get("ip") or ""
+            if h.get("is_attacker"):
+                continue
+            if tags & _PUBLIC_TAGS or (ip and not _is_rfc1918(ip)):
+                public_hosts.append(h)
+
+        if public_hosts:
+            inet_node = next(
+                (n for n in existing_nodes if n.get("id") == "vn-internet"),
+                None,
+            )
+            if not inet_node:
+                attacker_n = next((n for n in existing_nodes if n.get("is_attacker")), None)
+                base_x = (attacker_n.get("x", 0) - 200.0) if attacker_n else -200.0
+                base_y = (attacker_n.get("y", 0) - 180.0) if attacker_n else -120.0
+                inet_node = {
+                    "id": "vn-internet", "host_id": "",
+                    "label": "Internet", "ip": "",
+                    "ips": [], "ports": [], "services": [],
+                    "subnet": "0.0.0.0/0",
+                    "status": "external", "role": "cloud",
+                    "type": "cloud", "notes": "",
+                    "is_attacker": False, "domain": "",
+                    "tags": ["virtual", "internet"],
+                    "x": base_x, "y": base_y,
+                    "manually_positioned": False, "auto_positioned": True,
+                    "virtual": True,
+                }
+                existing_nodes.append(inet_node)
+                node_by_id[inet_node["id"]] = inet_node
+                nodes_added += 1
+            inet_nid = inet_node["id"]
+            for h in public_hosts:
+                dst_nid = hid_to_nid.get(h["id"])
+                if not dst_nid:
+                    continue
+                tags = {t.lower() for t in (h.get("tags") or [])}
+                reason = (
+                    "tagged public/exposed"
+                    if tags & _PUBLIC_TAGS
+                    else f"public IP {h.get('ip')} (not in RFC1918)"
+                )
+                if _add_edge(inet_nid, dst_nid, {
+                    "type": "internet_facing", "label": "internet",
+                    "confidence": 0.9, "source": "internet_facing",
+                    "reason": reason,
+                    "state": "inferred", "verified": False, "is_manual": False,
+                }):
+                    edges_added += 1
 
     # ── Regions from scope CIDRs ──────────────────────────────────────
     regions_added = 0
@@ -1786,6 +1912,27 @@ def _run_smart_build(
                     node["zone_type"] = region.get("zone_type")
                     break
 
+    build_ts = ts_now()
+    existing_meta["last_smart_build"] = build_ts
+    existing_meta["last_smart_build_breakdown"] = dict(edges_by_source)
+
+    result = {
+        "ok": True,
+        "nodes_total": len(existing_nodes),
+        "nodes_added": nodes_added,
+        "nodes_updated": nodes_updated,
+        "edges_added": edges_added,
+        "edges_stale": edges_stale,
+        "edges_by_source": dict(edges_by_source),
+        "regions_added": regions_added,
+        "last_smart_build": build_ts,
+        "dry_run": dry_run,
+    }
+
+    if dry_run:
+        db.rollback()
+        return result
+
     replace_nodes(network.id, network.pid, existing_nodes, db)
     replace_edges(network.id, network.pid, manual_edges + new_auto_edges, db)
     network.meta_json = existing_meta
@@ -1794,17 +1941,10 @@ def _run_smart_build(
     result_net = schemas.Network.from_orm_obj(network)
     bcast(pid, "network", "layout_applied", {
         "network": result_net.model_dump(),
-        "updated_at": ts_now(),
+        "updated_at": build_ts,
     })
 
-    return {
-        "ok": True,
-        "nodes_total": len(existing_nodes),
-        "nodes_added": nodes_added,
-        "nodes_updated": nodes_updated,
-        "edges_added": edges_added,
-        "regions_added": regions_added,
-    }
+    return result
 
 
 class SmartBuildRequest(BaseModel):
@@ -1814,6 +1954,9 @@ class SmartBuildRequest(BaseModel):
     include_domain_edges: bool = True
     include_subnet_edges: bool = True
     include_regions: bool = True
+    include_internet_facing: bool = True
+    confidence_decay_days: float = 14.0
+    dry_run: bool = False
 
 
 @router.post("/smart-build", dependencies=[Depends(require_topo_apply)])
@@ -1846,6 +1989,9 @@ def topology_smart_build(
         include_domain_edges=body.include_domain_edges,
         include_subnet_edges=body.include_subnet_edges,
         include_regions=body.include_regions,
+        include_internet_facing=body.include_internet_facing,
+        confidence_decay_days=body.confidence_decay_days,
+        dry_run=body.dry_run,
     )
     if not result.get("ok"):
         err = result.get("error", "Smart build failed")

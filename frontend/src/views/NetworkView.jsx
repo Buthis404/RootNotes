@@ -1169,6 +1169,15 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     const s = typeof edge === 'string' ? edge : (edge?.style || '');
     const t = typeof edge === 'string' ? '' : (edge?.type || '');
     const verified = typeof edge === 'object' ? edge?.verified : false;
+    const state = typeof edge === 'object' ? (edge?.state || '') : '';
+    // Stale (decayed confidence) — washed-out grey dotted, overrides type.
+    if (state === 'stale') {
+      return { stroke: '#5a5a5a', sw: 1, dash: '2 6', anim: false };
+    }
+    // Internet-facing — orange-red dashed (P13).
+    if (t === 'internet_facing') {
+      return { stroke: '#f06a3a', sw: 1.8, dash: '10 3', anim: true };
+    }
     // Access edges — green solid (verified) or green dashed (unverified)
     if (['ssh', 'winrm', 'smb_admin', 'local_admin', 'shell', 'c2_session'].includes(t)) {
       return verified
@@ -1203,6 +1212,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     if (t === 'domain_admin') return 'url(#mred)';
     if (t === 'domain_member' || t === 'auth_path' || t === 'trust') return 'url(#mp)';
     if (t === 'same_subnet' || t === 'lan' || t === 'routed') return 'url(#mgray)';
+    if (t === 'internet_facing') return 'url(#morange)';
     return 'url(#mgreen)';
   };
   const canUndo = historyState.past.length > 0;
@@ -1572,6 +1582,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [nameVal, setNameVal] = useState('');
   const [showTopologyBuilder, setShowTopologyBuilder] = useState(false);
   const [smartBuilding, setSmartBuilding] = useState(false);
+  const [smartBuildSummary, setSmartBuildSummary] = useState(null);
   const [topologyEnabled, setTopologyEnabled] = useState(true);
   const [accessOverlay, setAccessOverlay] = useState(false);
   const [overlayMode, setOverlayMode] = useState('none'); // 'none'|'threats'|'sessions'|'access'|'pivots'|'roles'
@@ -1721,13 +1732,25 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const handleSmartBuild = async () => {
     setSmartBuilding(true);
     try {
-      await api.topologySmartBuild(projectId, {
+      const res = await api.topologySmartBuild(projectId, {
         keep_manual_positions: true,
         include_access_edges: true,
         include_domain_edges: true,
         include_subnet_edges: true,
         include_regions: true,
+        include_internet_facing: true,
       });
+      if (res && typeof res === 'object') {
+        setSmartBuildSummary({
+          edges_added: res.edges_added ?? 0,
+          nodes_added: res.nodes_added ?? 0,
+          edges_stale: res.edges_stale ?? 0,
+          regions_added: res.regions_added ?? 0,
+          by_source: res.edges_by_source || {},
+          ts: res.last_smart_build || '',
+        });
+        setTimeout(() => setSmartBuildSummary(null), 9000);
+      }
       await onRefreshNetworks?.();
     } catch (e) {
       console.error('Smart-build failed:', e);
@@ -1770,7 +1793,24 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const commitRename = (id) => { if (nameVal.trim()) onUpdateNetwork(id, { name: nameVal.trim() }); setEditingName(null); };
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+      {smartBuildSummary && (
+        <div style={{ position: 'absolute', top: 84, right: 18, zIndex: 60, background: '#0a0c10', border: '1px solid #39d35344', borderRadius: 6, padding: '10px 14px', boxShadow: '0 6px 20px #000a', fontFamily: 'JetBrains Mono', fontSize: 10, color: '#c8cdd6', minWidth: 230 }}>
+          <div style={{ color: '#39d353', fontWeight: 600, marginBottom: 6 }}>Smart Build complete</div>
+          <div>+{smartBuildSummary.edges_added} edges · +{smartBuildSummary.nodes_added} nodes · +{smartBuildSummary.regions_added} regions</div>
+          {smartBuildSummary.edges_stale > 0 && <div style={{ color: '#9098a8', marginTop: 4 }}>{smartBuildSummary.edges_stale} stale (decayed)</div>}
+          {Object.keys(smartBuildSummary.by_source).length > 0 && (
+            <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid #1a1c22', color: '#808890' }}>
+              {Object.entries(smartBuildSummary.by_source).map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                  <span>{k}</span><span style={{ color: '#c8cdd6' }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {smartBuildSummary.ts && <div style={{ marginTop: 6, color: '#505560', fontSize: 9 }}>{new Date(smartBuildSummary.ts).toLocaleTimeString()}</div>}
+        </div>
+      )}
       {/* Row 1: network tabs + background picker + add network */}
       <div style={{ display: 'flex', alignItems: 'center', background: '#0a0b0f', borderBottom: '1px solid #1a1c22', flexShrink: 0, paddingLeft: 4 }}>
         <div style={{ display: 'flex', flex: 1, overflowX: 'auto' }}>
