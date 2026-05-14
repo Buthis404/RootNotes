@@ -442,6 +442,7 @@ class AttackPath(BaseModel):
 class AttackStepCreate(BaseModel):
     path_id: str
     pid: str
+    host_id: Optional[str] = None
     step_order: int = 0
     node_type: str = "host"
     label: str = ""
@@ -451,6 +452,7 @@ class AttackStepCreate(BaseModel):
     notes: str = ""
 
 class AttackStepUpdate(BaseModel):
+    host_id: Optional[str] = None
     step_order: Optional[int] = None
     node_type: Optional[str] = None
     label: Optional[str] = None
@@ -463,6 +465,7 @@ class AttackStep(BaseModel):
     id: str
     path_id: str
     pid: str
+    host_id: Optional[str] = None
     step_order: int
     node_type: str
     label: str

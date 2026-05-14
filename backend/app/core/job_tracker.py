@@ -169,6 +169,10 @@ def finish_job(
     result: dict | None = None,
 ) -> models.Job:
     """Update job to terminal status and broadcast."""
+    # Re-read from DB to detect external cancel that raced with job completion
+    db.refresh(job)
+    if job.status == "cancelled" and status in ("done", "failed"):
+        return job  # Cancel took priority; don't overwrite with done/failed
     job.status = status
     job.output = output
     job.error_output = error_output

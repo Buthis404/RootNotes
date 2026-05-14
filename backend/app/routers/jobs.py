@@ -148,11 +148,11 @@ def cancel_job(
     # Signal worker to stop (kills subprocess if running)
     from ..core.worker_pool import get_pool
     get_pool().cancel_job(job_id)
-    # For queued jobs that haven't started yet: mark cancelled immediately
-    if job.status == "queued":
-        job.status = "cancelled"
-        db.commit()
-        db.refresh(job)
+    # Optimistically mark cancelled in DB for both queued and running jobs.
+    # finish_job() will skip overwriting if it sees "cancelled" already set.
+    job.status = "cancelled"
+    db.commit()
+    db.refresh(job)
     bcast(pid, "job", "update", _job_dict(job))
     return _job_dict(job)
 

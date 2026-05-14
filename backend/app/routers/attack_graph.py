@@ -286,8 +286,8 @@ def get_attack_graph(
             continue
         from_node = network_node_by_id.get(str(edge.get("from") or ""), {})
         to_node = network_node_by_id.get(str(edge.get("to") or ""), {})
-        from_host_id = from_node.get("host_id")
-        to_host_id = to_node.get("host_id")
+        from_host_id = from_node.get("host_id") or str(edge.get("from_host_id") or "")
+        to_host_id = to_node.get("host_id") or str(edge.get("to_host_id") or "")
         if not from_host_id or not to_host_id:
             continue
         if from_host_id not in host_by_id or to_host_id not in host_by_id:
@@ -408,8 +408,11 @@ def get_attack_graph(
         for node_id in path:
             da_path_nodes.add(node_id)
 
-    # Mark privilege-path edges
+    # Mark privilege-path edges (only access edges — not credential or path step edges)
     for edge in edges:
+        if edge.get("kind") not in ("access", "pivot"):
+            edge["on_priv_path"] = False
+            continue
         fh = str(edge.get("from") or "")
         th = str(edge.get("to") or "")
         edge["on_priv_path"] = (fh, th) in priv_path_edge_pairs or (th, fh) in priv_path_edge_pairs

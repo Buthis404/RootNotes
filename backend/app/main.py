@@ -250,6 +250,7 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 0"))
+    conn.execute(text("ALTER TABLE attack_steps ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE SET NULL"))
 
 
 # ── Scheduled playbooks background task ──────────────────────────────
@@ -644,6 +645,9 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
             raw = await ws.receive_text()
             try:
                 msg = json.loads(raw)
+                if msg.get("type") == "ping":
+                    await ws.send_text('{"type":"pong"}')
+                    continue
                 if msg.get("type") == "focus":
                     manager.set_focus(ws, msg.get("note_id"))
                 elif msg.get("type") == "blur":
@@ -688,6 +692,7 @@ from .routers import (
     scans, webhooks, c2, jobs, bulk_actions, playbooks, notifications,
     scheduled_playbooks, domains,
     ai, import_scanners, attack_graph, kb, collections, pivots,
+    import_bloodhound, mitre,
 )
 
 app.include_router(auth.router)
@@ -731,6 +736,8 @@ app.include_router(attack_graph.router)
 app.include_router(kb.router)
 app.include_router(collections.router)
 app.include_router(pivots.router)
+app.include_router(import_bloodhound.router)
+app.include_router(mitre.router)
 
 
 @app.get("/api/worker/status", tags=["worker"])

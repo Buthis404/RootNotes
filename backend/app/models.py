@@ -165,6 +165,7 @@ class AttackStep(Base):
     id = Column(String, primary_key=True)
     path_id = Column(String, ForeignKey("attack_paths.id", ondelete="CASCADE"), nullable=False)
     pid = Column(String, nullable=False)
+    host_id = Column(String, ForeignKey("hosts.id", ondelete="SET NULL"), nullable=True)
     step_order = Column(Integer, nullable=False, default=0)
     node_type = Column(String, nullable=False, default="host")
     label = Column(String, nullable=False, default="")

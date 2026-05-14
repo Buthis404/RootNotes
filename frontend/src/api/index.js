@@ -169,6 +169,12 @@ export const api = {
   exportSnippets:      ()           => download('/snippets/export'),
   importSnippets:      (file)       => upload('/snippets/import', file),
 
+  // BloodHound server-side import
+  importBloodHound: (pid, file) => upload(`/projects/${pid}/import/bloodhound`, file),
+
+  // MITRE ATT&CK
+  getMitreCoverage:  (pid) => req('GET', `/projects/${pid}/mitre/coverage`),
+
   // Batch import & project export/import
   batchImport:   (pid, data) => req('POST', `/import/${pid}`, data),
   exportProject: async (pid) => {
@@ -327,10 +333,12 @@ export const api = {
 
   // Knowledge base
   listKBArticles:    (params={})       => { const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v])=>v!=null))).toString(); return req('GET', `/kb${qs?`?${qs}`:''}`); },
+  getKBArticles:     (params={})       => { const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v])=>v!=null))).toString(); return req('GET', `/kb${qs?`?${qs}`:''}`); },
   getKBArticle:      (id)              => req('GET',  `/kb/${id}`),
   createKBArticle:   (data)            => req('POST', '/kb', data),
   updateKBArticle:   (id, data)        => req('PATCH', `/kb/${id}`, data),
   deleteKBArticle:   (id)              => req('DELETE', `/kb/${id}`),
+  seedMitreKB:       ()               => req('POST', '/kb/seed/mitre'),
 };
 
 /** Append auth token to a /api/uploads/... download URL for use in <a href> links. */
