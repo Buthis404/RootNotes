@@ -253,14 +253,22 @@ function GraphEdge({ edge, nodes, privMode, highlightedPathIds, dimmed }) {
           <animate attributeName="stroke-dashoffset" from="0" to="-28" dur="1.2s" repeatCount="indefinite" />
         )}
       </path>
-      {edge.label && !isPivotRoute && (
-        <>
-          <rect x={lx - 28} y={ly - 9} width={56} height={12} rx={3} fill="#07080b" opacity={0.9} />
-          <text x={lx} y={ly} textAnchor="middle" fontSize={8} fill={color} fontFamily="JetBrains Mono" opacity={dimmed ? 0.2 : 0.9}>
-            {edge.label.slice(0, 16)}
-          </text>
-        </>
-      )}
+      {edge.label && !isPivotRoute && (() => {
+        // For credential edges: show username only (strip domain\ prefix)
+        const rawLabel = edge.kind === 'credential'
+          ? (edge.label.includes('\\') ? edge.label.split('\\').pop() : edge.label)
+          : edge.label;
+        const displayLabel = rawLabel.length > 14 ? rawLabel.slice(0, 13) + '…' : rawLabel;
+        const boxW = Math.max(56, displayLabel.length * 5.2 + 12);
+        return (
+          <>
+            <rect x={lx - boxW / 2} y={ly - 9} width={boxW} height={12} rx={3} fill="#07080b" opacity={0.9} />
+            <text x={lx} y={ly} textAnchor="middle" fontSize={8} fill={color} fontFamily="JetBrains Mono" opacity={dimmed ? 0.2 : 0.9}>
+              {displayLabel}
+            </text>
+          </>
+        );
+      })()}
     </g>
   );
 }

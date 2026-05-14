@@ -218,14 +218,16 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
     users_raw = _get_items(file_map.get("users", {}))
     for user in users_raw:
         props = user.get("Properties", {})
-        full_name: str = props.get("name", "")  # S_DOTSON@EDU.STF
+        full_name: str = props.get("name", "")  # S_DOTSON@EDU.STF or display name
         sid: str = props.get("objectid", "") or user.get("ObjectIdentifier", "")
         enabled: bool = props.get("enabled", True)
         domain = domain or props.get("domain", "") or (full_name.split("@")[1] if "@" in full_name else "")
         admincount: bool = props.get("admincount", False)
         spns: list = props.get("serviceprincipalnames", [])
 
-        username_short = _user_short(full_name)
+        # Prefer samaccountname (always ASCII) over name (may be display name with Unicode)
+        sam = props.get("samaccountname") or props.get("SamAccountName") or ""
+        username_short = sam.lower() if sam else _user_short(full_name)
         sid_to_name[sid] = full_name
 
         # Mark DA if member of DA group or admincount=True with known DA patterns
@@ -272,11 +274,10 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
         if h.role == "domain_controller" or "dc" in {t.lower() for t in (h.tags or [])}:
             dc_host_ids.add(h.id)
 
-    # If computers have DA SIDs that map to host_ids, those are DCs or DA computers
+    # Count DA-capable computers (for stats only — NOT adding to dc_host_ids:
+    # a computer being a member of the DA group doesn't make it a DC)
     for sid in da_sids:
-        hid = sid_to_host_id.get(sid)
-        if hid:
-            dc_host_ids.add(hid)
+        if sid_to_host_id.get(sid):
             stats["da_computers"] += 1
 
     # ── Step 6: build access edges ───────────────────────────────────────────
