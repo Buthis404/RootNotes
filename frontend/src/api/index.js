@@ -146,7 +146,7 @@ export const api = {
   deleteCredHostNote: (id)          => req('DELETE', `/cred-host-notes/${id}`),
 
   // Search & presence
-  search:      (q, pid, limit = 60) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}&limit=${limit}`),
+  search:      (q, pid, limit = 40, offset = 0) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}&limit=${limit}&offset=${offset}`),
   listSavedSearches:   ()           => req('GET',    '/saved-searches'),
   createSavedSearch:   (data)       => req('POST',   '/saved-searches', data),
   deleteSavedSearch:   (id)         => req('DELETE', `/saved-searches/${id}`),
