@@ -276,9 +276,12 @@ _SCOPE_REGION_PALETTE = [
 ]
 
 
-def _scope_region_colors(cidr: str, in_scope: bool) -> tuple[str, str]:
+def _scope_region_colors(cidr: str, in_scope: bool, via_host_id: str = "") -> tuple[str, str]:
     idx = sum(ord(ch) for ch in (cidr or "")) % len(_SCOPE_REGION_PALETTE)
     stroke, fill = _SCOPE_REGION_PALETTE[idx]
+    if via_host_id:
+        # Pivot-only scope: orange-tinted, indicates "reachable only via pivot host"
+        return ("#f09a3a", "#f09a3a18")
     if in_scope:
         return stroke, fill
     return ("#cc2233", "#cc22331a")
@@ -406,7 +409,11 @@ def _pick_gateway(group: list[dict]) -> dict:
     ))
 
 
-def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str] | None = None) -> list[TopologyLinkDiff]:
+def infer_links_smart(
+    hosts: list[dict],
+    manual_gateway_by_subnet: dict[str, str] | None = None,
+    isolated_subnets: set[str] | None = None,
+) -> list[TopologyLinkDiff]:
     """
     Hub-and-spoke link inference using full host metadata.
 
@@ -415,12 +422,17 @@ def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str
       - Every other host in the subnet connects to the hub (spoke).
 
     Between subnets:
-      - Gateway hosts of different subnets are connected to each other (LAN link).
+      - Gateway hosts of different subnets are connected to each other (LAN link),
+        EXCEPT subnets listed in ``isolated_subnets`` — those represent
+        pivot-only reachable networks (scope.via_host_id is set), whose ONLY
+        entry point is the pivot host. Drawing lan-gw bridges from them would
+        misrepresent the topology.
     """
     if not hosts:
         return []
 
     manual_gateway_by_subnet = manual_gateway_by_subnet or {}
+    isolated_subnets = isolated_subnets or set()
     subnet_hosts: dict[str, list[dict]] = {}
     host_by_ip: dict[str, dict] = {}
     for h in hosts:
@@ -498,10 +510,14 @@ def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str
                 add(gw_ip, h_ip, "same_subnet", confidence=0.9,
                     reason=f"same /{subnet} subnet; hub: {gw_reason}")
 
-    # ── Inter-subnet: gateway ↔ gateway ───────────────────────────────
+    # ── Inter-subnet: gateway ↔ gateway (skip pivot-only scopes) ──────
     gw_list = [(s, ip) for s, ip in subnet_gw.items()]
     for i, (sa, a) in enumerate(gw_list):
+        if sa in isolated_subnets:
+            continue
         for sb, b in gw_list[i + 1:]:
+            if sb in isolated_subnets:
+                continue
             add(a, b, "lan", confidence=0.7,
                 reason=f"inter-subnet route between {sa} and {sb} (gateway heuristic)")
 
@@ -1680,7 +1696,10 @@ def _run_smart_build(
             for item in scope_region_defs
             if item.get("gateway_ip")
         }
-        for link in infer_links_smart(hosts_meta, manual_gateway_by_subnet):
+        isolated_subnets = {
+            sr["cidr"] for sr in scope_region_defs if sr.get("via_host_id")
+        }
+        for link in infer_links_smart(hosts_meta, manual_gateway_by_subnet, isolated_subnets):
             src_nid = ip_to_nid.get(link.source_ip)
             dst_nid = ip_to_nid.get(link.target_ip)
             if not src_nid or not dst_nid:
@@ -1818,10 +1837,16 @@ def _run_smart_build(
         existing_regions = get_regions(network.id, db)
         existing_region_notes = {r.get("note", "") for r in existing_regions}
 
+        # Index existing regions by their CIDR note so we can refresh
+        # color/zone_type/via_host_id when a scope is reclassified (e.g.
+        # acquires a pivot after a PivotObservation is added).
+        existing_region_by_note = {
+            (r.get("note") or "").strip(): r
+            for r in existing_regions if r.get("note")
+        }
+
         for sr in scope_region_defs:
             cidr_str = sr["cidr"]
-            if cidr_str in existing_region_notes:
-                continue
             net_obj = sr["net_obj"]
             in_scope_hosts = [
                 h for h in hosts_meta
@@ -1843,21 +1868,47 @@ def _run_smart_build(
             max_x = max(p[0] for p in node_positions) + 160 + pad
             max_y = max(p[1] for p in node_positions) + 100 + pad
             in_scope = sr["in_scope"]
-            scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope)
+            via_host_id = sr.get("via_host_id", "")
+            scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope, via_host_id)
+            via_host_label = ""
+            if via_host_id:
+                via_h = next((h for h in hosts_meta if h["id"] == via_host_id), None)
+                via_host_label = (via_h or {}).get("hostname") or (via_h or {}).get("ip") or via_host_id[:8]
+            label = (
+                f"{sr['description'] or cidr_str} (via {via_host_label})"
+                if via_host_id else (sr["description"] or cidr_str)
+            )
+            zone_type = "scope_pivot" if via_host_id else "scope"
+
+            existing_r = existing_region_by_note.get(cidr_str)
+            if existing_r:
+                # Refresh visual + meta on the existing region (don't touch
+                # x/y/w/h if user has manually adjusted them — keep geometry).
+                existing_r["fill"] = scope_fill
+                existing_r["stroke"] = scope_stroke
+                existing_r["zone_type"] = zone_type
+                existing_r["label"] = label
+                if via_host_id:
+                    existing_r["via_host_id"] = via_host_id
+                elif "via_host_id" in existing_r:
+                    existing_r.pop("via_host_id", None)
+                existing_r["updated_at"] = ts_now()
+                continue
+
             region_entry: dict = {
                 "id": new_id("r"),
                 "x": min_x, "y": min_y,
                 "w": max_x - min_x, "h": max_y - min_y,
-                "label": sr["description"] or cidr_str,
+                "label": label,
                 "note": cidr_str,
                 "fill": scope_fill,
                 "stroke": scope_stroke,
-                "zone_type": "scope",
+                "zone_type": zone_type,
                 "updated_at": ts_now(),
                 "version": 1,
             }
-            if sr.get("via_host_id"):
-                region_entry["via_host_id"] = sr["via_host_id"]
+            if via_host_id:
+                region_entry["via_host_id"] = via_host_id
             existing_regions.append(region_entry)
             regions_added += 1
 

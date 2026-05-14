@@ -1371,7 +1371,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                       ));
                     })() : null;
                     if (roleBadges.length) badgeY += 13;
-                    const ZONE_COLORS = { internal: '#5b8af5', dmz: '#f09a3a', external: '#cc2233', management: '#c07af0' };
+                    const ZONE_COLORS = { internal: '#5b8af5', dmz: '#f09a3a', external: '#cc2233', management: '#c07af0', scope_pivot: '#f09a3a' };
                     const zoneElem = node.zone_type && node.zone_type !== 'scope' ? (() => {
                       const zc = ZONE_COLORS[node.zone_type] || '#606570';
                       const zLabel = node.zone_type.toUpperCase().slice(0, 4);
