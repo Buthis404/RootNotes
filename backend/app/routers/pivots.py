@@ -386,6 +386,22 @@ def create_pivot(pid: str, body: schemas.PivotObservationCreate, request: Reques
     return _observation_out(obs)
 
 
+@router.patch("/{pivot_id}")
+def update_pivot(pivot_id: str, pid: str, body: schemas.PivotObservationUpdate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    obs = db.query(models.PivotObservation).filter(models.PivotObservation.id == pivot_id, models.PivotObservation.pid == pid).first()
+    if not obs:
+        raise HTTPException(404, "Pivot observation not found")
+    check_object_access(db, pid, user, "network.manage_links")
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(obs, field, value)
+    obs.last_seen = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    db.commit()
+    db.refresh(obs)
+    _sync_pivot_edges(pid, db)
+    db.commit()
+    return _observation_out(obs)
+
+
 @router.delete("/{pivot_id}", status_code=204)
 def delete_pivot(pivot_id: str, pid: str, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     obs = db.query(models.PivotObservation).filter(models.PivotObservation.id == pivot_id, models.PivotObservation.pid == pid).first()
