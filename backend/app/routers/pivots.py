@@ -354,6 +354,63 @@ def list_pivots(pid: str, db: Session = Depends(get_db), user: models.User = Dep
     return {"items": get_all_pivot_items(pid, db)}
 
 
+def _normalize_cidr(value: str) -> str:
+    try:
+        return str(ipaddress.ip_network((value or "").strip(), strict=False))
+    except (ValueError, TypeError):
+        return ""
+
+
+def _ensure_scope_for_pivot(
+    pid: str,
+    route_cidr: str,
+    pivot_host_id: str,
+    db: Session,
+    username: str | None = None,
+) -> models.Scope | None:
+    """Create or update a Scope record reflecting that *route_cidr* is reachable
+    only via *pivot_host_id*. Idempotent: if a CIDR-typed scope with the same
+    normalized value already exists, only its via_host_id is updated (and only
+    if currently empty, to avoid stomping manually set entries)."""
+    norm = _normalize_cidr(route_cidr)
+    if not norm or not pivot_host_id:
+        return None
+    existing = (
+        db.query(models.Scope)
+        .filter(models.Scope.pid == pid, models.Scope.value == norm)
+        .first()
+    )
+    if existing:
+        if not existing.via_host_id:
+            existing.via_host_id = pivot_host_id
+            db.flush()
+            log_event(
+                db, pid, username, "scope", "update",
+                f"Scope {norm} linked to pivot host",
+                {"scope_id": existing.id, "via_host_id": pivot_host_id},
+            )
+        return existing
+    sc = models.Scope(
+        id=new_id("sc"),
+        pid=pid,
+        value=norm,
+        scope_type="cidr",
+        in_scope=True,
+        description=f"auto: via pivot {pivot_host_id[:8]}",
+        gateway_ip="",
+        is_entry=False,
+        via_host_id=pivot_host_id,
+    )
+    db.add(sc)
+    db.flush()
+    log_event(
+        db, pid, username, "scope", "create",
+        f"Scope {norm} auto-created from pivot",
+        {"scope_id": sc.id, "via_host_id": pivot_host_id},
+    )
+    return sc
+
+
 @router.post("", status_code=201)
 def create_pivot(pid: str, body: schemas.PivotObservationCreate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, pid, user, "network.manage_links")
@@ -379,6 +436,11 @@ def create_pivot(pid: str, body: schemas.PivotObservationCreate, request: Reques
         last_seen=ts_now(),
     )
     db.add(obs)
+    db.flush()
+    _ensure_scope_for_pivot(
+        pid, obs.route_cidr, obs.pivot_host_id, db,
+        username=getattr(request.state, "username", None),
+    )
     db.commit()
     db.refresh(obs)
     _sync_pivot_edges(pid, db)
@@ -396,6 +458,11 @@ def update_pivot(pivot_id: str, pid: str, body: schemas.PivotObservationUpdate, 
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(obs, field, value)
     obs.last_seen = ts_now()
+    db.flush()
+    _ensure_scope_for_pivot(
+        pid, obs.route_cidr, obs.pivot_host_id, db,
+        username=getattr(request.state, "username", None),
+    )
     db.commit()
     db.refresh(obs)
     _sync_pivot_edges(pid, db)
@@ -409,7 +476,42 @@ def delete_pivot(pivot_id: str, pid: str, request: Request, db: Session = Depend
     if not obs:
         raise HTTPException(404, "Pivot observation not found")
     check_object_access(db, pid, user, "network.manage_links")
+    removed_route = obs.route_cidr
+    removed_pivot_host = obs.pivot_host_id
     db.delete(obs)
+    db.flush()
+    # If the auto-created scope is no longer backed by any remaining pivot
+    # for the same (cidr, via_host_id) pair, and the scope description was
+    # auto-generated, drop it. Manually edited scopes are preserved.
+    norm = _normalize_cidr(removed_route)
+    if norm and removed_pivot_host:
+        still_used = (
+            db.query(models.PivotObservation)
+            .filter(
+                models.PivotObservation.pid == pid,
+                models.PivotObservation.pivot_host_id == removed_pivot_host,
+                models.PivotObservation.route_cidr.in_([removed_route, norm]),
+            )
+            .first()
+        )
+        if not still_used:
+            scope = (
+                db.query(models.Scope)
+                .filter(
+                    models.Scope.pid == pid,
+                    models.Scope.value == norm,
+                    models.Scope.via_host_id == removed_pivot_host,
+                )
+                .first()
+            )
+            if scope and scope.description.startswith("auto: via pivot"):
+                db.delete(scope)
+                log_event(
+                    db, pid, getattr(request.state, "username", None),
+                    "scope", "delete",
+                    f"Auto-scope {norm} removed (last pivot deleted)",
+                    {"scope_id": scope.id},
+                )
     db.commit()
     _sync_pivot_edges(pid, db)
     log_event(db, pid, getattr(request.state, "username", None), "pivot", "delete", f"Pivot removed: {obs.label}", {"pivot_id": pivot_id})
@@ -451,6 +553,12 @@ def collect_pivots(pid: str, body: PivotCollectBody, request: Request, db: Sessi
         )
         db.add(obs)
         created.append(obs)
+    db.flush()
+    for obs in created:
+        _ensure_scope_for_pivot(
+            pid, obs.route_cidr, obs.pivot_host_id, db,
+            username=getattr(request.state, "username", None),
+        )
     db.commit()
     for obs in created:
         db.refresh(obs)

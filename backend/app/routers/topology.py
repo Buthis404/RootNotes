@@ -276,9 +276,12 @@ _SCOPE_REGION_PALETTE = [
 ]
 
 
-def _scope_region_colors(cidr: str, in_scope: bool) -> tuple[str, str]:
+def _scope_region_colors(cidr: str, in_scope: bool, via_host_id: str = "") -> tuple[str, str]:
     idx = sum(ord(ch) for ch in (cidr or "")) % len(_SCOPE_REGION_PALETTE)
     stroke, fill = _SCOPE_REGION_PALETTE[idx]
+    if via_host_id:
+        # Pivot-only scope: orange-tinted, indicates "reachable only via pivot host"
+        return ("#f09a3a", "#f09a3a18")
     if in_scope:
         return stroke, fill
     return ("#cc2233", "#cc22331a")
@@ -406,7 +409,11 @@ def _pick_gateway(group: list[dict]) -> dict:
     ))
 
 
-def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str] | None = None) -> list[TopologyLinkDiff]:
+def infer_links_smart(
+    hosts: list[dict],
+    manual_gateway_by_subnet: dict[str, str] | None = None,
+    isolated_subnets: set[str] | None = None,
+) -> list[TopologyLinkDiff]:
     """
     Hub-and-spoke link inference using full host metadata.
 
@@ -415,12 +422,17 @@ def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str
       - Every other host in the subnet connects to the hub (spoke).
 
     Between subnets:
-      - Gateway hosts of different subnets are connected to each other (LAN link).
+      - Gateway hosts of different subnets are connected to each other (LAN link),
+        EXCEPT subnets listed in ``isolated_subnets`` — those represent
+        pivot-only reachable networks (scope.via_host_id is set), whose ONLY
+        entry point is the pivot host. Drawing lan-gw bridges from them would
+        misrepresent the topology.
     """
     if not hosts:
         return []
 
     manual_gateway_by_subnet = manual_gateway_by_subnet or {}
+    isolated_subnets = isolated_subnets or set()
     subnet_hosts: dict[str, list[dict]] = {}
     host_by_ip: dict[str, dict] = {}
     for h in hosts:
@@ -430,12 +442,24 @@ def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str
         for extra_ip in (h.get("ips") or []):
             if extra_ip:
                 host_by_ip[extra_ip] = h
+    # L3: place each host in every subnet derived from its IP list (multi-homed).
+    seen_host_per_subnet: dict[str, set[str]] = {}
     for h in hosts:
-        ip = h.get("ip", "")
-        if not ip:
+        primary_ip = h.get("ip", "")
+        all_ips = list({primary_ip, *(h.get("ips") or [])} - {""})
+        if not all_ips:
             continue
-        subnet = h.get("subnet") or _get_subnet(ip)
-        subnet_hosts.setdefault(subnet, []).append(h)
+        for ip in all_ips:
+            subnet = _get_subnet(ip) if ip != primary_ip else (h.get("subnet") or _get_subnet(ip))
+            if not subnet:
+                continue
+            bucket = seen_host_per_subnet.setdefault(subnet, set())
+            if h.get("id") in bucket:
+                continue
+            bucket.add(h.get("id") or "")
+            entry = dict(h)
+            entry["ip"] = ip
+            subnet_hosts.setdefault(subnet, []).append(entry)
 
     links: list[TopologyLinkDiff] = []
     seen: set = set()
@@ -486,10 +510,14 @@ def infer_links_smart(hosts: list[dict], manual_gateway_by_subnet: dict[str, str
                 add(gw_ip, h_ip, "same_subnet", confidence=0.9,
                     reason=f"same /{subnet} subnet; hub: {gw_reason}")
 
-    # ── Inter-subnet: gateway ↔ gateway ───────────────────────────────
+    # ── Inter-subnet: gateway ↔ gateway (skip pivot-only scopes) ──────
     gw_list = [(s, ip) for s, ip in subnet_gw.items()]
     for i, (sa, a) in enumerate(gw_list):
+        if sa in isolated_subnets:
+            continue
         for sb, b in gw_list[i + 1:]:
+            if sb in isolated_subnets:
+                continue
             add(a, b, "lan", confidence=0.7,
                 reason=f"inter-subnet route between {sa} and {sb} (gateway heuristic)")
 
@@ -1109,6 +1137,40 @@ _JUNCTION_TAGS  = {"router", "gateway", "vpn", "firewall", "fw", "pivot"}
 _JUNCTION_KW    = ("vpn", "gw", "gateway", "router", "fw", "firewall", "pivot", "tunnel")
 
 
+_RFC1918_NETS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+]
+_PUBLIC_TAGS = {"public", "exposed", "internet", "internet-facing", "edge", "dmz-public"}
+
+
+def _is_rfc1918(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in n for n in _RFC1918_NETS)
+    except ValueError:
+        return True
+
+
+def _decay_confidence(c0: float, ts_iso: str, tau_days: float) -> tuple[float, bool]:
+    """Exponential confidence decay. Returns (decayed, is_stale)."""
+    if not tau_days or tau_days <= 0 or not ts_iso:
+        return c0, False
+    try:
+        ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+        if ts.tzinfo is not None:
+            ts = ts.replace(tzinfo=None)
+        delta_days = max(0.0, (datetime.utcnow() - ts).total_seconds() / 86400.0)
+    except (ValueError, TypeError):
+        return c0, False
+    import math
+    c = c0 * math.exp(-delta_days / tau_days)
+    return c, c < 0.4
+
+
 def _find_pivot_host(
     remote_net: ipaddress.IPv4Network,
     scope_region_defs: list[dict],
@@ -1195,6 +1257,9 @@ def _run_smart_build(
     include_domain_edges: bool = True,
     include_subnet_edges: bool = True,
     include_regions: bool = True,
+    include_internet_facing: bool = True,
+    confidence_decay_days: float = 14.0,
+    dry_run: bool = False,
 ) -> dict:
     """
     Pentest-aware topology build from all available project data sources.
@@ -1353,8 +1418,11 @@ def _run_smart_build(
     new_auto_edges = []
     seen_keys = set(manual_keys)
     edges_added = 0
+    edges_by_source: dict[str, int] = {}
+    edges_stale = 0
 
     def _add_edge(from_nid: str, to_nid: str, edge_data: dict) -> bool:
+        nonlocal edges_stale
         if not from_nid or not to_nid or from_nid == to_nid:
             return False
         key = (from_nid, to_nid)
@@ -1366,8 +1434,15 @@ def _run_smart_build(
             return False
         seen_keys.add(key)
         seen_keys.add(rkey)
+        src_key = str(edge_data.get("source") or "auto")
+        edges_by_source[src_key] = edges_by_source.get(src_key, 0) + 1
+        if edge_data.get("state") == "stale":
+            edges_stale += 1
         new_auto_edges.append({"id": new_id("edg"), "from": from_nid, "to": to_nid, **edge_data})
         return True
+
+    # L2: pairs written by P1 cred_validation — used to dedup P3 host_activity.
+    p1_access_pairs: set[tuple[str, str, str]] = set()
 
     # Identify attacker nodes — via host records AND via nodes marked is_attacker directly
     attacker_hids = {h.id for h in all_hosts if h.is_attacker or (h.role or "").lower() == "attacker"}
@@ -1414,6 +1489,7 @@ def _run_smart_build(
                 "access_roles": roles,
             }):
                 edges_added += 1
+                p1_access_pairs.add((from_nid, target_nid, primary))
 
     # ── P2: Access edges from bulk_exec Jobs ──────────────────────────
     if include_access_edges:
@@ -1435,82 +1511,145 @@ def _run_smart_build(
             to_nid = hid_to_nid.get(tgt_hid)
             if not from_nid or not to_nid:
                 continue
+            decayed, stale = _decay_confidence(
+                1.0, getattr(job, "finished_at", "") or "", confidence_decay_days
+            )
             if _add_edge(from_nid, to_nid, {
                 "type": role, "label": role.replace("_", " "),
-                "confidence": 1.0, "source": "bulk_exec",
+                "confidence": round(decayed, 3), "source": "bulk_exec",
                 "reason": f"Bulk exec success: {job.title or 'exec'} via {role}",
-                "state": "observed", "verified": True, "is_manual": False,
+                "state": "stale" if stale else "observed",
+                "verified": True, "is_manual": False,
+                "ts": getattr(job, "finished_at", "") or "",
             }):
                 edges_added += 1
 
     # ── P3: Host activity evidence edges (incl. C2 sessions) ─────────
+    # Multi-hop routing: sessions chain through earlier sessions in the same
+    # scope (first session in a scope becomes the local "pivot" for later ones).
+    # Fallback order per session host:
+    #   1. earliest session in the SAME scope (sessions_by_scope)
+    #   2. scope.via_host_id (explicit pivot)
+    #   3. _find_pivot_host auto-detection in entry scopes
+    #   4. attacker_nids[0] direct
     if include_access_edges and attacker_nids:
         _exec_types = {"exec", "postex", "lateral", "c2"}
         _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral", "c2": "c2_session"}
         acts = db.query(models.HostActivity).filter(
             models.HostActivity.pid == pid,
             models.HostActivity.status == "done",
-        ).all()
+            models.HostActivity.activity_type.in_(_exec_types),
+        ).order_by(models.HostActivity.ts.asc()).all()
 
-        # Pre-build: for each non-entry scope, find its auto-detected pivot host node.
-        # C2 session edges route through the pivot rather than directly from the attacker,
-        # showing the actual path: attacker → junction_device → compromised_host.
         entry_gw_ips: set[str] = {
             sr.get("gateway_ip", "") for sr in scope_region_defs if sr.get("is_entry")
         }
-        _c2_pivot_by_cidr: dict[str, str] = {}  # cidr → node_id of pivot host
-        for sr in scope_region_defs:
-            if sr.get("is_entry") or sr.get("via_host_id"):
-                continue
-            ph = _find_pivot_host(sr["net_obj"], scope_region_defs, hosts_meta, entry_gw_ips)
-            if ph:
-                pnid = hid_to_nid.get(ph["id"])
-                if pnid:
-                    _c2_pivot_by_cidr[sr["cidr"]] = pnid
 
-        def _pivot_nid_for(target_host_id: str) -> str | None:
-            """Return the junction-device node_id the target is reachable through, if any."""
-            th = next((h for h in hosts_meta if h["id"] == target_host_id), None)
-            if not th or not th.get("ip"):
+        def _scope_for_ip(ip: str) -> dict | None:
+            if not ip:
                 return None
             for sr in scope_region_defs:
-                if sr.get("is_entry"):
-                    continue
-                if _ip_in_network(th["ip"], sr["net_obj"]):
-                    return _c2_pivot_by_cidr.get(sr["cidr"])
+                if _ip_in_network(ip, sr["net_obj"]):
+                    return sr
             return None
 
+        # Cache auto-junction node per non-entry scope (computed lazily once)
+        _auto_pivot_by_cidr: dict[str, str | None] = {}
+
+        def _auto_pivot_nid(sr: dict) -> str | None:
+            cidr = sr["cidr"]
+            if cidr in _auto_pivot_by_cidr:
+                return _auto_pivot_by_cidr[cidr]
+            ph = _find_pivot_host(sr["net_obj"], scope_region_defs, hosts_meta, entry_gw_ips)
+            nid = hid_to_nid.get(ph["id"]) if ph else None
+            _auto_pivot_by_cidr[cidr] = nid
+            return nid
+
+        # Track sessions established per scope (ts-ordered).
+        sessions_by_scope: dict[str, list[dict]] = {}
+
         for act in acts:
-            if act.activity_type not in _exec_types:
-                continue
             target_nid = hid_to_nid.get(act.host_id)
             if not target_nid:
                 continue
             etype = _type_map.get(act.activity_type, "shell")
+            target_host = next((h for h in hosts_meta if h["id"] == act.host_id), None)
+            target_ip = (target_host or {}).get("ip") or ""
+            target_scope = _scope_for_ip(target_ip)
+            target_cidr = target_scope["cidr"] if target_scope else ""
 
-            if act.activity_type == "c2":
-                # Route C2 session through junction device when the target lives
-                # in a remote scope behind a VPN-GW / pivot host.
-                pivot_nid = _pivot_nid_for(act.host_id)
-                from_nid = pivot_nid if pivot_nid else attacker_nids[0]
-            else:
+            # ── Compute previous hop (from_nid) ──
+            from_nid: str | None = None
+            route_reason = ""
+
+            if target_scope and not target_scope.get("is_entry"):
+                # 1. Earlier session in the same scope (sort already ASC by ts)
+                for prev in sessions_by_scope.get(target_cidr, []):
+                    if prev["host_id"] != act.host_id:
+                        from_nid = prev["target_nid"]
+                        route_reason = (
+                            f"via earlier session on "
+                            f"{prev['hostname'] or prev['host_id']}"
+                        )
+                        break
+                # 2. via_host_id pivot configured on the scope
+                if not from_nid and target_scope.get("via_host_id"):
+                    via_nid = hid_to_nid.get(target_scope["via_host_id"])
+                    if via_nid and via_nid != target_nid:
+                        from_nid = via_nid
+                        route_reason = f"via scope.via_host {target_scope['via_host_id']}"
+                # 3. Auto-detected junction host (router/VPN-GW)
+                if not from_nid:
+                    auto_nid = _auto_pivot_nid(target_scope)
+                    if auto_nid and auto_nid != target_nid:
+                        from_nid = auto_nid
+                        route_reason = "via auto-detected junction"
+
+            # 4. Fallback: direct from attacker
+            if not from_nid:
                 from_nid = attacker_nids[0]
+                route_reason = route_reason or "direct from attacker"
 
             if from_nid == target_nid:
                 continue
-            # C2 session edges are auto-inferred (rebuilt each smart-build).
-            # Other activity types (exec/lateral) are observed/verified.
+
+            # L2: skip if P1 cred_validation already wrote a verified edge
+            #     for the same (attacker, target, role) tuple.
+            if (from_nid, target_nid, etype) in p1_access_pairs:
+                # still record session so later hosts can chain through it
+                if target_cidr:
+                    sessions_by_scope.setdefault(target_cidr, []).append({
+                        "host_id": act.host_id, "target_nid": target_nid,
+                        "ts": act.ts or "",
+                        "hostname": (target_host or {}).get("hostname", ""),
+                    })
+                continue
+
             is_c2 = act.activity_type == "c2"
+            decayed, stale = _decay_confidence(0.9, act.ts or "", confidence_decay_days)
             if _add_edge(from_nid, target_nid, {
                 "type": etype, "label": etype.replace("_", " "),
-                "confidence": 0.9,
+                "confidence": round(decayed, 3),
                 "source": "auto" if is_c2 else "host_activity",
-                "reason": f"Host activity: {act.title or act.activity_type} [{act.ts}]",
-                "state": "inferred" if is_c2 else "observed",
-                "verified": False if is_c2 else True,
+                "reason": (
+                    f"Host activity: {act.title or act.activity_type} "
+                    f"[{act.ts}] — {route_reason}"
+                ),
+                "state": "stale" if stale else ("inferred" if is_c2 else "observed"),
+                "verified": False if (is_c2 or stale) else True,
                 "is_manual": False,
+                "ts": act.ts or "",
             }):
                 edges_added += 1
+
+            # Record this session so subsequent sessions in the same scope
+            # can chain through it.
+            if target_cidr:
+                sessions_by_scope.setdefault(target_cidr, []).append({
+                    "host_id": act.host_id, "target_nid": target_nid,
+                    "ts": act.ts or "",
+                    "hostname": (target_host or {}).get("hostname", ""),
+                })
 
     # ── P4: Domain membership edges (DC → members) ───────────────────
     if include_domain_edges:
@@ -1557,7 +1696,10 @@ def _run_smart_build(
             for item in scope_region_defs
             if item.get("gateway_ip")
         }
-        for link in infer_links_smart(hosts_meta, manual_gateway_by_subnet):
+        isolated_subnets = {
+            sr["cidr"] for sr in scope_region_defs if sr.get("via_host_id")
+        }
+        for link in infer_links_smart(hosts_meta, manual_gateway_by_subnet, isolated_subnets):
             src_nid = ip_to_nid.get(link.source_ip)
             dst_nid = ip_to_nid.get(link.target_ip)
             if not src_nid or not dst_nid:
@@ -1634,16 +1776,77 @@ def _run_smart_build(
             }):
                 edges_added += 1
 
+    # ── P13: Internet-facing virtual node + edges ─────────────────────
+    if include_internet_facing:
+        public_hosts: list[dict] = []
+        for h in hosts_meta:
+            tags = {t.lower() for t in (h.get("tags") or [])}
+            ip = h.get("ip") or ""
+            if h.get("is_attacker"):
+                continue
+            if tags & _PUBLIC_TAGS or (ip and not _is_rfc1918(ip)):
+                public_hosts.append(h)
+
+        if public_hosts:
+            inet_node = next(
+                (n for n in existing_nodes if n.get("id") == "vn-internet"),
+                None,
+            )
+            if not inet_node:
+                attacker_n = next((n for n in existing_nodes if n.get("is_attacker")), None)
+                base_x = (attacker_n.get("x", 0) - 200.0) if attacker_n else -200.0
+                base_y = (attacker_n.get("y", 0) - 180.0) if attacker_n else -120.0
+                inet_node = {
+                    "id": "vn-internet", "host_id": "",
+                    "label": "Internet", "ip": "",
+                    "ips": [], "ports": [], "services": [],
+                    "subnet": "0.0.0.0/0",
+                    "status": "external", "role": "cloud",
+                    "type": "cloud", "notes": "",
+                    "is_attacker": False, "domain": "",
+                    "tags": ["virtual", "internet"],
+                    "x": base_x, "y": base_y,
+                    "manually_positioned": False, "auto_positioned": True,
+                    "virtual": True,
+                }
+                existing_nodes.append(inet_node)
+                node_by_id[inet_node["id"]] = inet_node
+                nodes_added += 1
+            inet_nid = inet_node["id"]
+            for h in public_hosts:
+                dst_nid = hid_to_nid.get(h["id"])
+                if not dst_nid:
+                    continue
+                tags = {t.lower() for t in (h.get("tags") or [])}
+                reason = (
+                    "tagged public/exposed"
+                    if tags & _PUBLIC_TAGS
+                    else f"public IP {h.get('ip')} (not in RFC1918)"
+                )
+                if _add_edge(inet_nid, dst_nid, {
+                    "type": "internet_facing", "label": "internet",
+                    "confidence": 0.9, "source": "internet_facing",
+                    "reason": reason,
+                    "state": "inferred", "verified": False, "is_manual": False,
+                }):
+                    edges_added += 1
+
     # ── Regions from scope CIDRs ──────────────────────────────────────
     regions_added = 0
     if include_regions and scope_region_defs:
         existing_regions = get_regions(network.id, db)
         existing_region_notes = {r.get("note", "") for r in existing_regions}
 
+        # Index existing regions by their CIDR note so we can refresh
+        # color/zone_type/via_host_id when a scope is reclassified (e.g.
+        # acquires a pivot after a PivotObservation is added).
+        existing_region_by_note = {
+            (r.get("note") or "").strip(): r
+            for r in existing_regions if r.get("note")
+        }
+
         for sr in scope_region_defs:
             cidr_str = sr["cidr"]
-            if cidr_str in existing_region_notes:
-                continue
             net_obj = sr["net_obj"]
             in_scope_hosts = [
                 h for h in hosts_meta
@@ -1665,21 +1868,47 @@ def _run_smart_build(
             max_x = max(p[0] for p in node_positions) + 160 + pad
             max_y = max(p[1] for p in node_positions) + 100 + pad
             in_scope = sr["in_scope"]
-            scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope)
+            via_host_id = sr.get("via_host_id", "")
+            scope_stroke, scope_fill = _scope_region_colors(cidr_str, in_scope, via_host_id)
+            via_host_label = ""
+            if via_host_id:
+                via_h = next((h for h in hosts_meta if h["id"] == via_host_id), None)
+                via_host_label = (via_h or {}).get("hostname") or (via_h or {}).get("ip") or via_host_id[:8]
+            label = (
+                f"{sr['description'] or cidr_str} (via {via_host_label})"
+                if via_host_id else (sr["description"] or cidr_str)
+            )
+            zone_type = "scope_pivot" if via_host_id else "scope"
+
+            existing_r = existing_region_by_note.get(cidr_str)
+            if existing_r:
+                # Refresh visual + meta on the existing region (don't touch
+                # x/y/w/h if user has manually adjusted them — keep geometry).
+                existing_r["fill"] = scope_fill
+                existing_r["stroke"] = scope_stroke
+                existing_r["zone_type"] = zone_type
+                existing_r["label"] = label
+                if via_host_id:
+                    existing_r["via_host_id"] = via_host_id
+                elif "via_host_id" in existing_r:
+                    existing_r.pop("via_host_id", None)
+                existing_r["updated_at"] = ts_now()
+                continue
+
             region_entry: dict = {
                 "id": new_id("r"),
                 "x": min_x, "y": min_y,
                 "w": max_x - min_x, "h": max_y - min_y,
-                "label": sr["description"] or cidr_str,
+                "label": label,
                 "note": cidr_str,
                 "fill": scope_fill,
                 "stroke": scope_stroke,
-                "zone_type": "scope",
+                "zone_type": zone_type,
                 "updated_at": ts_now(),
                 "version": 1,
             }
-            if sr.get("via_host_id"):
-                region_entry["via_host_id"] = sr["via_host_id"]
+            if via_host_id:
+                region_entry["via_host_id"] = via_host_id
             existing_regions.append(region_entry)
             regions_added += 1
 
@@ -1786,6 +2015,27 @@ def _run_smart_build(
                     node["zone_type"] = region.get("zone_type")
                     break
 
+    build_ts = ts_now()
+    existing_meta["last_smart_build"] = build_ts
+    existing_meta["last_smart_build_breakdown"] = dict(edges_by_source)
+
+    result = {
+        "ok": True,
+        "nodes_total": len(existing_nodes),
+        "nodes_added": nodes_added,
+        "nodes_updated": nodes_updated,
+        "edges_added": edges_added,
+        "edges_stale": edges_stale,
+        "edges_by_source": dict(edges_by_source),
+        "regions_added": regions_added,
+        "last_smart_build": build_ts,
+        "dry_run": dry_run,
+    }
+
+    if dry_run:
+        db.rollback()
+        return result
+
     replace_nodes(network.id, network.pid, existing_nodes, db)
     replace_edges(network.id, network.pid, manual_edges + new_auto_edges, db)
     network.meta_json = existing_meta
@@ -1794,17 +2044,10 @@ def _run_smart_build(
     result_net = schemas.Network.from_orm_obj(network)
     bcast(pid, "network", "layout_applied", {
         "network": result_net.model_dump(),
-        "updated_at": ts_now(),
+        "updated_at": build_ts,
     })
 
-    return {
-        "ok": True,
-        "nodes_total": len(existing_nodes),
-        "nodes_added": nodes_added,
-        "nodes_updated": nodes_updated,
-        "edges_added": edges_added,
-        "regions_added": regions_added,
-    }
+    return result
 
 
 class SmartBuildRequest(BaseModel):
@@ -1814,6 +2057,9 @@ class SmartBuildRequest(BaseModel):
     include_domain_edges: bool = True
     include_subnet_edges: bool = True
     include_regions: bool = True
+    include_internet_facing: bool = True
+    confidence_decay_days: float = 14.0
+    dry_run: bool = False
 
 
 @router.post("/smart-build", dependencies=[Depends(require_topo_apply)])
@@ -1846,6 +2092,9 @@ def topology_smart_build(
         include_domain_edges=body.include_domain_edges,
         include_subnet_edges=body.include_subnet_edges,
         include_regions=body.include_regions,
+        include_internet_facing=body.include_internet_facing,
+        confidence_decay_days=body.confidence_decay_days,
+        dry_run=body.dry_run,
     )
     if not result.get("ok"):
         err = result.get("error", "Smart build failed")
