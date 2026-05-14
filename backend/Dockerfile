@@ -4,6 +4,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     netcat-openbsd \
     util-linux \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libffi8 \
+    libjpeg62-turbo \
+    libopenjp2-7 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

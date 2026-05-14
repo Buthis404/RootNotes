@@ -692,7 +692,7 @@ from .routers import (
     scans, webhooks, c2, jobs, bulk_actions, playbooks, notifications,
     scheduled_playbooks, domains,
     ai, import_scanners, attack_graph, kb, collections, pivots,
-    import_bloodhound, mitre,
+    import_bloodhound, mitre, report,
 )
 
 app.include_router(auth.router)
@@ -738,6 +738,7 @@ app.include_router(collections.router)
 app.include_router(pivots.router)
 app.include_router(import_bloodhound.router)
 app.include_router(mitre.router)
+app.include_router(report.router)
 
 
 @app.get("/api/worker/status", tags=["worker"])
