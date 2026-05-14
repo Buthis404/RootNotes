@@ -12,7 +12,7 @@ const NODE_TYPES = {
   goal:     { label: 'Goal',      color: '#39d353', icon: 'target' },
 };
 
-const EMPTY_STEP = { node_type: 'host', label: '', sublabel: '', technique: '', mitre_id: '', notes: '' };
+const EMPTY_STEP = { host_id: null, node_type: 'host', label: '', sublabel: '', technique: '', mitre_id: '', notes: '' };
 
 // ── Step edit modal ───────────────────────────────────────────────────
 function StepModal({ step, isNew, onSave, onClose, accent, hosts = [] }) {
@@ -28,9 +28,10 @@ function StepModal({ step, isNew, onSave, onClose, accent, hosts = [] }) {
 
   const pickHost = e => {
     const hostId = e.target.value;
-    if (!hostId) return;
+    if (!hostId) { set('host_id', null); return; }
     const host = hosts.find(h => h.id === hostId);
     if (!host) return;
+    set('host_id', hostId);
     set('label', host.hostname || host.ip || '');
     set('sublabel', [host.os, host.role].filter(Boolean).join(' · ') || host.ip || '');
     // Auto-set node type based on host role/hostname
@@ -61,11 +62,11 @@ function StepModal({ step, isNew, onSave, onClose, accent, hosts = [] }) {
                 Link to host <span style={{ color: '#353840', textTransform: 'none', letterSpacing: 0 }}>(auto-fills label & sublabel)</span>
               </div>
               <select
-                defaultValue=""
+                value={form.host_id || ""}
                 onChange={pickHost}
-                style={{ width: '100%', background: '#07080b', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#d0d4dc', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', cursor: 'pointer' }}
+                style={{ width: '100%', background: '#07080b', border: `1px solid ${form.host_id ? '#2a5a8a' : '#2a2d35'}`, borderRadius: 5, padding: '7px 10px', color: '#d0d4dc', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', cursor: 'pointer' }}
               >
-                <option value="">— pick a host to auto-fill —</option>
+                <option value="">— link to host (optional) —</option>
                 {hosts.map(h => (
                   <option key={h.id} value={h.id}>
                     {h.hostname || h.ip} {h.ip && h.hostname ? `(${h.ip})` : ''} {h.os ? `· ${h.os}` : ''}
