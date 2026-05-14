@@ -1,5 +1,81 @@
 # RootNotes — Changelog
 
+## v0.2.2 — 2026-05-14
+
+### Smart Build — Access graph deepening
+
+#### Multi-hop session routing (P11)
+- Sessions in pivot-only networks now render as the real chain `attacker → entry-gw → pivot → target` instead of a star from the attacker
+- For each `HostActivity` (exec/postex/lateral/c2, status=done) ordered by `ts ASC`, the edge source is resolved in priority order:
+  1. Earliest existing session in the same scope becomes the local pivot for subsequent ones
+  2. `scope.via_host_id` (explicit pivot)
+  3. Auto-junction host (router/VPN-GW) in the entry scope, discovered by role/tag/keyword
+  4. Direct from attacker (fallback)
+- Applies to all activity types, not only c2
+- Routing reason is recorded in `edge.reason` ("via earlier session on …", "via scope.via_host …", "via auto-detected junction", "direct from attacker")
+
+#### Pivot ↔ Scope automation
+- Creating a `PivotObservation` (UI Add Pivot, PATCH update, or SSH collector) with a non-empty `route_cidr` auto-creates or refreshes a `Scope` with `value=<CIDR>`, `via_host_id=<pivot_host_id>`, `description="auto: via pivot <hid>"`
+- Idempotent: an existing scope with the same CIDR only gets `via_host_id` set when it was previously empty (manually configured scopes are preserved)
+- On pivot deletion: if the deleted pivot was the last one for the `(CIDR, host)` pair and the scope description still starts with `auto: via pivot`, the scope is removed automatically
+
+#### Pivot-only scope regions and traffic isolation
+- `infer_links_smart` gained an `isolated_subnets` parameter — inter-subnet LAN gateway↔gateway edges are skipped for any scope with `via_host_id` (connectivity is only through the pivot, never through the scope's own local gateway)
+- Pivot-only scope regions get an orange fill (`#f09a3a` / `#f09a3a18`), `zone_type=scope_pivot`, and label `<desc> (via <pivot-hostname>)`
+- Existing regions are refreshed in place when a scope is reclassified (user geometry is preserved; color/zone_type/via_host_id sync to current state)
+- Hosts inside pivot regions inherit `node.zone_type=scope_pivot` and render the orange zone badge in the UI
+
+#### L2/L3 — dedup and multi-homed hosts
+- L2: P3 host_activity skips an edge when P1 cred_validation already drew one for the same `(attacker, target, access_role)` tuple (avoids double ssh edges)
+- L3: `infer_links_smart` buckets each host into every subnet derived from `host.ips[]` — multi-homed gateways now appear in all of their subnets
+
+#### L4/L5 observability and L6 dry-run
+- L4: the smart-build API result returns `edges_by_source: {<source>: count}` — a breakdown across cred_validation / bulk_exec / host_activity / auto / scope_via / internet_facing
+- L5: `meta_json.last_smart_build` (ISO timestamp) and `meta_json.last_smart_build_breakdown` are persisted on the network; the UI shows a toast with the breakdown after each build
+- L6: `SmartBuildRequest.dry_run=True` runs the full pipeline and rolls back without commit/broadcast — useful for previewing the diff
+
+#### P12 — Confidence decay
+- Exponential confidence decay for bulk_exec edges (using `Job.finished_at`) and host_activity edges (using `HostActivity.ts`) with τ=14d (configurable via `confidence_decay_days`)
+- Edges with `c < 0.4` are tagged `state="stale"` and rendered in grey dotted style so stale credential proofs no longer mislead operators
+
+#### P13 — Internet-facing edges
+- A virtual `vn-internet` node is auto-created whenever the project has hosts tagged `public / exposed / internet / internet-facing / edge / dmz-public`, or with non-RFC1918 IP addresses
+- Edges of type `internet_facing` from that node to each public-facing host, rendered orange-red dashed
+- Controlled by `SmartBuildRequest.include_internet_facing` (default true)
+
+### Hosts — status validation fix
+- The B6-scale WIP added a Pydantic validator for `Host.status` restricted to `{unknown, up, down, pwned, unreachable, attacker, access, compromised}`, but the frontend (`NODE_STATUS` in `constants.js`) emits `{unknown, alive, scanned, access, pwned, owned}` — creating a host or changing status from the UI returned 422 for any value outside the three-way intersection
+- `_HOST_STATUSES` is expanded to the union of both sets plus back-compat aliases — all six dropdown statuses are now accepted by both `HostCreate` and `HostUpdate`
+
+### B6 — Network data split (Alembic 002–005)
+- Network data (nodes/edges/regions) moved out of JSON columns into dedicated tables `network_nodes`, `network_edges`, `network_regions` — removes the ≈1 MB serialized-JSON ceiling and the rewrite-the-whole-blob-per-change overhead
+- New `backend/app/core/network_data.py` helpers (`get_nodes / get_edges / get_regions / replace_nodes / replace_edges / replace_regions`) — single read/write boundary for all routers
+- Alembic migrations:
+  - **002** creates the three tables, indexes, and back-fills them from the existing `regions_json/nodes_json/edges_json`
+  - **003** adds FK / CASCADE constraints
+  - **004** fixes `network_nodes.ports` / `services` column types (`ARRAY` instead of `JSONB`)
+  - **005** converts `network_edges.confidence` from `INTEGER` to `DOUBLE PRECISION` (fixes the `int(0.9) → 0` rounding that made every inferred edge land at confidence 0) and adds `network_regions.extra_json`
+- All routers (`hosts`, `creds`, `networks`, `network_map`, `topology`, `pivots`, `attack_paths`, `attack_graph`, `bulk_actions`, `attacker_exec`, `c2`, `findings`, `loots`, `notes`, `objectives`, `templates`, `project_templates`, `webhooks`, `system_modules`, `import_bloodhound`, `import_export`, `scans`, `search`) migrated to the helpers
+
+### B0-1 — Alembic schema management
+- Database schema management moved from ad-hoc `CREATE TABLE` / `ALTER TABLE` blocks in `main.py` to Alembic
+- Base revision `001_full_schema.py` — snapshot of the current production schema for fresh installs
+- Backend startup now runs `alembic upgrade head` automatically
+- `alembic` and dependencies added to the backend Dockerfile
+
+### P3 — FTS Search rewrite
+- GIN functional indexes on `hosts / creds / notes / findings / kb_articles / custom_snippets`
+- Search uses `websearch_to_tsquery` + `ts_rank_cd` for a single ranking across object types
+- Snippets via `ts_headline` with `<b>` HTML markers for highlight
+- Pagination through an `offset` query parameter plus a "Load More" button in the frontend
+- `kb` and `snippet` object types added to the global search
+- `SnippetText` renders highlighted HTML safely through `dangerouslySetInnerHTML`
+
+### SSH askpass — regression fix
+- `ssh_exec.py`: when `sshpass` / askpass-helper was used the password was read from the wrong slot of the new credential object, causing auth failures after the credential schema migration
+
+---
+
 ## v0.2.0 — 2026-05-13
 
 ### SSH Pivot — исправление зависания агента при скане через SOCKS-прокси
