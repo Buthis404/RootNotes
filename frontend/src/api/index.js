@@ -171,6 +171,10 @@ export const api = {
   deleteCustomSnippet: (id)         => req('DELETE', `/snippets/custom/${id}`),
   exportSnippets:      ()           => download('/snippets/export'),
   importSnippets:      (file)       => upload('/snippets/import', file),
+  exportKB:            (pid)        => download(`/kb/export${pid ? `?pid=${pid}` : ''}`),
+  importKB:            (file, pid)  => upload(`/kb/import${pid ? `?pid=${pid}` : ''}`, file),
+  exportPlaybooks:     ()           => download('/playbooks/custom/export'),
+  importPlaybooks:     (file)       => upload('/playbooks/custom/import', file),
 
   // BloodHound server-side import
   importBloodHound: (pid, file) => upload(`/projects/${pid}/import/bloodhound`, file),

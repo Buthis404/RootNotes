@@ -598,6 +598,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [scopes, setScopes] = useState([]);
   const [batchResult, setBatchResult] = useState(null);
   const [activeTab, setActiveTab] = useState('playbooks'); // 'playbooks' | 'scheduled'
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     if (!selectedProject) return;
@@ -794,6 +795,27 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
 
   if (!selectedProject) return <div style={{ padding: 40, color: '#6a7080', textAlign: 'center' }}>Select a project to work with playbooks</div>;
 
+  const exportPlaybooks = async () => {
+    try {
+      const blob = await api.exportPlaybooks();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `playbooks-export-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { setError(e.message); }
+  };
+
+  const importPlaybooks = async (file) => {
+    setImporting(true);
+    try {
+      await api.importPlaybooks(file);
+      await load();
+    } catch (e) { setError(e.message); }
+    finally { setImporting(false); }
+  };
+
   return (
     <div style={{ padding: '20px 24px', height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -803,7 +825,14 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={load} style={toolbarBtn(accent, false)}>Refresh</button>
-          {activeTab === 'playbooks' && <button onClick={startCreate} style={toolbarBtn(accent, true)}>New custom playbook</button>}
+          {activeTab === 'playbooks' && <>
+            <label style={{ ...toolbarBtn(accent, false), cursor: importing ? 'wait' : 'pointer', opacity: importing ? 0.7 : 1, display: 'inline-flex', alignItems: 'center' }}>
+              {importing ? 'Importing…' : 'Import'}
+              <input type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && importPlaybooks(e.target.files[0])} disabled={importing} />
+            </label>
+            <button onClick={exportPlaybooks} style={toolbarBtn(accent, false)}>Export</button>
+            <button onClick={startCreate} style={toolbarBtn(accent, true)}>New custom playbook</button>
+          </>}
         </div>
       </div>
 
