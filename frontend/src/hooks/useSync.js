@@ -25,8 +25,7 @@ export function useSync(pid, username, onEvent, onPresence) {
   const connect = useCallback(() => {
     if (deadRef.current || !pid) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const token = encodeURIComponent(localStorage.getItem('rt_token') || '');
-    const url = `${proto}://${location.host}/ws/${pid}?token=${token}`;
+    const url = `${proto}://${location.host}/ws/${pid}`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
 

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, Text, ARRAY, Integer, ForeignKey
+from sqlalchemy import Column, String, Boolean, Text, ARRAY, Integer, Float, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from .database import Base
 
@@ -101,9 +101,6 @@ class Network(Base):
     pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False, default="Network")
     background = Column(String, nullable=False, default="#07080b")
-    regions_json = Column(JSONB, nullable=False, default=[])
-    nodes_json = Column(JSONB, nullable=False, default=[])
-    edges_json = Column(JSONB, nullable=False, default=[])
     meta_json = Column(JSONB, nullable=False, default={})
 
 
@@ -464,3 +461,73 @@ class SavedSearch(Base):
     query = Column(String, nullable=False)
     pid = Column(String, nullable=True)
     created_at = Column(String, nullable=False)
+
+
+class NetworkNode(Base):
+    __tablename__ = "network_nodes"
+
+    id = Column(String, primary_key=True)
+    network_id = Column(String, ForeignKey("networks.id", ondelete="CASCADE"), nullable=False)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    host_id = Column(String, nullable=True)
+    x = Column(Float, nullable=False, default=0)
+    y = Column(Float, nullable=False, default=0)
+    label = Column(String, nullable=False, default="")
+    ip = Column(String, nullable=False, default="")
+    ips = Column(ARRAY(String), nullable=False, default=list)
+    type = Column(String, nullable=False, default="host")
+    status = Column(String, nullable=False, default="unknown")
+    ports = Column(ARRAY(String), nullable=False, default=list)
+    notes = Column(Text, nullable=False, default="")
+    role = Column(String, nullable=False, default="")
+    os = Column(String, nullable=False, default="")
+    tags = Column(ARRAY(String), nullable=False, default=list)
+    is_attacker = Column(Boolean, nullable=False, default=False)
+    manually_positioned = Column(Boolean, nullable=False, default=False)
+    auto_positioned = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(String, nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    extra_json = Column(JSONB, nullable=False, default=dict)
+
+
+class NetworkEdge(Base):
+    __tablename__ = "network_edges"
+
+    id = Column(String, primary_key=True)
+    network_id = Column(String, ForeignKey("networks.id", ondelete="CASCADE"), nullable=False)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    from_node_id = Column(String, nullable=False)
+    to_node_id = Column(String, nullable=False)
+    style = Column(String, nullable=False, default="solid")
+    type = Column(String, nullable=False, default="network")
+    label = Column(String, nullable=False, default="")
+    confidence = Column(Float, nullable=False, default=1.0)
+    source = Column(String, nullable=False, default="manual")
+    reason = Column(String, nullable=False, default="")
+    state = Column(String, nullable=False, default="manual")
+    verified = Column(Boolean, nullable=False, default=False)
+    is_manual = Column(Boolean, nullable=False, default=True)
+    manual_override = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(String, nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    extra_json = Column(JSONB, nullable=False, default=dict)
+
+
+class NetworkRegion(Base):
+    __tablename__ = "network_regions"
+
+    id = Column(String, primary_key=True)
+    network_id = Column(String, ForeignKey("networks.id", ondelete="CASCADE"), nullable=False)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    x = Column(Float, nullable=False, default=0)
+    y = Column(Float, nullable=False, default=0)
+    w = Column(Float, nullable=False, default=200)
+    h = Column(Float, nullable=False, default=100)
+    label = Column(String, nullable=False, default="")
+    note = Column(Text, nullable=False, default="")
+    fill = Column(String, nullable=False, default="")
+    stroke = Column(String, nullable=False, default="")
+    zone_type = Column(String, nullable=False, default="")
+    updated_at = Column(String, nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    extra_json = Column(JSONB, nullable=False, default=dict)

@@ -2,7 +2,7 @@
  * Unified API re-export for backward compatibility.
  * Import from here or from individual domain modules.
  */
-import { req, upload, download, BASE, getToken } from './client.js';
+import { req, upload, download, BASE } from './client.js';
 
 export const api = {
   // Auth
@@ -12,6 +12,7 @@ export const api = {
   authMe:      ()         => req('GET',  '/auth/me'),
   authUpdateMe:(data)     => req('PATCH','/auth/me',      data),
   authChangePassword: (data) => req('POST', '/auth/change-password', data),
+  authLogout:  ()         => req('POST', '/auth/logout', undefined, false),
 
   // Admin
   adminListUsers:   ()          => req('GET',    '/admin/users'),
@@ -185,10 +186,7 @@ export const api = {
   // MITRE ATT&CK
   getMitreCoverage:  (pid) => req('GET', `/projects/${pid}/mitre/coverage`),
   downloadReportPDF: async (pid) => {
-    const token = getToken();
-    const res = await fetch(`/api/projects/${pid}/report/pdf`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
+    const res = await fetch(`/api/projects/${pid}/report/pdf`, { credentials: 'include' });
     if (!res.ok) throw new Error(`PDF generation failed: ${res.status}`);
     return res.blob();
   },
@@ -196,9 +194,7 @@ export const api = {
   // Batch import & project export/import
   batchImport:   (pid, data) => req('POST', `/import/${pid}`, data),
   exportProject: async (pid) => {
-    const res = await fetch(`/api/export/${pid}`, {
-      headers: { 'Authorization': `Bearer ${getToken()}` },
-    });
+    const res = await fetch(`/api/export/${pid}`, { credentials: 'include' });
     if (!res.ok) throw new Error(await res.text());
     const blob = await res.blob();
     const password = res.headers.get('X-Zip-Password') || null;
@@ -208,10 +204,9 @@ export const api = {
 
   // Topology
   topologyPreview: (pid, formData) => {
-    const token = localStorage.getItem('rt_token') || '';
     return fetch(`/api/projects/${pid}/topology/preview`, {
       method: 'POST', body: formData,
-      headers: { 'Authorization': `Bearer ${token}` },
+      credentials: 'include',
     }).then(async res => {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
@@ -360,11 +355,7 @@ export const api = {
   seedMitreKB:       ()               => req('POST', '/kb/seed/mitre'),
 };
 
-/** Append auth token to a /api/uploads/... download URL for use in <a href> links. */
+/** Returns the URL unchanged — cookie auth handles authentication for download links. */
 export function downloadUrl(url) {
-  if (!url) return url;
-  const token = getToken();
-  if (!token) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
+  return url || '';
 }

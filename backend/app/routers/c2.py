@@ -22,7 +22,7 @@ from ..core.deps import get_current_user, require_admin
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.logging_setup import get_logger
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import get_db, SessionLocal
 from ..plugins.registry import registry
 
@@ -455,7 +455,8 @@ async def _adaptix_sync(cfg: dict) -> dict:
             "process": (ctx_agent.get("a_process") or "").strip(),
             "pid": ctx_agent.get("a_pid"),
             "alive": t.get("t_alive", True),
-            "beacon_id": ",".join(agent_ids),
+            # beacon_id set only when there is at least one non-terminated agent
+            "beacon_id": ",".join(agent_ids) if ctx_agent else "",
             "note": "\n".join(note_parts),
             "source": "adaptix",
         })
@@ -480,7 +481,8 @@ async def _adaptix_sync(cfg: dict) -> dict:
             "process": (a.get("a_process") or "").strip(),
             "pid": a.get("a_pid"),
             "alive": alive,
-            "beacon_id": a.get("a_id") or "",
+            # beacon_id set only for non-terminated standalone agents
+            "beacon_id": (a.get("a_id") or "") if alive else "",
             "note": f"Listener: {a.get('a_listener', '')}" + (f"\nDomain: {domain}" if domain else ""),
             "source": "adaptix",
         })
@@ -1099,10 +1101,11 @@ async def _do_project_sync(cfg: dict, pid: str, db: Session, iid: str | None = N
 async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | None = None) -> dict:
     connector = _CONNECTORS.get(cfg["type"])
     data = await connector(cfg)
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     created_hosts, updated_hosts, created_creds = 0, 0, 0
     source = cfg["type"]
     host_objects = []
+    session_host_raw: list[tuple] = []  # (hobj, raw_h) for hosts with live sessions
 
     # ── Upsert hosts ─────────────────────────────────────────────────
     for h in data["hosts"]:
@@ -1169,6 +1172,10 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
             created_hosts += 1
             host_objects.append(hobj)
 
+        # Track hosts that have an actual live session signal
+        if _has_live_session_signal(h):
+            session_host_raw.append((host_objects[-1], h))
+
         # ── Auto-create cred for this session's user ─────────────────
         username = h.get("username", "").strip()
         if username:
@@ -1226,7 +1233,10 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
             created_creds += 1
 
     # ── Record C2 session as HostActivity so smart-build picks it up ─
-    for hobj in host_objects:
+    # Only hosts with an actual live session signal (beacon_id/agent_id/process/pid)
+    session_host_ids = {hobj.id for hobj, _ in session_host_raw}
+
+    for hobj, h in session_host_raw:
         try:
             existing_act = db.query(models.HostActivity).filter(
                 models.HostActivity.pid == pid,
@@ -1249,6 +1259,16 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 ))
         except Exception:
             pass
+
+    # Remove stale C2 HostActivity for hosts synced from this connector but no longer
+    # showing a live session signal (session ended / beacon gone)
+    stale_host_ids = {hobj.id for hobj in host_objects} - session_host_ids
+    if stale_host_ids:
+        db.query(models.HostActivity).filter(
+            models.HostActivity.pid == pid,
+            models.HostActivity.host_id.in_(stale_host_ids),
+            models.HostActivity.activity_type == "c2",
+        ).delete(synchronize_session=False)
 
     log_event(
         db, pid, None, "c2", "sync",
@@ -1539,7 +1559,7 @@ async def execute_host_action(
             summary=f"Executed via Adaptix on agent {body.agent_id}",
             output=output,
             status="done",
-            ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            ts=ts_now(),
         )
         db.add(activity)
         db.commit()

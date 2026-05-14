@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
-from ..core.utils import new_id, norm_text, list_default_finding_templates, list_default_snippets
+from ..core.utils import new_id, norm_text, list_default_finding_templates, list_default_snippets, ts_now
 
 router = APIRouter(tags=["templates"])
 
@@ -47,7 +47,7 @@ def create_custom_finding_template(body: schemas.FindingTemplateCreate, db: Sess
             norm_text(item.recommendation) == norm_text(incoming["recommendation"]),
         ]):
             raise HTTPException(409, "A custom finding template with the same content already exists")
-    item = models.FindingTemplate(id=new_id("ft"), created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"), **body.model_dump())
+    item = models.FindingTemplate(id=new_id("ft"), created_at=ts_now(), **body.model_dump())
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -94,7 +94,7 @@ async def import_finding_templates(file: UploadFile = File(...), db: Session = D
             id=new_id("ft"), title=item.get("title", ""), severity=item.get("severity", "medium"),
             cvss=item.get("cvss", ""), cve=item.get("cve", ""), description=item.get("description", ""),
             proof=item.get("proof", ""), recommendation=item.get("recommendation", ""),
-            created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            created_at=ts_now(),
         )
         db.add(obj)
         existing.append(obj)
@@ -137,7 +137,7 @@ def create_custom_snippet(body: schemas.CustomSnippetCreate, db: Session = Depen
             item_tags == incoming_tags,
         ]):
             raise HTTPException(409, "A custom snippet with the same content already exists")
-    item = models.CustomSnippet(id=new_id("snp"), created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"), **body.model_dump())
+    item = models.CustomSnippet(id=new_id("snp"), created_at=ts_now(), **body.model_dump())
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -210,7 +210,7 @@ async def import_snippets(file: UploadFile = File(...), db: Session = Depends(ge
         obj = models.CustomSnippet(
             id=new_id("snp"), title=item.get("title", ""), category=item.get("category", "Misc"),
             command=item.get("command", ""), tags=item.get("tags", []), opsec=item.get("opsec", ""),
-            created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            created_at=ts_now(),
         )
         db.add(obj)
         existing.append(obj)

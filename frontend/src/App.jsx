@@ -50,12 +50,9 @@ export default function App() {
 
   useEffect(() => {
     const doCheck = async () => {
-      const token = localStorage.getItem('rt_token');
       const status = await api.authStatus();
       if (!status.initialized) { setIsFirstRun(true); setAuthReady(true); return; }
-      if (token) {
-        try { const u = await api.authMe(); setCurrentUser(u); } catch { localStorage.removeItem('rt_token'); }
-      }
+      try { const u = await api.authMe(); setCurrentUser(u); } catch {}
       setAuthReady(true);
     };
     doCheck();
@@ -70,8 +67,8 @@ export default function App() {
     setCurrentUser(user);
     setIsFirstRun(false);
   };
-  const handleLogout = () => {
-    localStorage.removeItem('rt_token');
+  const handleLogout = async () => {
+    try { await api.authLogout(); } catch {}
     setCurrentUser(null);
     setError(null);
     setLoading(true);

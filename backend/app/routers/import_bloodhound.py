@@ -29,6 +29,7 @@ from .. import models
 from ..core.access import check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import log_event
+from ..core.network_data import get_edges, replace_edges
 from ..core.utils import new_id
 from ..database import get_db
 
@@ -416,12 +417,12 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
     if not network:
         network = models.Network(
             id=new_id("net"), pid=pid, name="Network Map",
-            background="#07080b", regions_json=[], nodes_json=[], edges_json=[], meta_json={},
+            background="#07080b", meta_json={},
         )
         db.add(network)
         db.flush()
 
-    existing_edges = list(network.edges_json or [])
+    existing_edges = get_edges(network.id, db)
     # Dedup against existing BH edges
     existing_pairs = {(e.get("from_host_id"), e.get("to_host_id"), e.get("type")) for e in existing_edges if e.get("from_host_id")}
     for e in new_edges:
@@ -431,8 +432,7 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
             existing_pairs.add(key)
             stats["edges_added"] += 1
 
-    network.edges_json = existing_edges
-    flag_modified(network, "edges_json")
+    replace_edges(network.id, network.pid, existing_edges, db)
     db.commit()
 
     return stats

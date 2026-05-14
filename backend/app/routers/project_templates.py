@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..core.deps import get_current_user
 from ..core.permissions import add_project_owner
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])

@@ -3,7 +3,6 @@ Bulk actions: run commands across multiple hosts, validate credentials.
 All operations require the attacker_ssh module to be enabled.
 """
 import asyncio
-from copy import deepcopy
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -21,7 +20,8 @@ from ..core import job_streams
 from ..core.crypto import decrypt_str, encrypt_str
 from ..core.permissions import get_membership, get_permissions_for_role
 from ..core.utils import domains_match
-from ..core.utils import new_id
+from ..core.network_data import get_nodes, get_edges, upsert_edge, replace_edges
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 from ..plugins.registry import registry
 from ..plugins.state import list_attacker_targets
@@ -201,7 +201,7 @@ async def bulk_exec(
         raise HTTPException(404, "No valid hosts found")
 
     exec_username = getattr(request.state, "username", None)
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     loop = asyncio.get_running_loop()
     results = []
     access_role = _infer_bulk_access_role(body.command_template)
@@ -556,8 +556,8 @@ def _enrich_access_graph(db: Session, pid: str, attacker_host_id: str | None, ta
     network = db.query(models.Network).filter(models.Network.pid == pid).order_by(models.Network.id).first()
     if not network:
         return None
-    nodes = deepcopy(network.nodes_json or [])
-    edges = deepcopy(network.edges_json or [])
+    nodes = get_nodes(network.id, db)
+    edges = get_edges(network.id, db)
     attacker_node = next((node for node in nodes if node.get("host_id") == attacker_host_id), None)
     target_node = next((node for node in nodes if node.get("host_id") == target_host.id), None)
     if not attacker_node or not target_node:
@@ -576,9 +576,9 @@ def _enrich_access_graph(db: Session, pid: str, attacker_host_id: str | None, ta
         existing["source"] = "manual"
         existing["is_manual"] = True
         existing["manual_override"] = True
-        existing["updated_at"] = datetime.utcnow().isoformat()
+        existing["updated_at"] = ts_now()
         existing["version"] = _edge_version(existing)
-        network.edges_json = edges
+        upsert_edge(network.id, network.pid, existing, db)
         db.commit()
         payload = {"network_id": network.id, "link": existing, "updated_at": existing["updated_at"]}
         bcast(pid, "network", "link_updated", payload)
@@ -598,11 +598,10 @@ def _enrich_access_graph(db: Session, pid: str, attacker_host_id: str | None, ta
         "verified": True,
         "is_manual": True,
         "manual_override": True,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": ts_now(),
         "version": 1,
     }
-    edges.append(edge)
-    network.edges_json = edges
+    upsert_edge(network.id, network.pid, edge, db)
     db.commit()
     payload = {"network_id": network.id, "link": edge, "updated_at": edge["updated_at"]}
     bcast(pid, "network", "link_created", payload)
@@ -653,7 +652,7 @@ def _apply_host_enrichment(db: Session, pid: str, host: models.Host, enrichment:
 def _apply_cred_enrichment(db: Session, pid: str, enrichment: dict) -> list[dict]:
     """Save newly discovered credentials from parsed output. Returns list of saved cred dicts."""
     saved = []
-    from ..core.utils import new_id as _new_id
+    from ..core.utils import new_id as _new_id, ts_now
 
     for c in enrichment.get("creds", []):
         username = (c.get("username") or "").strip()
@@ -738,7 +737,7 @@ async def validate_cred(
         raise HTTPException(404, "No valid hosts found")
 
     exec_username = getattr(request.state, "username", None)
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     loop = asyncio.get_running_loop()
     results = []
     validate_cfg_idx = 0  # transport fallback index for validate_cred

@@ -10,7 +10,7 @@ from .. import models, schemas
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
 from ..core.crypto import decrypt_str, encrypt_str, note_content_is_confidential
-from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root
+from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
@@ -140,7 +140,7 @@ async def upload_note_attachment(nid: str, file: UploadFile = File(...), db: Ses
         file_size=len(content),
         storage_path=str(disk_path),
         public_url=f"/api/uploads/{note.pid}/{nid}/{disk_name}",
-        ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        ts=ts_now(),
     )
     db.add(attachment)
     db.commit()

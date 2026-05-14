@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
@@ -10,6 +10,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, get_user_member_pids
+from ..core.limiter import limiter
 
 router = APIRouter(tags=["search"])
 
@@ -73,7 +74,9 @@ def _host_related(h, db) -> list:
 
 
 @router.get("/api/search")
+@limiter.limit("60/minute")
 def search(
+    request: Request,
     q: str = "",
     pid: str = "",
     limit: int = 40,

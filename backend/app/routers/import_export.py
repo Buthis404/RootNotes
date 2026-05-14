@@ -17,9 +17,10 @@ from .. import models, schemas
 from ..core.crypto import decrypt_str, encrypt_str, loot_value_is_sensitive, note_content_is_confidential
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast
-from ..core.utils import new_id, normalize_domain, ensure_under_upload_root, sync_project_ip_from_scopes, sync_scopes_from_project_ip
+from ..core.utils import new_id, normalize_domain, ensure_under_upload_root, sync_project_ip_from_scopes, sync_scopes_from_project_ip, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
+from ..core.network_data import get_nodes, get_edges, get_regions, replace_nodes, replace_edges, replace_regions
 from ..core.permissions import add_project_owner, get_membership, get_permissions_for_role
 
 router = APIRouter(tags=["import-export"])
@@ -93,7 +94,13 @@ def export_project(
             "host_ids": c.host_ids or [], "is_domain": c.is_domain,
         } for c in creds], ensure_ascii=False))
 
-        nets_out = [schemas.Network.from_orm_obj(n).model_dump() for n in networks]
+        nets_out = []
+        for n in networks:
+            nd = schemas.Network.from_orm_obj(n).model_dump()
+            nd["nodes"] = get_nodes(n.id, db)
+            nd["edges"] = get_edges(n.id, db)
+            nd["regions"] = get_regions(n.id, db)
+            nets_out.append(nd)
         zf.writestr("networks.json", json.dumps(nets_out, ensure_ascii=False))
 
         zf.writestr("findings.json", json.dumps([{
@@ -249,7 +256,13 @@ def export_project(
             "host_ids": c.host_ids or [], "is_domain": c.is_domain,
         } for c in creds], ensure_ascii=False))
 
-        nets_out = [schemas.Network.from_orm_obj(n).model_dump() for n in networks]
+        nets_out = []
+        for n in networks:
+            nd = schemas.Network.from_orm_obj(n).model_dump()
+            nd["nodes"] = get_nodes(n.id, db)
+            nd["edges"] = get_edges(n.id, db)
+            nd["regions"] = get_regions(n.id, db)
+            nets_out.append(nd)
         zf.writestr("networks.json", json.dumps(nets_out, ensure_ascii=False))
 
         zf.writestr("findings.json", json.dumps([{
@@ -372,7 +385,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
             ip=project_data.get("ip", ""),
             os=project_data.get("os", "Unknown"),
             status=project_data.get("status", "active"),
-            added=datetime.utcnow().strftime("%Y-%m-%d"),
+            added=ts_now(),
             description=project_data.get("description", ""),
         )
         db.add(project)
@@ -420,7 +433,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 content_type=att.get("content_type", "application/octet-stream"),
                 file_size=att.get("file_size", 0),
                 storage_path=str(disk_path), public_url=new_url,
-                ts=att.get("ts", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
+                ts=att.get("ts", ts_now()),
             ))
 
         for obj in note_objs:
@@ -462,15 +475,20 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
             ))
 
         for net in nets_data:
+            net_id = new_id("net")
             db.add(models.Network(
-                id=new_id("net"), pid=new_pid,
+                id=net_id, pid=new_pid,
                 name=net.get("name", "Network"),
                 background=net.get("background", "#07080b"),
-                regions_json=net.get("regions", []),
-                nodes_json=net.get("nodes", []),
-                edges_json=net.get("edges", []),
                 meta_json=net.get("meta", {}),
             ))
+            db.flush()
+            if net.get("nodes"):
+                replace_nodes(net_id, new_pid, net["nodes"], db)
+            if net.get("edges"):
+                replace_edges(net_id, new_pid, net["edges"], db)
+            if net.get("regions"):
+                replace_regions(net_id, new_pid, net["regions"], db)
 
         for f in findings_data:
             old_hid = f.get("host_id")
@@ -494,7 +512,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 status=o.get("status", "not_started"),
                 flag_value=o.get("flag_value", ""), captured_by=o.get("captured_by", ""),
                 captured_at=o.get("captured_at", ""),
-                ts=o.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
+                ts=o.get("ts", ts_now()),
             ))
 
         for a in host_activity_data:
@@ -506,7 +524,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 id=new_id("ha"), pid=new_pid, host_id=new_hid,
                 title=a.get("title", ""), activity_type=a.get("activity_type", "recon"),
                 command=a.get("command", ""), summary=a.get("summary", ""), output=a.get("output", ""),
-                status=a.get("status", "done"), ts=a.get("ts", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
+                status=a.get("status", "done"), ts=a.get("ts", ts_now()),
             ))
 
         path_id_map: dict[str, str] = {}
@@ -516,7 +534,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
             db.add(models.AttackPath(
                 id=new_apid, pid=new_pid,
                 name=ap.get("name", "Attack Path"), description=ap.get("description", ""),
-                ts=ap.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
+                ts=ap.get("ts", ts_now()),
             ))
         db.flush()
 
@@ -529,7 +547,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 step_order=s.get("step_order", 0), node_type=s.get("node_type", "host"),
                 label=s.get("label", ""), sublabel=s.get("sublabel", ""),
                 technique=s.get("technique", ""), mitre_id=s.get("mitre_id", ""),
-                notes=s.get("notes", ""), ts=s.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
+                notes=s.get("notes", ""), ts=s.get("ts", ts_now()),
             ))
 
         for l in loots_data:
@@ -564,7 +582,7 @@ async def import_project(file: UploadFile = File(...), db: Session = Depends(get
                 description=l.get("description", ""), source_path=source_path,
                 filename=filename, content_type=content_type, file_size=file_size,
                 storage_path=storage_path, public_url=public_url,
-                ts=l.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
+                ts=l.get("ts", ts_now()),
                 artifact_type=l.get("artifact_type", "file"),
                 tags=l.get("tags", []),
                 job_id=l.get("job_id", ""),

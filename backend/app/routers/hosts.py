@@ -1,7 +1,7 @@
 import ipaddress
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -9,7 +9,7 @@ from typing import List, Optional
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
-from ..core.utils import new_id, normalize_domain
+from ..core.utils import new_id, normalize_domain, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
@@ -18,17 +18,25 @@ router = APIRouter(prefix="/api/hosts", tags=["hosts"])
 
 @router.get("", response_model=list[schemas.Host])
 def list_hosts(
+    response: Response,
     pid: str | None = None,
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
     if pid:
         check_pid_access(db, pid, user, "hosts.read")
-        return [schemas.Host.model_validate(h) for h in db.query(models.Host).filter(models.Host.pid == pid).all()]
-    if user.role == "admin":
-        return [schemas.Host.model_validate(h) for h in db.query(models.Host).all()]
-    member_pids = get_user_member_pids(db, user)
-    return [schemas.Host.model_validate(h) for h in db.query(models.Host).filter(models.Host.pid.in_(member_pids)).all()]
+        q = db.query(models.Host).filter(models.Host.pid == pid)
+    elif user.role == "admin":
+        q = db.query(models.Host)
+    else:
+        member_pids = get_user_member_pids(db, user)
+        q = db.query(models.Host).filter(models.Host.pid.in_(member_pids))
+    total = q.count()
+    response.headers["X-Total-Count"] = str(total)
+    hosts = q.offset(offset).limit(limit).all()
+    return [schemas.Host.model_validate(h) for h in hosts]
 
 
 @router.post("", response_model=schemas.Host, status_code=201)
@@ -142,7 +150,7 @@ def bulk_import_hosts(body: BulkHostImportBody, request: Request, db: Session = 
     skipped = 0
 
     from datetime import datetime
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
 
     for ip in ips:
         if ip in existing_ips:

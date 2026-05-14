@@ -17,6 +17,7 @@ from ..database import get_db
 from .. import models
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
+from ..core.network_data import get_nodes, get_edges
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +188,8 @@ def get_attack_graph(
     attack_paths = db.query(models.AttackPath).filter(models.AttackPath.pid == pid).all()
     pivot_observations = db.query(models.PivotObservation).filter(models.PivotObservation.pid == pid).all()
     network = db.query(models.Network).filter(models.Network.pid == pid).order_by(models.Network.id).first()
-    network_nodes = list(network.nodes_json or []) if network else []
-    network_edges = list(network.edges_json or []) if network else []
+    network_nodes = get_nodes(network.id, db) if network else []
+    network_edges = get_edges(network.id, db) if network else []
     network_node_by_host_id = {
         str(node.get("host_id")): node
         for node in network_nodes

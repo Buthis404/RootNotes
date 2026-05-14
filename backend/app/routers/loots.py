@@ -8,7 +8,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
-from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root
+from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root, ts_now
 from ..core.artifact_extractor import sha256_bytes as _sha256
 from ..core.crypto import decrypt_str, encrypt_str, loot_value_is_sensitive
 from ..core.deps import get_current_user
@@ -69,7 +69,7 @@ def create_loot(body: schemas.LootCreate, request: Request, db: Session = Depend
     payload = body.model_dump()
     if loot_value_is_sensitive(payload.get("loot_type", ""), payload.get("artifact_type", ""), payload.get("filename", ""), "", payload.get("public_url", "")) and payload.get("value"):
         payload["value"] = encrypt_str(payload["value"])
-    loot = models.Loot(**payload, id=new_id("lt"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
+    loot = models.Loot(**payload, id=new_id("lt"), ts=ts_now())
     db.add(loot)
     log_event(db, loot.pid, getattr(request.state, "username", None), "loot", "create",
               f"Loot [{loot.loot_type}]: {(decrypt_str(loot.value) or loot.description or '')[:40]}")
