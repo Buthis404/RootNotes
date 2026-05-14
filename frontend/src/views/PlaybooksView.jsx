@@ -94,6 +94,105 @@ function resultKeysForSteps(steps) {
   return [...keys];
 }
 
+// ── Step flow diagram ────────────────────────────────────────────────────
+function StepFlowDiagram({ steps, accent }) {
+  if (!steps || steps.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+      {steps.map((step, idx) => {
+        const hasJump = step.on_success === 'jump' || step.on_failure === 'jump';
+        const failStop = step.on_failure === 'stop';
+        const failContinue = step.on_failure === 'continue' || step.on_failure === 'next';
+        const isLast = idx === steps.length - 1;
+        return (
+          <div key={idx} style={{ display: 'flex', gap: 0 }}>
+            {/* Spine + node */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 36, flexShrink: 0 }}>
+              <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#13161f', border: `1.5px solid ${accent}44`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent, fontSize: 10, fontFamily: 'JetBrains Mono', fontWeight: 700, zIndex: 1 }}>{idx + 1}</div>
+              {!isLast && <div style={{ width: 2, flex: 1, minHeight: 16, background: `${accent}22` }} />}
+            </div>
+            {/* Content */}
+            <div style={{ flex: 1, paddingBottom: isLast ? 0 : 8, paddingLeft: 10, minWidth: 0 }}>
+              <div style={{ fontSize: 11, color: '#d9deea', fontWeight: 600, marginBottom: 2, paddingTop: 4 }}>{step.title || `${step.connector_key}:${step.operation}`}</div>
+              <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginBottom: 4 }}>{step.connector_key}:{step.operation}</div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 9, color: '#39d353', background: '#39d35312', border: '1px solid #39d35330', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                  ✓ {step.on_success || 'next'}{step.on_success === 'jump' ? ` → step ${step.on_success_step}` : ''}
+                </span>
+                <span style={{ fontSize: 9, color: failStop ? '#606570' : failContinue ? '#f09a3a' : '#cc2233', background: failStop ? '#60657012' : failContinue ? '#f09a3a12' : '#cc223312', border: `1px solid ${failStop ? '#60657030' : failContinue ? '#f09a3a30' : '#cc223330'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                  ✕ {step.on_failure || 'stop'}{step.on_failure === 'jump' ? ` → step ${step.on_failure_step}` : ''}
+                </span>
+                {(step.result_conditions || []).length > 0 && (
+                  <span style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f012', border: '1px solid #6fc8f030', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                    {step.result_conditions.length} condition{step.result_conditions.length > 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Rollup summary ──────────────────────────────────────────────────────
+const ROLLUP_META = {
+  hosts_found:    { label: 'Hosts found',    color: '#5b8af5' },
+  hosts_created:  { label: 'Hosts added',    color: '#5b8af5' },
+  hosts_pwned:    { label: 'Compromised',    color: '#cc2233' },
+  hosts_valid:    { label: 'Auth valid',     color: '#39d353' },
+  findings_created: { label: 'Findings',     color: '#e8574a' },
+  creds_created:  { label: 'Creds created',  color: '#c07af0' },
+  paths_found:    { label: 'Paths found',    color: '#f09a3a' },
+  urls_found:     { label: 'URLs found',     color: '#6fc8f0' },
+};
+
+function RunRollup({ run, accent }) {
+  const rollup = run.result_json?.rollup || {};
+  const completedCount = (run.result_json?.completed_jobs || run.jobs_json || []).length;
+  const failedCount = (run.result_json?.failed_jobs || []).length;
+  const hasRollup = Object.keys(rollup).length > 0;
+
+  const duration = run.started_at && run.finished_at
+    ? (() => { const s = new Date(run.started_at), f = new Date(run.finished_at); const sec = Math.round((f - s) / 1000); return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`; })()
+    : null;
+
+  return (
+    <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 8, padding: '10px 14px' }}>
+      <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8, fontFamily: 'JetBrains Mono' }}>Run summary</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: hasRollup ? 10 : 0 }}>
+        <div style={{ textAlign: 'center', background: '#39d35312', border: '1px solid #39d35330', borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#39d353', fontFamily: 'JetBrains Mono' }}>{completedCount}</div>
+          <div style={{ fontSize: 8, color: '#39d353', textTransform: 'uppercase', letterSpacing: '0.08em' }}>done</div>
+        </div>
+        {failedCount > 0 && (
+          <div style={{ textAlign: 'center', background: '#cc223312', border: '1px solid #cc223330', borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#cc2233', fontFamily: 'JetBrains Mono' }}>{failedCount}</div>
+            <div style={{ fontSize: 8, color: '#cc2233', textTransform: 'uppercase', letterSpacing: '0.08em' }}>failed</div>
+          </div>
+        )}
+        {duration && (
+          <div style={{ textAlign: 'center', background: '#ffffff06', border: '1px solid #2a2d35', borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#808590', fontFamily: 'JetBrains Mono' }}>{duration}</div>
+            <div style={{ fontSize: 8, color: '#606570', textTransform: 'uppercase', letterSpacing: '0.08em' }}>duration</div>
+          </div>
+        )}
+        {Object.entries(rollup).map(([k, v]) => {
+          const meta = ROLLUP_META[k];
+          if (!meta || !v) return null;
+          return (
+            <div key={k} style={{ textAlign: 'center', background: meta.color + '12', border: `1px solid ${meta.color}30`, borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: meta.color, fontFamily: 'JetBrains Mono' }}>{v}</div>
+              <div style={{ fontSize: 8, color: meta.color, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{meta.label}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function PlaybookCard({ playbook, accent, selected, onSelect }) {
   const stepCount = (playbook.steps || []).length;
   return (
@@ -795,24 +894,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
             ) : selected && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                 <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 8, padding: '12px 14px' }}>
-                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Playbook steps</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {(selected.steps || []).map((step, idx) => (
-                      <div key={`${selected.id}-${idx}`} style={{ display: 'grid', gridTemplateColumns: '36px minmax(0, 1fr) auto', gap: 10, alignItems: 'start', paddingBottom: idx < selected.steps.length - 1 ? 8 : 0, borderBottom: idx < selected.steps.length - 1 ? '1px solid #14161b' : 'none' }}>
-                        <div style={{ width: 28, height: 28, borderRadius: 999, background: '#13161f', border: `1px solid ${accent}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent, fontSize: 10, fontFamily: 'JetBrains Mono', fontWeight: 700 }}>{idx + 1}</div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 11, color: '#d9deea', fontWeight: 600, marginBottom: 3 }}>{step.title}</div>
-                          <div style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono', marginBottom: 4 }}>{step.connector_key}:{step.operation}</div>
-                          {step.params && Object.keys(step.params).length > 0 && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{JSON.stringify(step.params)}</div>}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontSize: 9, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>ok:{step.on_success || 'next'}{step.on_success_step ? `:${step.on_success_step}` : ''}</span>
-                          <span style={{ fontSize: 9, color: step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a' : '#808590', background: step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a18' : '#80859018', border: `1px solid ${step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a33' : '#80859033'}`, borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>fail:{step.on_failure || 'stop'}{step.on_failure_step ? `:${step.on_failure_step}` : ''}</span>
-                          {!!(step.result_conditions || []).length && <span style={{ fontSize: 9, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>conditions:{step.result_conditions.length}</span>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Playbook steps</div>
+                  <StepFlowDiagram steps={selected.steps || []} accent={accent} />
                 </div>
 
                 {/* Run mode toggle */}
@@ -1027,23 +1110,16 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                             })()}
                           </div>
 
+                          {(run.status === 'done' || run.status === 'failed') && (
+                            <RunRollup run={run} accent={accent} />
+                          )}
+
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#606570' }}>
                             {run.started_at && <div><span style={{ color: '#404550' }}>started: </span>{run.started_at.slice(0, 16)}</div>}
                             {run.finished_at && <div><span style={{ color: '#404550' }}>finished: </span>{run.finished_at.slice(0, 16)}</div>}
                             <div><span style={{ color: '#404550' }}>run id: </span>{run.id}</div>
                             <div><span style={{ color: '#404550' }}>playbook: </span>{run.playbook_id}</div>
                           </div>
-
-                          {resultKeys.length > 0 && (
-                            <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 12px', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                              {resultKeys.map(([k, v]) => (
-                                <div key={k} style={{ fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                                  <span style={{ color: '#404550' }}>{k}: </span>
-                                  <span style={{ color: typeof v === 'number' && v > 0 ? accent : '#808590' }}>{String(v)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
 
                           {run.error_output && (
                             <div style={{ background: '#130808', border: '1px solid #3a1010', borderRadius: 6, padding: '8px 12px', fontSize: 10, color: '#f87171', fontFamily: 'JetBrains Mono', lineHeight: 1.6 }}>{run.error_output}</div>
