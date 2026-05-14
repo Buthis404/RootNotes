@@ -131,7 +131,7 @@ function LateralPathsPanel({ hostId, projectId, accent }) {
   );
 }
 
-function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, deleteEdge, onClose, onAddActivity, onUpdateActivity, onDeleteActivity, pivots = [], projectHosts = [] }) {
+function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hostObj, edges, nodeById, updateNode, updateEdge, updateRegion, deleteEdge, onClose, onAddActivity, onUpdateActivity, onDeleteActivity, pivots = [], projectHosts = [], onDeletePivot, onUpdatePivot, onAddPivotForHost }) {
   const [activeTab, setActiveTab] = useState('details');
   const [creds, setCreds] = useState(null);
   const [credsLoading, setCredsLoading] = useState(false);
@@ -348,8 +348,10 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                       <select value={edge.style} onChange={e => updateEdge(edge.id, { style: e.target.value })} style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 3, color: '#606570', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '1px 4px' }}>{['normal', 'exploit', 'lateral', 'tunnel'].map(s => <option key={s} value={s}>{s}</option>)}</select>
                       <button onClick={() => deleteEdge(edge.id)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 3, color: '#cc2233', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '2px 6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}><Icon name="trash" size={10} color="#cc2233" />Delete</button>
                     </div>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.type || 'link'}</span>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <select value={edge.type || 'link'} onChange={e => updateEdge(edge.id, { type: e.target.value })} style={{ background: '#0e1016', border: '1px solid #6fc8f044', borderRadius: 3, color: '#6fc8f0', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '1px 4px' }}>
+                        {['ssh','winrm','smb_admin','local_admin','shell','c2_session','rdp','lateral','pivot','uplink','domain_admin','domain_member','auth_path','trust','same_subnet','lan','routed','exploit','tunnel','link'].map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
                       <span style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.state || (edge.is_manual ? 'manual' : 'inferred')}</span>
                       <span style={{ fontSize: 9, color: edge.verified ? '#39d353' : '#808590', background: (edge.verified ? '#39d35318' : '#80859018'), border: `1px solid ${edge.verified ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.verified ? 'verified' : 'unverified'}</span>
                       {edge.confidence != null && <span style={{ fontSize: 9, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{Math.round(Number(edge.confidence) * 100)}%</span>}
@@ -373,22 +375,36 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
               })}
             </div>
             <div>
-              <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase' }}>Pivot Observations</div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+                <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', flex: 1 }}>Pivot Observations</div>
+                {hostObj && onAddPivotForHost && (
+                  <button onClick={() => onAddPivotForHost(hostObj.id)} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 3, padding: '2px 8px', cursor: 'pointer', color: '#808590', fontSize: 9, fontFamily: 'JetBrains Mono' }}>+ Add</button>
+                )}
+              </div>
               {selectedNodePivots.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No pivot data for this host</div>}
               {selectedNodePivots.map(pivot => {
                 const src = projectHosts.find(h => h.id === pivot.source_host_id);
                 const tgt = projectHosts.find(h => h.id === pivot.target_host_id);
+                const isActive = pivot.status === 'active';
                 return (
                   <div key={pivot.id} style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 10px', marginBottom: 8 }}>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
-                      <span style={{ fontSize: 8, color: '#e8cc42', background: '#e8cc4218', border: '1px solid #e8cc4233', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.tool || 'pivot'}</span>
-                      <span style={{ fontSize: 8, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.pivot_type}</span>
-                      <span style={{ fontSize: 8, color: pivot.status === 'active' ? '#39d353' : '#808590', background: pivot.status === 'active' ? '#39d35318' : '#80859018', border: `1px solid ${pivot.status === 'active' ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.status}</span>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', flex: 1 }}>
+                        <span style={{ fontSize: 8, color: '#e8cc42', background: '#e8cc4218', border: '1px solid #e8cc4233', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.tool || 'pivot'}</span>
+                        <span style={{ fontSize: 8, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pivot.pivot_type}</span>
+                        <button
+                          onClick={() => onUpdatePivot?.(pivot.id, { status: isActive ? 'inactive' : 'active' })}
+                          title="Toggle active/inactive"
+                          style={{ fontSize: 8, color: isActive ? '#39d353' : '#808590', background: isActive ? '#39d35318' : '#80859018', border: `1px solid ${isActive ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono', cursor: 'pointer' }}
+                        >{pivot.status}</button>
+                      </div>
+                      <button onClick={() => onDeletePivot?.(pivot.id)} title="Remove pivot" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 12, padding: '0 2px', lineHeight: 1, flexShrink: 0 }}>×</button>
                     </div>
                     <div style={{ fontSize: 10, color: '#c8cdd6', fontWeight: 600, marginBottom: 4 }}>{pivot.label || `${pivot.tool} ${pivot.pivot_type}`}</div>
                     {pivot.route_cidr && <div style={{ fontSize: 9, color: '#9098a8', fontFamily: 'JetBrains Mono', marginBottom: 3 }}>route {pivot.route_cidr}</div>}
                     {pivot.bind_address && <div style={{ fontSize: 9, color: '#9098a8', fontFamily: 'JetBrains Mono', marginBottom: 3 }}>bind {pivot.bind_address}</div>}
-                    {(src || tgt) && <div style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>{src ? `from ${src.hostname || src.ip}` : 'from ?'}{tgt ? ` -> ${tgt.hostname || tgt.ip}` : ''}</div>}
+                    {(src || tgt) && <div style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>{src ? `from ${src.hostname || src.ip}` : 'from ?'}{tgt ? ` → ${tgt.hostname || tgt.ip}` : ''}</div>}
+                    {pivot.notes && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginTop: 4, fontStyle: 'italic' }}>{pivot.notes}</div>}
                   </div>
                 );
               })}
@@ -431,7 +447,7 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
   );
 }
 
-function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData, accessOverlay, overlayMode, pivots = [], projectHosts = [] }) {
+function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, onSyncHostByIp, accent, accentGreen, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, markLocalOp, animateLinks, overlayData, accessOverlay, overlayMode, pivots = [], projectHosts = [], onDeletePivot, onUpdatePivot, onAddPivotForHost }) {
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [connecting, setConnecting] = useState(null);
@@ -574,6 +590,18 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     });
     return m;
   }, [nodes, hostById]);
+
+  // pivot type per host_id: socks5 > route > other
+  const pivotByHostId = useMemo(() => {
+    const m = new Map();
+    for (const p of pivots) {
+      if (!p.pivot_host_id || p.status !== 'active') continue;
+      const existing = m.get(p.pivot_host_id);
+      const rank = p.pivot_type === 'socks5' || p.pivot_type === 'socks4' ? 2 : p.pivot_type === 'route' ? 1 : 0;
+      if (!existing || rank > existing.rank) m.set(p.pivot_host_id, { type: p.pivot_type, route_cidr: p.route_cidr, rank });
+    }
+    return m;
+  }, [pivots]);
 
   const selectedNodeSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const selectedNode = useMemo(() => selectedNodeIds.length === 1 ? nodeById.get(selectedNodeIds[0]) ?? null : null, [selectedNodeIds, nodeById]);
@@ -1299,6 +1327,20 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                   <NodeShape type={node.type} status={node.status} size={40} selected={isSel} accent={accent} />
                   {overlayEntry && <circle cx="4" cy="4" r="5" fill={overlayEntry.color} opacity=".95" style={{ filter: `drop-shadow(0 0 4px ${overlayEntry.color})` }} />}
                   <circle cx="36" cy="4" r="4" fill={sc} opacity=".9" style={{ filter: `drop-shadow(0 0 3px ${sc})` }} />
+                  {(() => {
+                    const pivotInfo = node.host_id ? pivotByHostId.get(node.host_id) : null;
+                    if (!pivotInfo || simplifiedNodes) return null;
+                    const isSocks = pivotInfo.type === 'socks5' || pivotInfo.type === 'socks4';
+                    const label = isSocks ? 'SOCKS' : pivotInfo.type === 'route' ? 'ROUTE' : 'PIVOT';
+                    const pc = isSocks ? '#e8cc42' : '#f09a3a';
+                    const w = label.length * 5.5 + 6;
+                    return (
+                      <g transform={`translate(${20 - w/2}, 41)`}>
+                        <rect x="0" y="0" width={w} height="9" rx="2" fill={pc + '22'} stroke={pc + '88'} strokeWidth=".8" />
+                        <text x={w/2} y="6.5" textAnchor="middle" fontSize="5.5" fill={pc} fontFamily="JetBrains Mono" fontWeight="700">{label}</text>
+                      </g>
+                    );
+                  })()}
                   {(!simplifiedNodes || isSel) && <text x="20" y="53" textAnchor="middle" fontSize="10" fill={isSel ? '#f0f2f6' : '#9098a8'} fontFamily="JetBrains Mono" fontWeight={isSel ? 600 : 400}>{node.label}</text>}
                   {!simplifiedNodes && displayIps.map((ip, idx) => (
                     <text key={idx} x="20" y={64 + (idx * 9)} textAnchor="middle" fontSize="8" fill={sc} fontFamily="JetBrains Mono" opacity=".8">{ip}</text>
@@ -1426,14 +1468,17 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
           onDeleteActivity={onDeleteActivity}
           pivots={pivots}
           projectHosts={projectHosts}
+          onDeletePivot={onDeletePivot}
+          onUpdatePivot={onUpdatePivot}
+          onAddPivotForHost={onAddPivotForHost}
         />
       </div>
     </div>
   );
 }
 
-function AddPivotModal({ projectId, hosts, accent, onClose, onCreated }) {
-  const [form, setForm] = useState({ pivot_host_id: '', source_host_id: '', tool: 'chisel', pivot_type: 'socks5', route_cidr: '', bind_address: '', status: 'active', notes: '' });
+function AddPivotModal({ projectId, hosts, accent, onClose, onCreated, initialPivotHostId = '' }) {
+  const [form, setForm] = useState({ pivot_host_id: initialPivotHostId, source_host_id: '', tool: 'chisel', pivot_type: 'socks5', route_cidr: '', bind_address: '', status: 'active', notes: '' });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -1533,6 +1578,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
   const [allActivities, setAllActivities] = useState([]);
   const [pivots, setPivots] = useState([]);
   const [showAddPivot, setShowAddPivot] = useState(false);
+  const [addPivotPrefilledHostId, setAddPivotPrefilledHostId] = useState(null);
 
   useEffect(() => {
     if (networks.length > 0) {
@@ -1701,6 +1747,25 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     }
   };
 
+  const handleDeletePivot = async (pivotId) => {
+    try {
+      await api.deletePivot(projectId, pivotId);
+      setPivots(prev => prev.filter(p => p.id !== pivotId));
+    } catch (e) { console.error('Delete pivot failed:', e); }
+  };
+
+  const handleUpdatePivot = async (pivotId, data) => {
+    try {
+      const updated = await api.updatePivot(projectId, pivotId, data);
+      setPivots(prev => prev.map(p => p.id === pivotId ? updated : p));
+    } catch (e) { console.error('Update pivot failed:', e); }
+  };
+
+  const handleAddPivotForHost = (hostId) => {
+    setAddPivotPrefilledHostId(hostId);
+    setShowAddPivot(true);
+  };
+
   const startRename = (net) => { setEditingName(net.id); setNameVal(net.name); };
   const commitRename = (id) => { if (nameVal.trim()) onUpdateNetwork(id, { name: nameVal.trim() }); setEditingName(null); };
 
@@ -1820,7 +1885,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       )}
 
       {activeNet
-        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} accessOverlay={accessOverlay} overlayMode={overlayMode} pivots={pivots} projectHosts={projectHosts} />
+        ? <NetworkCanvas key={activeNet.id} projectId={projectId} net={activeNet} onUpdate={(data) => onUpdateNetwork(activeNet.id, data)} onCreateHost={onCreateHost} onUpdateHost={onUpdateHost} onSyncHostByIp={onSyncHostByIp} accent={accent} accentGreen={accentGreen} hosts={projectHosts} onAddActivity={onAddActivity} onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity} markLocalOp={markLocalOp} animateLinks={animateLinks} overlayData={overlayData} accessOverlay={accessOverlay} overlayMode={overlayMode} pivots={pivots} projectHosts={projectHosts} onDeletePivot={handleDeletePivot} onUpdatePivot={handleUpdatePivot} onAddPivotForHost={handleAddPivotForHost} />
         : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 14, color: '#303540' }}>
             <Icon name="network" size={40} color="#2a2d35" />
@@ -1845,10 +1910,12 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           projectId={projectId}
           hosts={projectHosts}
           accent={accent}
-          onClose={() => setShowAddPivot(false)}
+          initialPivotHostId={addPivotPrefilledHostId || ''}
+          onClose={() => { setShowAddPivot(false); setAddPivotPrefilledHostId(null); }}
           onCreated={async () => {
             const data = await api.listPivots(projectId).catch(() => ({ items: [] }));
             setPivots(data?.items || []);
+            setAddPivotPrefilledHostId(null);
           }}
         />
       )}
