@@ -863,6 +863,27 @@ def _playbook_run_dict(run: models.PlaybookRun) -> dict:
     }
 
 
+_ROLLUP_KEYS = [
+    "hosts_found", "hosts_created", "hosts_updated", "hosts_pwned", "hosts_valid",
+    "hosts_failed", "hosts_success", "findings_created", "findings_found",
+    "creds_created", "paths_found", "urls_found",
+]
+
+
+def _aggregate_run_results(db: Session, job_ids: list[str]) -> dict:
+    totals: dict[str, int] = {}
+    for jid in job_ids:
+        job = db.query(models.Job).filter(models.Job.id == jid).first()
+        if not job or not job.result_json:
+            continue
+        rj = job.result_json or {}
+        for key in _ROLLUP_KEYS:
+            val = rj.get(key) or (rj.get("structured", {}) or {}).get("counts", {}).get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                totals[key] = totals.get(key, 0) + int(val)
+    return totals
+
+
 def _update_run(db: Session, run: models.PlaybookRun, **updates) -> models.PlaybookRun:
     for key, value in updates.items():
         setattr(run, key, value)
@@ -1181,7 +1202,7 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         run,
                         status=terminal,
                         finished_at=_now(),
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "condition_stop": True},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "condition_stop": True, "rollup": _aggregate_run_results(db, [i.get("id") for i in completed if i.get("id")])},
                     )
             finally:
                 db.close()
@@ -1206,7 +1227,7 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         status=terminal,
                         finished_at=_now(),
                         error_output=f"Step job {job_id} ended with status {result.get('status')}",
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "failed_job_id": job_id},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "failed_job_id": job_id, "rollup": _aggregate_run_results(db, [i.get("id") for i in completed if i.get("id")])},
                     )
             finally:
                 db.close()
@@ -1222,7 +1243,7 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         run,
                         status="done",
                         finished_at=_now(),
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed)},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "rollup": _aggregate_run_results(db, [i.get("id") for i in completed if i.get("id")])},
                     )
             finally:
                 db.close()
