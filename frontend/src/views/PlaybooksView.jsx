@@ -94,6 +94,105 @@ function resultKeysForSteps(steps) {
   return [...keys];
 }
 
+// ── Step flow diagram ────────────────────────────────────────────────────
+function StepFlowDiagram({ steps, accent }) {
+  if (!steps || steps.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+      {steps.map((step, idx) => {
+        const hasJump = step.on_success === 'jump' || step.on_failure === 'jump';
+        const failStop = step.on_failure === 'stop';
+        const failContinue = step.on_failure === 'continue' || step.on_failure === 'next';
+        const isLast = idx === steps.length - 1;
+        return (
+          <div key={idx} style={{ display: 'flex', gap: 0 }}>
+            {/* Spine + node */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 36, flexShrink: 0 }}>
+              <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#13161f', border: `1.5px solid ${accent}44`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent, fontSize: 10, fontFamily: 'JetBrains Mono', fontWeight: 700, zIndex: 1 }}>{idx + 1}</div>
+              {!isLast && <div style={{ width: 2, flex: 1, minHeight: 16, background: `${accent}22` }} />}
+            </div>
+            {/* Content */}
+            <div style={{ flex: 1, paddingBottom: isLast ? 0 : 8, paddingLeft: 10, minWidth: 0 }}>
+              <div style={{ fontSize: 11, color: '#d9deea', fontWeight: 600, marginBottom: 2, paddingTop: 4 }}>{step.title || `${step.connector_key}:${step.operation}`}</div>
+              <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginBottom: 4 }}>{step.connector_key}:{step.operation}</div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 9, color: '#39d353', background: '#39d35312', border: '1px solid #39d35330', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                  ✓ {step.on_success || 'next'}{step.on_success === 'jump' ? ` → step ${step.on_success_step}` : ''}
+                </span>
+                <span style={{ fontSize: 9, color: failStop ? '#606570' : failContinue ? '#f09a3a' : '#cc2233', background: failStop ? '#60657012' : failContinue ? '#f09a3a12' : '#cc223312', border: `1px solid ${failStop ? '#60657030' : failContinue ? '#f09a3a30' : '#cc223330'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                  ✕ {step.on_failure || 'stop'}{step.on_failure === 'jump' ? ` → step ${step.on_failure_step}` : ''}
+                </span>
+                {(step.result_conditions || []).length > 0 && (
+                  <span style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f012', border: '1px solid #6fc8f030', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                    {step.result_conditions.length} condition{step.result_conditions.length > 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Rollup summary ──────────────────────────────────────────────────────
+const ROLLUP_META = {
+  hosts_found:    { label: 'Hosts found',    color: '#5b8af5' },
+  hosts_created:  { label: 'Hosts added',    color: '#5b8af5' },
+  hosts_pwned:    { label: 'Compromised',    color: '#cc2233' },
+  hosts_valid:    { label: 'Auth valid',     color: '#39d353' },
+  findings_created: { label: 'Findings',     color: '#e8574a' },
+  creds_created:  { label: 'Creds created',  color: '#c07af0' },
+  paths_found:    { label: 'Paths found',    color: '#f09a3a' },
+  urls_found:     { label: 'URLs found',     color: '#6fc8f0' },
+};
+
+function RunRollup({ run, accent }) {
+  const rollup = run.result_json?.rollup || {};
+  const completedCount = (run.result_json?.completed_jobs || run.jobs_json || []).length;
+  const failedCount = (run.result_json?.failed_jobs || []).length;
+  const hasRollup = Object.keys(rollup).length > 0;
+
+  const duration = run.started_at && run.finished_at
+    ? (() => { const s = new Date(run.started_at), f = new Date(run.finished_at); const sec = Math.round((f - s) / 1000); return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`; })()
+    : null;
+
+  return (
+    <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 8, padding: '10px 14px' }}>
+      <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8, fontFamily: 'JetBrains Mono' }}>Run summary</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: hasRollup ? 10 : 0 }}>
+        <div style={{ textAlign: 'center', background: '#39d35312', border: '1px solid #39d35330', borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#39d353', fontFamily: 'JetBrains Mono' }}>{completedCount}</div>
+          <div style={{ fontSize: 8, color: '#39d353', textTransform: 'uppercase', letterSpacing: '0.08em' }}>done</div>
+        </div>
+        {failedCount > 0 && (
+          <div style={{ textAlign: 'center', background: '#cc223312', border: '1px solid #cc223330', borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#cc2233', fontFamily: 'JetBrains Mono' }}>{failedCount}</div>
+            <div style={{ fontSize: 8, color: '#cc2233', textTransform: 'uppercase', letterSpacing: '0.08em' }}>failed</div>
+          </div>
+        )}
+        {duration && (
+          <div style={{ textAlign: 'center', background: '#ffffff06', border: '1px solid #2a2d35', borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#808590', fontFamily: 'JetBrains Mono' }}>{duration}</div>
+            <div style={{ fontSize: 8, color: '#606570', textTransform: 'uppercase', letterSpacing: '0.08em' }}>duration</div>
+          </div>
+        )}
+        {Object.entries(rollup).map(([k, v]) => {
+          const meta = ROLLUP_META[k];
+          if (!meta || !v) return null;
+          return (
+            <div key={k} style={{ textAlign: 'center', background: meta.color + '12', border: `1px solid ${meta.color}30`, borderRadius: 6, padding: '6px 12px', minWidth: 64 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: meta.color, fontFamily: 'JetBrains Mono' }}>{v}</div>
+              <div style={{ fontSize: 8, color: meta.color, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{meta.label}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function PlaybookCard({ playbook, accent, selected, onSelect }) {
   const stepCount = (playbook.steps || []).length;
   return (
@@ -475,6 +574,120 @@ function CredPicker({ creds, onPick, accent }) {
 }
 
 
+const TAG_COLORS = { recon: '#5b8af5', web: '#6fc8f0', ad: '#c07af0', enum: '#5b8af5', creds: '#e8574a', lateral: '#e8cc42', smb: '#f09a3a', impacket: '#c07af0', nmap: '#39d353', 'post-exploitation': '#e8574a' };
+function tagColor(t) { return TAG_COLORS[t] || '#606570'; }
+
+function PacksPanel({ packs, accent, onInsert, onDelete, onClose }) {
+  const [filter, setFilter] = useState('');
+  const filtered = packs.filter(p => !filter || p.name.toLowerCase().includes(filter.toLowerCase()) || (p.tags || []).some(t => t.includes(filter.toLowerCase())));
+  const builtin = filtered.filter(p => p.is_builtin);
+  const custom = filtered.filter(p => !p.is_builtin);
+
+  const PackCard = ({ pack }) => (
+    <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: '12px 14px', marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 600, marginBottom: 4 }}>{pack.name}</div>
+          {pack.description && <div style={{ fontSize: 10, color: '#606570', lineHeight: 1.5, marginBottom: 6 }}>{pack.description}</div>}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+            {(pack.tags || []).map(t => <span key={t} style={{ fontSize: 8, color: tagColor(t), background: tagColor(t) + '18', border: `1px solid ${tagColor(t)}33`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{t}</span>)}
+            <span style={{ fontSize: 8, color: '#404550', background: '#ffffff08', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pack.steps.length} step{pack.steps.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {pack.steps.map((s, i) => <span key={i} style={{ fontSize: 8, color: '#505560', fontFamily: 'JetBrains Mono' }}>{i + 1}. {s.title || s.operation}</span>)}
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+          <button onClick={() => onInsert(pack)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>Insert</button>
+          {!pack.is_builtin && <button onClick={() => onDelete(pack.id)} style={{ background: 'transparent', border: '1px solid #cc233344', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Delete</button>}
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', zIndex: 2000, paddingTop: 60, paddingRight: 24 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 10, width: 460, maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 8px 40px rgba(0,0,0,0.6)' }}>
+        <div style={{ padding: '16px 18px 12px', borderBottom: '1px solid #1e2029', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>Operation Packs</div>
+          <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter…" style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', width: 140 }} />
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 16, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+          {builtin.length > 0 && <>
+            <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Built-in packs</div>
+            {builtin.map(p => <PackCard key={p.id} pack={p} />)}
+          </>}
+          {custom.length > 0 && <>
+            <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', margin: '12px 0 8px' }}>Custom packs</div>
+            {custom.map(p => <PackCard key={p.id} pack={p} />)}
+          </>}
+          {filtered.length === 0 && <div style={{ fontSize: 11, color: '#404550', textAlign: 'center', padding: 32 }}>No packs found</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SavePackModal({ steps, accent, onClose, onSaved }) {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [tags, setTags] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!name.trim()) { setErr('Name is required'); return; }
+    setSaving(true); setErr('');
+    try {
+      const pack = await api.createOperationPack({
+        name: name.trim(),
+        description: description.trim(),
+        steps: steps.map(s => ({ ...s })),
+        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+      });
+      onSaved(pack);
+      onClose();
+    } catch (e) { setErr(e?.message || 'Failed to save'); }
+    finally { setSaving(false); }
+  };
+
+  const inp2 = { background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', width: '100%', boxSizing: 'border-box' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 8, padding: 24, width: 380, boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 18 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#e0e4ec', fontFamily: 'Space Grotesk', flex: 1 }}>Save as Operation Pack</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 16, padding: 0 }}>×</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Pack name *</div>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. My Recon Pack" style={inp2} autoFocus />
+          </div>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Description</div>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="What does this pack do?" style={{ ...inp2, resize: 'vertical' }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Tags (comma separated)</div>
+            <input value={tags} onChange={e => setTags(e.target.value)} placeholder="recon, web, ad" style={inp2} />
+          </div>
+          <div style={{ fontSize: 10, color: '#505560' }}>{steps.length} step{steps.length !== 1 ? 's' : ''} will be saved</div>
+          {err && <div style={{ fontSize: 10, color: '#cc2233' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
+            <button onClick={save} disabled={saving} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 16px', cursor: saving ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: saving ? 0.7 : 1 }}>
+              {saving ? 'Saving…' : 'Save Pack'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [playbooks, setPlaybooks] = useState([]);
   const [runs, setRuns] = useState([]);
@@ -499,12 +712,16 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [scopes, setScopes] = useState([]);
   const [batchResult, setBatchResult] = useState(null);
   const [activeTab, setActiveTab] = useState('playbooks'); // 'playbooks' | 'scheduled'
+  const [importing, setImporting] = useState(false);
+  const [packs, setPacks] = useState([]);
+  const [showPacksPanel, setShowPacksPanel] = useState(false);
+  const [showSavePackModal, setShowSavePackModal] = useState(false);
 
   const load = useCallback(async () => {
     if (!selectedProject) return;
     setLoading(true);
     try {
-      const [pb, runData, connectorData, templateData, hostData, credData, scopeData] = await Promise.all([
+      const [pb, runData, connectorData, templateData, hostData, credData, scopeData, packData] = await Promise.all([
         api.listPlaybooks(),
         api.listPlaybookRuns(selectedProject, { limit: 100 }),
         api.listConnectors().catch(() => ({ connectors: [] })),
@@ -512,6 +729,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
         api.getHosts(selectedProject).catch(() => []),
         api.getCreds(selectedProject).catch(() => []),
         api.getScopes(selectedProject).catch(() => []),
+        api.listOperationPacks().catch(() => ({ packs: [] })),
       ]);
       setPlaybooks(pb.playbooks || []);
       setRuns(runData.runs || []);
@@ -520,6 +738,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
       setHosts(Array.isArray(hostData) ? hostData : []);
       setCreds(Array.isArray(credData) ? credData : []);
       setScopes(Array.isArray(scopeData) ? scopeData : []);
+      setPacks(packData.packs || []);
       setSelectedPlaybookId(prev => prev || pb.playbooks?.[0]?.id || '');
     } catch (e) {
       setError(e.message || 'Failed to load playbooks');
@@ -695,6 +914,27 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
 
   if (!selectedProject) return <div style={{ padding: 40, color: '#6a7080', textAlign: 'center' }}>Select a project to work with playbooks</div>;
 
+  const exportPlaybooks = async () => {
+    try {
+      const blob = await api.exportPlaybooks();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `playbooks-export-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { setError(e.message); }
+  };
+
+  const importPlaybooks = async (file) => {
+    setImporting(true);
+    try {
+      await api.importPlaybooks(file);
+      await load();
+    } catch (e) { setError(e.message); }
+    finally { setImporting(false); }
+  };
+
   return (
     <div style={{ padding: '20px 24px', height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -704,7 +944,14 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={load} style={toolbarBtn(accent, false)}>Refresh</button>
-          {activeTab === 'playbooks' && <button onClick={startCreate} style={toolbarBtn(accent, true)}>New custom playbook</button>}
+          {activeTab === 'playbooks' && <>
+            <label style={{ ...toolbarBtn(accent, false), cursor: importing ? 'wait' : 'pointer', opacity: importing ? 0.7 : 1, display: 'inline-flex', alignItems: 'center' }}>
+              {importing ? 'Importing…' : 'Import'}
+              <input type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && importPlaybooks(e.target.files[0])} disabled={importing} />
+            </label>
+            <button onClick={exportPlaybooks} style={toolbarBtn(accent, false)}>Export</button>
+            <button onClick={startCreate} style={toolbarBtn(accent, true)}>New custom playbook</button>
+          </>}
         </div>
       </div>
 
@@ -788,6 +1035,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={() => setEditor(prev => ({ ...prev, steps: [...prev.steps, stepTemplates[0] ? buildStepFromTemplate(stepTemplates[0]) : emptyStep()] }))} style={toolbarBtn(accent, false)}>Add step</button>
+                  <button onClick={() => setShowPacksPanel(true)} style={toolbarBtn('#e8cc42', false)}>Packs</button>
+                  {editor.steps.length > 0 && <button onClick={() => setShowSavePackModal(true)} style={toolbarBtn('#c07af0', false)}>Save as pack</button>}
                   <button onClick={savePlaybook} disabled={saving} style={toolbarBtn(accent, true)}>{saving ? 'Saving...' : 'Save playbook'}</button>
                   <button onClick={cancelEdit} style={toolbarBtn('#808590', false)}>Cancel</button>
                 </div>
@@ -795,24 +1044,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
             ) : selected && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                 <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 8, padding: '12px 14px' }}>
-                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Playbook steps</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {(selected.steps || []).map((step, idx) => (
-                      <div key={`${selected.id}-${idx}`} style={{ display: 'grid', gridTemplateColumns: '36px minmax(0, 1fr) auto', gap: 10, alignItems: 'start', paddingBottom: idx < selected.steps.length - 1 ? 8 : 0, borderBottom: idx < selected.steps.length - 1 ? '1px solid #14161b' : 'none' }}>
-                        <div style={{ width: 28, height: 28, borderRadius: 999, background: '#13161f', border: `1px solid ${accent}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent, fontSize: 10, fontFamily: 'JetBrains Mono', fontWeight: 700 }}>{idx + 1}</div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 11, color: '#d9deea', fontWeight: 600, marginBottom: 3 }}>{step.title}</div>
-                          <div style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono', marginBottom: 4 }}>{step.connector_key}:{step.operation}</div>
-                          {step.params && Object.keys(step.params).length > 0 && <div style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{JSON.stringify(step.params)}</div>}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontSize: 9, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>ok:{step.on_success || 'next'}{step.on_success_step ? `:${step.on_success_step}` : ''}</span>
-                          <span style={{ fontSize: 9, color: step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a' : '#808590', background: step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a18' : '#80859018', border: `1px solid ${step.on_failure === 'jump' || step.on_failure === 'continue' ? '#f09a3a33' : '#80859033'}`, borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>fail:{step.on_failure || 'stop'}{step.on_failure_step ? `:${step.on_failure_step}` : ''}</span>
-                          {!!(step.result_conditions || []).length && <span style={{ fontSize: 9, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 999, padding: '2px 7px', fontFamily: 'JetBrains Mono' }}>conditions:{step.result_conditions.length}</span>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <div style={{ fontSize: 9, color: '#404550', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Playbook steps</div>
+                  <StepFlowDiagram steps={selected.steps || []} accent={accent} />
                 </div>
 
                 {/* Run mode toggle */}
@@ -1027,23 +1260,16 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                             })()}
                           </div>
 
+                          {(run.status === 'done' || run.status === 'failed') && (
+                            <RunRollup run={run} accent={accent} />
+                          )}
+
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 10, fontFamily: 'JetBrains Mono', color: '#606570' }}>
                             {run.started_at && <div><span style={{ color: '#404550' }}>started: </span>{run.started_at.slice(0, 16)}</div>}
                             {run.finished_at && <div><span style={{ color: '#404550' }}>finished: </span>{run.finished_at.slice(0, 16)}</div>}
                             <div><span style={{ color: '#404550' }}>run id: </span>{run.id}</div>
                             <div><span style={{ color: '#404550' }}>playbook: </span>{run.playbook_id}</div>
                           </div>
-
-                          {resultKeys.length > 0 && (
-                            <div style={{ background: '#090b0f', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 12px', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                              {resultKeys.map(([k, v]) => (
-                                <div key={k} style={{ fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                                  <span style={{ color: '#404550' }}>{k}: </span>
-                                  <span style={{ color: typeof v === 'number' && v > 0 ? accent : '#808590' }}>{String(v)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
 
                           {run.error_output && (
                             <div style={{ background: '#130808', border: '1px solid #3a1010', borderRadius: 6, padding: '8px 12px', fontSize: 10, color: '#f87171', fontFamily: 'JetBrains Mono', lineHeight: 1.6 }}>{run.error_output}</div>
@@ -1064,6 +1290,32 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
           </div>
         </div>
       </div>}
+
+      {showPacksPanel && (
+        <PacksPanel
+          packs={packs}
+          accent={accent}
+          onInsert={(pack) => {
+            const newSteps = (pack.steps || []).map(s => ({ ...s }));
+            setEditor(prev => ({ ...prev, steps: [...prev.steps, ...newSteps] }));
+            setShowPacksPanel(false);
+          }}
+          onDelete={async (packId) => {
+            await api.deleteOperationPack(packId).catch(() => {});
+            setPacks(prev => prev.filter(p => p.id !== packId));
+          }}
+          onClose={() => setShowPacksPanel(false)}
+        />
+      )}
+
+      {showSavePackModal && (
+        <SavePackModal
+          steps={editor.steps}
+          accent={accent}
+          onClose={() => setShowSavePackModal(false)}
+          onSaved={(pack) => setPacks(prev => [...prev, pack])}
+        />
+      )}
     </div>
   );
 }

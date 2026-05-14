@@ -6,7 +6,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.deps import require_admin
 from ..core.security import hash_password
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -33,7 +33,7 @@ def admin_create_user(
         display_name=(body.display_name or body.username).strip(),
         password_hash=hash_password(body.password),
         role=body.role,
-        created_at=datetime.utcnow().isoformat()[:16],
+        created_at=ts_now(),
         active=True,
     )
     db.add(user)

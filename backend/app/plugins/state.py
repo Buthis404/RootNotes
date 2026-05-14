@@ -106,6 +106,9 @@ def _decrypt_target(target: dict) -> dict:
     t = dict(target)
     t["password"] = decrypt_str(t.get("password", ""))
     t["private_key"] = decrypt_str(t.get("private_key", ""))
+    t["proxy_password"] = decrypt_str(t.get("proxy_password", ""))
+    t["proxy_private_key"] = decrypt_str(t.get("proxy_private_key", ""))
+    t["exec_proxy_password"] = decrypt_str(t.get("exec_proxy_password", ""))
     return t
 
 
@@ -114,6 +117,9 @@ def _encrypt_target(target: dict) -> dict:
     t = dict(target)
     t["password"] = encrypt_str(t.get("password", ""))
     t["private_key"] = encrypt_str(t.get("private_key", ""))
+    t["proxy_password"] = encrypt_str(t.get("proxy_password", ""))
+    t["proxy_private_key"] = encrypt_str(t.get("proxy_private_key", ""))
+    t["exec_proxy_password"] = encrypt_str(t.get("exec_proxy_password", ""))
     return t
 
 
@@ -129,10 +135,19 @@ def list_attacker_targets_safe(db: Session | None = None) -> list[dict]:
         item = dict(target)
         has_password = bool(item.get("password"))
         has_private_key = bool(item.get("private_key"))
+        has_proxy_password = bool(item.get("proxy_password"))
+        has_proxy_private_key = bool(item.get("proxy_private_key"))
+        has_exec_proxy_password = bool(item.get("exec_proxy_password"))
         item["password"] = ""
         item["private_key"] = ""
+        item["proxy_password"] = ""
+        item["proxy_private_key"] = ""
+        item["exec_proxy_password"] = ""
         item["has_password"] = has_password
         item["has_private_key"] = has_private_key
+        item["has_proxy_password"] = has_proxy_password
+        item["has_proxy_private_key"] = has_proxy_private_key
+        item["has_exec_proxy_password"] = has_exec_proxy_password
         safe.append(item)
     return safe
 

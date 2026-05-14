@@ -110,6 +110,9 @@ def queue_job(
     related_entity_id: str = "",
     request_json: dict | None = None,
     retry_of_job_id: str = "",
+    priority: int = 0,
+    retry_count: int = 0,
+    max_retries: int = 0,
 ) -> models.Job:
     now = _now()
     job = models.Job(
@@ -128,6 +131,9 @@ def queue_job(
         related_entity_type=related_entity_type,
         related_entity_id=related_entity_id,
         retry_of_job_id=retry_of_job_id,
+        priority=priority,
+        retry_count=retry_count,
+        max_retries=max_retries,
         created_at=now,
         started_at="",
         finished_at="",
@@ -163,6 +169,10 @@ def finish_job(
     result: dict | None = None,
 ) -> models.Job:
     """Update job to terminal status and broadcast."""
+    # Re-read from DB to detect external cancel that raced with job completion
+    db.refresh(job)
+    if job.status == "cancelled" and status in ("done", "failed"):
+        return job  # Cancel took priority; don't overwrite with done/failed
     job.status = status
     job.output = output
     job.error_output = error_output
@@ -171,6 +181,13 @@ def finish_job(
     db.commit()
     db.refresh(job)
     bcast(job.pid, "job", "update", _job_dict(job))
+
+    # Auto-retry on failure if max_retries allows
+    retry_count = getattr(job, "retry_count", 0) or 0
+    max_retries = getattr(job, "max_retries", 0) or 0
+    if status == "failed" and retry_count < max_retries:
+        _schedule_auto_retry(db, job, retry_count)
+        return job
 
     # Notify on terminal status
     if status in ("done", "failed"):
@@ -185,3 +202,51 @@ def finish_job(
             pass
 
     return job
+
+
+def _schedule_auto_retry(db: Session, job: models.Job, current_retry_count: int) -> None:
+    """Clone a failed job and re-queue it with exponential backoff."""
+    import asyncio
+
+    next_count = current_retry_count + 1
+    backoff_seconds = min(30 * (2 ** current_retry_count), 300)  # 30s, 60s, 120s … max 5min
+
+    retry_job = queue_job(
+        db,
+        job.pid,
+        job.type,
+        job.title,
+        target=job.target,
+        command=job.command,
+        created_by=job.created_by,
+        connector_key=job.connector_key,
+        operation=job.operation,
+        scope_type=job.scope_type,
+        scope_id=job.scope_id,
+        related_entity_type=job.related_entity_type,
+        related_entity_id=job.related_entity_id,
+        request_json=job.request_json or {},
+        retry_of_job_id=job.id,
+        priority=getattr(job, "priority", 0) or 0,
+        retry_count=next_count,
+        max_retries=getattr(job, "max_retries", 0) or 0,
+    )
+
+    async def _delayed_submit(job_id: str, pid: str, priority: int, delay: float) -> None:
+        await asyncio.sleep(delay)
+        from .job_runner import schedule_job_run
+        schedule_job_run(job_id, pid=pid, priority=priority)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_delayed_submit(retry_job.id, job.pid, getattr(job, "priority", 0) or 0, float(backoff_seconds)))
+    except RuntimeError:
+        # No running loop (e.g. tests) — submit immediately
+        from .job_runner import schedule_job_run
+        schedule_job_run(retry_job.id, pid=job.pid, priority=getattr(job, "priority", 0) or 0)
+
+    import logging
+    logging.getLogger(__name__).info(
+        "Auto-retry %d/%d for job %s → new job %s (backoff %ds)",
+        next_count, getattr(job, "max_retries", 0), job.id, retry_job.id, backoff_seconds,
+    )

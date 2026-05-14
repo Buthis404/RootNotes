@@ -1,19 +1,12 @@
 export const BASE = '/api';
 
-export function getToken() {
-  return localStorage.getItem('rt_token') || '';
-}
-
 export async function req(method, path, body, authRequired = true) {
-  const token = getToken();
   const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const opts = { method, headers };
+  const opts = { method, headers, credentials: 'include' };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(BASE + path, opts);
   if (res.status === 204) return null;
   if (res.status === 401 && authRequired) {
-    localStorage.removeItem('rt_token');
     window.dispatchEvent(new Event('rt:logout'));
     throw new Error('Unauthorized');
   }
@@ -39,16 +32,14 @@ export async function upload(path, file, fieldName = 'file') {
   const res = await fetch(BASE + path, {
     method: 'POST',
     body: form,
-    headers: { 'Authorization': `Bearer ${getToken()}` },
+    credentials: 'include',
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 export async function download(path) {
-  const res = await fetch(BASE + path, {
-    headers: { 'Authorization': `Bearer ${getToken()}` },
-  });
+  const res = await fetch(BASE + path, { credentials: 'include' });
   if (!res.ok) throw new Error(await res.text());
   return res.blob();
 }

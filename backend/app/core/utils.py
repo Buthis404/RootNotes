@@ -1,6 +1,7 @@
 import re
 import uuid
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -11,6 +12,11 @@ from .. import models
 
 def new_id(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
+
+
+def ts_now() -> str:
+    """Return current UTC time as ISO-8601 string with Z suffix: 2026-01-15T14:32:07Z"""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalize_domain(value: str) -> str:

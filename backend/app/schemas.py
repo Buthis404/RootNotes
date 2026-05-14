@@ -2,8 +2,69 @@ import ipaddress
 import json
 import re
 
-from pydantic import BaseModel, field_validator, model_validator
-from typing import List, Optional, Any
+from pydantic import BaseModel, field_validator, model_validator, Field
+from typing import Annotated, List, Optional, Any
+
+# Reusable constrained types
+_TagItem = Annotated[str, Field(max_length=64)]
+_Tags = Annotated[List[_TagItem], Field(max_length=100)]
+
+_SEVERITIES = {"info", "low", "medium", "high", "critical"}
+_FINDING_STATUSES = {"open", "in_progress", "resolved", "accepted", "candidate", "confirmed"}
+_HOST_STATUSES = {
+    # canonical states actually emitted by frontend (NODE_STATUS in constants.js)
+    "unknown", "alive", "scanned", "access", "pwned", "owned",
+    # back-compat aliases used by importers, C2 connectors, and legacy data
+    "up", "down", "unreachable", "attacker", "compromised",
+}
+_HOST_ROLES = {
+    "unknown", "workstation", "server", "dc", "domain_controller",
+    "router", "printer", "iot", "attacker", "pivot",
+    "database", "firewall", "web", "mail", "other",
+}
+_CRED_TYPES = {"plain", "hash", "ntlm", "ticket", "key", "certificate", "token", "other"}
+
+
+# ── Input-only validator mixins (NOT applied to response models) ───────
+class _HostInputMixin(BaseModel):
+    @field_validator("status", mode="before", check_fields=False)
+    @classmethod
+    def _val_host_status(cls, v):
+        if v and v not in _HOST_STATUSES:
+            raise ValueError(f"Invalid host status: {v!r}. Must be one of: {', '.join(sorted(_HOST_STATUSES))}")
+        return v
+
+    @field_validator("role", mode="before", check_fields=False)
+    @classmethod
+    def _val_host_role(cls, v):
+        if v and v not in _HOST_ROLES:
+            raise ValueError(f"Invalid host role: {v!r}. Must be one of: {', '.join(sorted(_HOST_ROLES))}")
+        return v
+
+
+class _CredInputMixin(BaseModel):
+    @field_validator("type", mode="before", check_fields=False)
+    @classmethod
+    def _val_cred_type(cls, v):
+        if v and v not in _CRED_TYPES:
+            raise ValueError(f"Invalid credential type: {v!r}. Must be one of: {', '.join(sorted(_CRED_TYPES))}")
+        return v
+
+
+class _FindingInputMixin(BaseModel):
+    @field_validator("severity", mode="before", check_fields=False)
+    @classmethod
+    def _val_severity(cls, v):
+        if v and v not in _SEVERITIES:
+            raise ValueError(f"Invalid severity: {v!r}. Must be one of: {', '.join(sorted(_SEVERITIES))}")
+        return v
+
+    @field_validator("status", mode="before", check_fields=False)
+    @classmethod
+    def _val_finding_status(cls, v):
+        if v and v not in _FINDING_STATUSES:
+            raise ValueError(f"Invalid finding status: {v!r}. Must be one of: {', '.join(sorted(_FINDING_STATUSES))}")
+        return v
 
 
 # ── Auth / Users ──────────────────────────────────────────────────────
@@ -37,8 +98,8 @@ class UpdateProfileRequest(BaseModel):
 
 
 class CreateUserRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1)
     display_name: Optional[str] = None
     role: str = "user"
 
@@ -52,7 +113,7 @@ class UpdateUserRequest(BaseModel):
 
 # ── Projects ──────────────────────────────────────────────────────────
 class ProjectBase(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=500)
     status: str = "active"
     ip: str = ""
     os: str = "Linux"
@@ -80,9 +141,9 @@ class Project(ProjectBase):
 # ── Notes ─────────────────────────────────────────────────────────────
 class NoteBase(BaseModel):
     pid: str
-    title: str
+    title: str = Field(..., min_length=1, max_length=500)
     phase: str = "recon"
-    tags: List[str] = []
+    tags: _Tags = []
     content: str = ""
     ts: str
     starred: bool = False
@@ -93,9 +154,9 @@ class NoteCreate(NoteBase):
 
 
 class NoteUpdate(BaseModel):
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=500)
     phase: Optional[str] = None
-    tags: Optional[List[str]] = None
+    tags: Optional[_Tags] = None
     content: Optional[str] = None
     ts: Optional[str] = None
     starred: Optional[bool] = None
@@ -126,11 +187,11 @@ class HostBase(BaseModel):
     ip: str
     ips: List[str] = []
     hostname: str = ""
-    os: str = "Linux"
+    os: str = ""
     status: str = "unknown"
-    ports: List[str] = []
-    services: List[str] = []
-    tags: List[str] = []
+    ports: List[str] = Field(default=[], max_length=500)
+    services: List[str] = Field(default=[], max_length=500)
+    tags: _Tags = []
     notes: str = ""
     domain: str = ""
     role: str = "unknown"
@@ -138,7 +199,7 @@ class HostBase(BaseModel):
     import_source: str = ""
 
 
-class HostCreate(HostBase):
+class HostCreate(HostBase, _HostInputMixin):
     pass
 
 
@@ -150,11 +211,25 @@ class HostUpdate(BaseModel):
     status: Optional[str] = None
     ports: Optional[List[str]] = None
     services: Optional[List[str]] = None
-    tags: Optional[List[str]] = None
+    tags: Optional[_Tags] = None
     notes: Optional[str] = None
     domain: Optional[str] = None
     role: Optional[str] = None
     is_attacker: Optional[bool] = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _val_host_status(cls, v):
+        if v and v not in _HOST_STATUSES:
+            raise ValueError(f"Invalid host status: {v!r}. Must be one of: {', '.join(sorted(_HOST_STATUSES))}")
+        return v
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _val_host_role(cls, v):
+        if v and v not in _HOST_ROLES:
+            raise ValueError(f"Invalid host role: {v!r}. Must be one of: {', '.join(sorted(_HOST_ROLES))}")
+        return v
 
 
 class Host(HostBase):
@@ -165,7 +240,7 @@ class Host(HostBase):
 # ── Creds ─────────────────────────────────────────────────────────────
 class CredBase(BaseModel):
     pid: str
-    username: str
+    username: str = Field(..., max_length=256)
     secret: str = ""
     type: str = "plain"
     service: str = ""
@@ -173,17 +248,17 @@ class CredBase(BaseModel):
     domain: str = ""
     cracked: bool = False
     notes: str = ""
-    tags: List[str] = []
+    tags: _Tags = []
     host_ids: List[str] = []
     is_domain: bool = False
 
 
-class CredCreate(CredBase):
+class CredCreate(CredBase, _CredInputMixin):
     pass
 
 
 class CredUpdate(BaseModel):
-    username: Optional[str] = None
+    username: Optional[str] = Field(None, max_length=256)
     secret: Optional[str] = None
     type: Optional[str] = None
     service: Optional[str] = None
@@ -191,9 +266,16 @@ class CredUpdate(BaseModel):
     domain: Optional[str] = None
     cracked: Optional[bool] = None
     notes: Optional[str] = None
-    tags: Optional[List[str]] = None
+    tags: Optional[_Tags] = None
     host_ids: Optional[List[str]] = None
     is_domain: Optional[bool] = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _val_cred_type(cls, v):
+        if v and v not in _CRED_TYPES:
+            raise ValueError(f"Invalid credential type: {v!r}. Must be one of: {', '.join(sorted(_CRED_TYPES))}")
+        return v
 
 
 class Cred(CredBase):
@@ -236,21 +318,17 @@ class Network(BaseModel):
 
     @classmethod
     def from_orm_obj(cls, obj):
-        def _parse(val):
-            if isinstance(val, str):
-                try:
-                    return json.loads(val)
-                except Exception:
-                    return []
-            return val or []
-
+        meta = getattr(obj, 'meta_json', {}) or {}
+        if isinstance(meta, str):
+            try:
+                import json as _json
+                meta = _json.loads(meta)
+            except Exception:
+                meta = {}
         return cls(
             id=obj.id, pid=obj.pid, name=obj.name,
             background=getattr(obj, 'background', '#07080b'),
-            regions=_parse(getattr(obj, 'regions_json', [])),
-            nodes=_parse(obj.nodes_json),
-            edges=_parse(obj.edges_json),
-            meta=_parse(getattr(obj, 'meta_json', {})) if isinstance(getattr(obj, 'meta_json', {}), str) else (getattr(obj, 'meta_json', {}) or {}),
+            meta=meta,
         )
 
 
@@ -362,7 +440,7 @@ class NetworkRegionUpdate(BaseModel):
 class FindingBase(BaseModel):
     pid: str
     host_id: Optional[str] = None
-    title: str
+    title: str = Field(..., min_length=1, max_length=500)
     severity: str = "medium"
     cvss: str = ""
     cve: str = ""
@@ -374,13 +452,13 @@ class FindingBase(BaseModel):
     ts: str
 
 
-class FindingCreate(FindingBase):
+class FindingCreate(FindingBase, _FindingInputMixin):
     pass
 
 
 class FindingUpdate(BaseModel):
     host_id: Optional[str] = None
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=500)
     severity: Optional[str] = None
     cvss: Optional[str] = None
     cve: Optional[str] = None
@@ -390,6 +468,20 @@ class FindingUpdate(BaseModel):
     status: Optional[str] = None
     source: Optional[str] = None
     ts: Optional[str] = None
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _val_severity(cls, v):
+        if v and v not in _SEVERITIES:
+            raise ValueError(f"Invalid severity: {v!r}. Must be one of: {', '.join(sorted(_SEVERITIES))}")
+        return v
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _val_finding_status(cls, v):
+        if v and v not in _FINDING_STATUSES:
+            raise ValueError(f"Invalid finding status: {v!r}. Must be one of: {', '.join(sorted(_FINDING_STATUSES))}")
+        return v
 
 
 class Finding(FindingBase):
@@ -442,6 +534,7 @@ class AttackPath(BaseModel):
 class AttackStepCreate(BaseModel):
     path_id: str
     pid: str
+    host_id: Optional[str] = None
     step_order: int = 0
     node_type: str = "host"
     label: str = ""
@@ -451,6 +544,7 @@ class AttackStepCreate(BaseModel):
     notes: str = ""
 
 class AttackStepUpdate(BaseModel):
+    host_id: Optional[str] = None
     step_order: Optional[int] = None
     node_type: Optional[str] = None
     label: Optional[str] = None
@@ -463,6 +557,7 @@ class AttackStep(BaseModel):
     id: str
     path_id: str
     pid: str
+    host_id: Optional[str] = None
     step_order: int
     node_type: str
     label: str
@@ -492,7 +587,7 @@ class LootBase(BaseModel):
     playbook_run_id: str = ""
     sha256: str = ""
     artifact_type: str = "file"
-    tags: list[str] = []
+    tags: _Tags = []
 
 class LootCreate(LootBase):
     pass
@@ -513,7 +608,7 @@ class LootUpdate(BaseModel):
     playbook_run_id: Optional[str] = None
     sha256: Optional[str] = None
     artifact_type: Optional[str] = None
-    tags: Optional[list[str]] = None
+    tags: Optional[_Tags] = None
 
 class Loot(LootBase):
     id: str
@@ -533,6 +628,9 @@ class ScopeBase(BaseModel):
     scope_type: str = "cidr"
     in_scope: bool = True
     description: str = ""
+    gateway_ip: str = ""
+    is_entry: bool = False
+    via_host_id: str = ""
 
 
 class ScopeCreate(ScopeBase):
@@ -561,6 +659,9 @@ class ScopeUpdate(BaseModel):
     scope_type: Optional[str] = None
     in_scope: Optional[bool] = None
     description: Optional[str] = None
+    gateway_ip: Optional[str] = None
+    is_entry: Optional[bool] = None
+    via_host_id: Optional[str] = None
 
 class Scope(ScopeBase):
     id: str
@@ -711,7 +812,7 @@ class TimelineEvent(BaseModel):
 
 # ── Custom Finding Templates ───────────────────────────────────────────
 class FindingTemplateBase(BaseModel):
-    title: str
+    title: str = Field(..., min_length=1, max_length=500)
     severity: str = "medium"
     cvss: str = ""
     cve: str = ""
@@ -720,7 +821,7 @@ class FindingTemplateBase(BaseModel):
     recommendation: str = ""
 
 
-class FindingTemplateCreate(FindingTemplateBase):
+class FindingTemplateCreate(FindingTemplateBase, _FindingInputMixin):
     pass
 
 
@@ -733,10 +834,10 @@ class FindingTemplate(FindingTemplateBase):
 
 # ── Custom Snippets ────────────────────────────────────────────────────
 class CustomSnippetBase(BaseModel):
-    title: str
-    category: str = "Misc"
+    title: str = Field(..., min_length=1, max_length=500)
+    category: str = ""
     command: str = ""
-    tags: List[str] = []
+    tags: _Tags = []
     opsec: str = ""
 
 
@@ -745,10 +846,10 @@ class CustomSnippetCreate(CustomSnippetBase):
 
 
 class CustomSnippetUpdate(BaseModel):
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=500)
     category: Optional[str] = None
     command: Optional[str] = None
-    tags: Optional[List[str]] = None
+    tags: Optional[_Tags] = None
     opsec: Optional[str] = None
 
 
@@ -818,17 +919,17 @@ class ProjectDomain(BaseModel):
 # ── Knowledge Base ────────────────────────────────────────────────────
 class KBArticleCreate(BaseModel):
     pid: Optional[str] = None
-    title: str
+    title: str = Field(..., min_length=1, max_length=500)
     content: str = ""
-    category: str = "General"
-    tags: List[str] = []
+    category: str = ""
+    tags: _Tags = []
 
 
 class KBArticleUpdate(BaseModel):
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=500)
     content: Optional[str] = None
     category: Optional[str] = None
-    tags: Optional[List[str]] = None
+    tags: Optional[_Tags] = None
 
 
 class KBArticle(BaseModel):

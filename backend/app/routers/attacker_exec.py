@@ -11,7 +11,9 @@ from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command, is_transport_failure as _is_transport_failure
-from ..core.utils import new_id
+from ..core.exec_context import build_remote_execution_command
+from ..core.route_selection import annotate_targets_with_route_context, choose_route_aware_target
+from ..core.utils import new_id, ts_now
 from ..core.crypto import decrypt_str
 from ..database import get_db
 from ..plugins.registry import registry
@@ -109,6 +111,10 @@ def _list_global_targets_for_project(pid: str) -> list[dict]:
     ]
 
 
+def _extract_command_target_hint(command: str) -> str:
+    return command or ""
+
+
 @router.get("/targets")
 def list_execution_targets(
     pid: str,
@@ -137,9 +143,11 @@ def list_execution_targets(
             "cred_count": len(linked_creds),
         })
 
+    global_targets = annotate_targets_with_route_context(pid, _list_global_targets_for_project(pid), db)
+
     return {
         "project_hosts": host_targets,
-        "global_targets": _list_global_targets_for_project(pid),
+        "global_targets": global_targets,
     }
 
 
@@ -184,10 +192,15 @@ async def execute_attacker_command(
         else:
             if not global_targets:
                 raise HTTPException(400, "No global attacker target is assigned to this project")
+            hinted = choose_route_aware_target(pid, global_targets, db, _extract_command_target_hint(body.command))
             # All eligible global targets for transport fallback
             all_stored = list_attacker_targets()
+            ranked_targets = []
+            if hinted:
+                ranked_targets.append(hinted)
+            ranked_targets.extend([gt for gt in global_targets if gt.get('id') != hinted.get('id')] if hinted else global_targets)
             _exec_ssh_candidates = [
-                t for gt in global_targets
+                t for gt in ranked_targets
                 for t in all_stored
                 if t.get("id") == gt.get("id") and t.get("enabled", True)
             ]
@@ -202,7 +215,7 @@ async def execute_attacker_command(
         if not attacker_host:
             raise HTTPException(400, "No host is available in the project to attach execution output")
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     title = body.snippet_title.strip() or (body.command.strip().splitlines()[0][:80] if body.command.strip() else "Remote command")
 
     exec_username = getattr(request.state, "username", None)
@@ -235,7 +248,7 @@ async def execute_attacker_command(
     # Run SSH with transport fallback
     loop = asyncio.get_running_loop()
     result = None
-    _cmd = body.command
+    _cmd = build_remote_execution_command(ssh_config, body.command)
     _timeout = body.timeout_seconds
     for _cfg_idx, _cfg in enumerate(_exec_ssh_candidates):
         try:

@@ -1,37 +1,39 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import ToastContainer from './components/Toast.jsx';
 import Icon from './components/Icon.jsx';
 import { TABS, ADMIN_TAB } from './constants.js';
 import { api } from './api.js';
 import { useProjectStore } from './store/useProjectStore.js';
 import { useSync } from './hooks/useSync.js';
-import OverviewView from './views/OverviewView.jsx';
-import ProjectsView from './views/ProjectsView.jsx';
-import NotesView from './views/NotesView.jsx';
-import HostsView from './views/HostsView.jsx';
-import CredsView from './views/CredsView.jsx';
-import NetworkView from './views/NetworkView.jsx';
-import ReportView from './views/ReportView.jsx';
-import AdminView from './views/AdminView.jsx';
-import FindingsView from './views/FindingsView.jsx';
-import ObjectivesView from './views/ObjectivesView.jsx';
-import AttackPathView from './views/AttackPathView.jsx';
-import AttackGraphView from './views/AttackGraphView.jsx';
-import LootView from './views/LootView.jsx';
-import ScopeView from './views/ScopeView.jsx';
-import SearchModal from './components/SearchModal.jsx';
-import ChecklistView from './views/ChecklistView.jsx';
-import TimelineView from './views/TimelineView.jsx';
-import CheatsheetView from './views/CheatsheetView.jsx';
-import ScansView from './views/ScansView.jsx';
-import JobsView from './views/JobsView.jsx';
-import PlaybooksView from './views/PlaybooksView.jsx';
-import DomainsView from './views/DomainsView.jsx';
-import AIChatPanel from './components/AIChatPanel.jsx';
-import KBView from './views/KBView.jsx';
-import ImportModal from './components/ImportModal.jsx';
+// Eagerly loaded — needed on first render or very frequently
 import LoginView from './views/LoginView.jsx';
-import UserSettingsView from './views/UserSettingsView.jsx';
+import ProjectsView from './views/ProjectsView.jsx';
+import OverviewView from './views/OverviewView.jsx';
+import ImportModal from './components/ImportModal.jsx';
+import AIChatPanel from './components/AIChatPanel.jsx';
+// Lazily loaded — only when the user navigates to that tab
+const NotesView       = lazy(() => import('./views/NotesView.jsx'));
+const HostsView       = lazy(() => import('./views/HostsView.jsx'));
+const CredsView       = lazy(() => import('./views/CredsView.jsx'));
+const NetworkView     = lazy(() => import('./views/NetworkView.jsx'));
+const FindingsView    = lazy(() => import('./views/FindingsView.jsx'));
+const ObjectivesView  = lazy(() => import('./views/ObjectivesView.jsx'));
+const AttackPathView  = lazy(() => import('./views/AttackPathView.jsx'));
+const AttackGraphView = lazy(() => import('./views/AttackGraphView.jsx'));
+const LootView        = lazy(() => import('./views/LootView.jsx'));
+const ScopeView       = lazy(() => import('./views/ScopeView.jsx'));
+const ChecklistView   = lazy(() => import('./views/ChecklistView.jsx'));
+const TimelineView    = lazy(() => import('./views/TimelineView.jsx'));
+const CheatsheetView  = lazy(() => import('./views/CheatsheetView.jsx'));
+const ScansView       = lazy(() => import('./views/ScansView.jsx'));
+const JobsView        = lazy(() => import('./views/JobsView.jsx'));
+const PlaybooksView   = lazy(() => import('./views/PlaybooksView.jsx'));
+const DomainsView     = lazy(() => import('./views/DomainsView.jsx'));
+const KBView          = lazy(() => import('./views/KBView.jsx'));
+const ReportView      = lazy(() => import('./views/ReportView.jsx'));
+const AdminView       = lazy(() => import('./views/AdminView.jsx'));
+const SearchModal     = lazy(() => import('./components/SearchModal.jsx'));
+const UserSettingsView = lazy(() => import('./views/UserSettingsView.jsx'));
 import { hasAutoRoleSignals, inferNodeType, isAttackerHost } from './utils/hostMeta.js';
 import { useProjectPermissions } from './context/ProjectPermissions.jsx';
 import { NavTab, ProjectPicker, TweaksPanel } from './app/AppChrome.jsx';
@@ -48,12 +50,9 @@ export default function App() {
 
   useEffect(() => {
     const doCheck = async () => {
-      const token = localStorage.getItem('rt_token');
       const status = await api.authStatus();
       if (!status.initialized) { setIsFirstRun(true); setAuthReady(true); return; }
-      if (token) {
-        try { const u = await api.authMe(); setCurrentUser(u); } catch { localStorage.removeItem('rt_token'); }
-      }
+      try { const u = await api.authMe(); setCurrentUser(u); } catch {}
       setAuthReady(true);
     };
     doCheck();
@@ -68,8 +67,8 @@ export default function App() {
     setCurrentUser(user);
     setIsFirstRun(false);
   };
-  const handleLogout = () => {
-    localStorage.removeItem('rt_token');
+  const handleLogout = async () => {
+    try { await api.authLogout(); } catch {}
     setCurrentUser(null);
     setError(null);
     setLoading(true);
@@ -705,6 +704,7 @@ export default function App() {
 
       {/* Main content */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
+      <Suspense fallback={<div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#404550', fontFamily: 'JetBrains Mono', fontSize: 11 }}>Loading…</div>}>
         {tab === 'projects' && (
           <ProjectsView projects={projects} notes={notes} hosts={hosts} creds={creds}
             scopes={scopes}
@@ -875,22 +875,27 @@ export default function App() {
         {tab === 'domains' && (
           <DomainsView selectedProject={selectedProject} accent={acc} />
         )}
-        {tab === 'kb' && <KBView selectedProject={selectedProject} accent={acc} currentUser={currentUser} />}
+        {tab === 'kb' && <KBView selectedProject={selectedProject} accent={acc} currentUser={currentUser} attackSteps={attackSteps.filter(s => s.pid === selectedProject)} />}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}
+            attackPaths={attackPaths.filter(p => p.pid === selectedProject)}
+            attackSteps={attackSteps.filter(s => s.pid === selectedProject)}
             selectedProject={selectedProject} accent={acc} />
         )}
         {tab === 'admin' && currentUser?.role === 'admin' && (
           <AdminView currentUser={currentUser} accent={acc} onlineUsers={onlineUsers} />
         )}
+      </Suspense>
       </div>
 
       {showTweaks && <TweaksPanel tweaks={tweaks} updateTweak={updateTweak} onClose={() => setShowTweaks(false)} left={72} />}
 
       {showSearch && (
-        <SearchModal accent={acc} selectedProject={selectedProject} projects={projects}
-          onNavigate={(t) => setTab(t)}
-          onClose={() => setShowSearch(false)} />
+        <Suspense fallback={null}>
+          <SearchModal accent={acc} selectedProject={selectedProject} projects={projects}
+            onNavigate={(t) => setTab(t)}
+            onClose={() => setShowSearch(false)} />
+        </Suspense>
       )}
 
       {importProjectId && (

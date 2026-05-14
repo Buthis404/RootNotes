@@ -6,6 +6,7 @@ from ..core.events import bcast, log_event
 from ..core.job_tracker import finish_job, mark_job_running
 from ..core.ssh_exec import run_ssh_command, run_ssh_command_cancellable
 from ..core.transport import CancellationToken
+from ..core.network_data import get_nodes, get_edges, replace_nodes
 from ..core.utils import new_id
 from ..core.writeback import apply_writeback
 
@@ -25,9 +26,9 @@ def supports_queued_execution(connector_key: str, operation: str) -> bool:
     return (connector_key, operation) in _SUPPORTED_QUEUED_OPERATIONS
 
 
-def schedule_job_run(job_id: str) -> None:
+def schedule_job_run(job_id: str, *, pid: str = "", priority: int = 0) -> None:
     from .worker_pool import get_pool
-    get_pool().submit(job_id)
+    get_pool().submit(job_id, pid=pid, priority=priority)
 
 
 async def run_queued_job(job_id: str, cancel_token: CancellationToken | None = None) -> None:
@@ -438,8 +439,8 @@ async def _run_topology_rebuild_job(db, job: models.Job, cancel_token: Cancellat
         "os": h.os, "status": h.status, "role": h.role,
         "is_attacker": h.is_attacker, "ports": h.ports or [], "services": h.services or [],
     } for h in all_hosts]
-    existing_nodes = list(network.nodes_json or [])
-    existing_edges = list(network.edges_json or [])
+    existing_nodes = get_nodes(network.id, db)
+    existing_edges = get_edges(network.id, db)
     positioned = compute_layout(hosts_for_layout, existing_nodes, keep_manual_positions, existing_edges)
     ip_to_new_pos = {n.get("ip"): (n.get("x", 0), n.get("y", 0)) for n in positioned}
     hid_to_new_pos = {n.get("id"): (n.get("x", 0), n.get("y", 0)) for n in positioned}
@@ -451,8 +452,7 @@ async def _run_topology_rebuild_job(db, job: models.Job, cancel_token: Cancellat
             node["x"], node["y"] = new_pos
             node["auto_positioned"] = True
             node["manually_positioned"] = False
-    network.nodes_json = existing_nodes
-    network.edges_json = existing_edges
+    replace_nodes(network.id, network.pid, existing_nodes, db)
     db.commit()
     result = schemas.Network.from_orm_obj(network)
     bcast(job.pid, "network", "layout_applied", {"network": result.model_dump(), "updated_at": job.created_at})

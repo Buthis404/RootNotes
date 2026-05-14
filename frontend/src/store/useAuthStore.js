@@ -9,7 +9,6 @@ export const useAuthStore = create((set) => ({
   setAuthReady: (ready) => set({ authReady: ready }),
   setIsFirstRun: (val) => set({ isFirstRun: val }),
   logout: () => {
-    localStorage.removeItem('rt_token');
     set({ currentUser: null });
   },
 }));

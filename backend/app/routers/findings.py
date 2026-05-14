@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
@@ -13,9 +13,12 @@ router = APIRouter(prefix="/api/findings", tags=["findings"])
 
 @router.get("", response_model=list[schemas.Finding])
 def list_findings(
+    response: Response,
     pid: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
@@ -26,11 +29,14 @@ def list_findings(
             q = q.filter(models.Finding.status == status)
         if source:
             q = q.filter(models.Finding.source == source)
-        return q.order_by(models.Finding.ts.desc()).all()
-    if user.role == "admin":
-        return db.query(models.Finding).order_by(models.Finding.ts.desc()).all()
-    member_pids = get_user_member_pids(db, user)
-    return db.query(models.Finding).filter(models.Finding.pid.in_(member_pids)).order_by(models.Finding.ts.desc()).all()
+    elif user.role == "admin":
+        q = db.query(models.Finding)
+    else:
+        member_pids = get_user_member_pids(db, user)
+        q = db.query(models.Finding).filter(models.Finding.pid.in_(member_pids))
+    q = q.order_by(models.Finding.ts.desc())
+    response.headers["X-Total-Count"] = str(q.count())
+    return q.offset(offset).limit(limit).all()
 
 
 @router.post("/scan-candidates", status_code=200)

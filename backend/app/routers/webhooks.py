@@ -3,18 +3,22 @@ C2 webhook receiver. Each project gets a unique token.
 POST /api/webhooks/{token} accepts events from Cobalt Strike, Sliver, Havoc, etc.
 and auto-creates hosts/creds/findings.
 """
+import hashlib
+import hmac
 import secrets
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..core.config import WEBHOOK_HMAC_SECRET
 from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
-from ..core.utils import new_id
+from ..core.limiter import limiter
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 
 
@@ -33,7 +37,11 @@ def get_project_webhook(
     if not project:
         raise HTTPException(404, "Project not found")
     token = getattr(project, "webhook_token", None) or ""
-    return {"token": token, "url": f"/api/webhooks/{token}" if token else ""}
+    return {
+        "token": token,
+        "url": f"/api/webhooks/{token}" if token else "",
+        "hmac_required": bool(WEBHOOK_HMAC_SECRET),
+    }
 
 
 @router.post("/api/projects/{pid}/webhook/regenerate")
@@ -50,6 +58,8 @@ def regenerate_webhook_token(
         raise HTTPException(404, "Project not found")
     token = secrets.token_urlsafe(24)
     project.webhook_token = token
+    log_event(db, pid, user.username, "audit", "webhook_token_regenerated",
+              f"Webhook token regenerated for project {pid}", {"pid": pid})
     db.commit()
     return {"token": token, "url": f"/api/webhooks/{token}"}
 
@@ -85,18 +95,37 @@ def _find_project(db: Session, token: str) -> Optional[models.Project]:
     ).first()
 
 
+def _verify_hmac(request: Request, body: bytes) -> bool:
+    """Verify X-Hub-Signature-256 if WEBHOOK_HMAC_SECRET is configured."""
+    if not WEBHOOK_HMAC_SECRET:
+        return True
+    sig_header = request.headers.get("X-Hub-Signature-256", "")
+    if not sig_header.startswith("sha256="):
+        return False
+    expected = "sha256=" + hmac.new(
+        WEBHOOK_HMAC_SECRET.encode(), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, sig_header)
+
+
 @router.post("/api/webhooks/{token}", status_code=200)
-def receive_webhook(
+@limiter.limit("120/minute")
+async def receive_webhook(
+    request: Request,
     token: str,
     event: WebhookEvent,
     db: Session = Depends(get_db),
 ):
+    body = await request.body()
+    if not _verify_hmac(request, body):
+        raise HTTPException(403, "Invalid webhook signature")
+
     project = _find_project(db, token)
     if not project:
         raise HTTPException(404, "Invalid webhook token")
 
     pid = project.id
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     results = {}
 
     # Resolve IP

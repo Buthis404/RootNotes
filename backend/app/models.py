@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, Text, ARRAY, Integer, ForeignKey
+from sqlalchemy import Column, String, Boolean, Text, ARRAY, Integer, Float, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from .database import Base
 
@@ -101,9 +101,6 @@ class Network(Base):
     pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False, default="Network")
     background = Column(String, nullable=False, default="#07080b")
-    regions_json = Column(JSONB, nullable=False, default=[])
-    nodes_json = Column(JSONB, nullable=False, default=[])
-    edges_json = Column(JSONB, nullable=False, default=[])
     meta_json = Column(JSONB, nullable=False, default={})
 
 
@@ -165,6 +162,7 @@ class AttackStep(Base):
     id = Column(String, primary_key=True)
     path_id = Column(String, ForeignKey("attack_paths.id", ondelete="CASCADE"), nullable=False)
     pid = Column(String, nullable=False)
+    host_id = Column(String, ForeignKey("hosts.id", ondelete="SET NULL"), nullable=True)
     step_order = Column(Integer, nullable=False, default=0)
     node_type = Column(String, nullable=False, default="host")
     label = Column(String, nullable=False, default="")
@@ -210,6 +208,9 @@ class Scope(Base):
     scope_type = Column(String, nullable=False, default="cidr")
     in_scope = Column(Boolean, nullable=False, default=True)
     description = Column(String, nullable=False, default="")
+    gateway_ip = Column(String, nullable=False, default="")
+    is_entry = Column(Boolean, nullable=False, default=False)
+    via_host_id = Column(String, nullable=False, default="")
 
 
 class CredHostNote(Base):
@@ -342,6 +343,9 @@ class Job(Base):
     related_entity_type = Column(String, nullable=False, default="")
     related_entity_id = Column(String, nullable=False, default="")
     retry_of_job_id = Column(String, nullable=False, default="")
+    priority = Column(Integer, nullable=False, default=0)      # 0=normal, 10=high, -10=bulk/low
+    retry_count = Column(Integer, nullable=False, default=0)   # how many auto-retries have run
+    max_retries = Column(Integer, nullable=False, default=0)   # 0 = no auto-retry
     created_at = Column(String, nullable=False)
     started_at = Column(String, nullable=False, default="")
     finished_at = Column(String, nullable=False, default="")
@@ -433,3 +437,97 @@ class HostCollection(Base):
     created_by = Column(String, nullable=False, default="")
     created_at = Column(String, nullable=False)
     updated_at = Column(String, nullable=False)
+
+
+class OperationPack(Base):
+    __tablename__ = "operation_packs"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    steps = Column(JSONB, nullable=False, default=list)
+    tags = Column(ARRAY(String), nullable=False, default=list)
+    is_builtin = Column(Boolean, nullable=False, default=False)
+    created_by = Column(String, nullable=False, default="")
+    created_at = Column(String, nullable=False)
+
+
+class SavedSearch(Base):
+    __tablename__ = "saved_searches"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String, nullable=False)
+    query = Column(String, nullable=False)
+    pid = Column(String, nullable=True)
+    created_at = Column(String, nullable=False)
+
+
+class NetworkNode(Base):
+    __tablename__ = "network_nodes"
+
+    id = Column(String, primary_key=True)
+    network_id = Column(String, ForeignKey("networks.id", ondelete="CASCADE"), nullable=False)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    host_id = Column(String, nullable=True)
+    x = Column(Float, nullable=False, default=0)
+    y = Column(Float, nullable=False, default=0)
+    label = Column(String, nullable=False, default="")
+    ip = Column(String, nullable=False, default="")
+    ips = Column(ARRAY(String), nullable=False, default=list)
+    type = Column(String, nullable=False, default="host")
+    status = Column(String, nullable=False, default="unknown")
+    ports = Column(ARRAY(String), nullable=False, default=list)
+    notes = Column(Text, nullable=False, default="")
+    role = Column(String, nullable=False, default="")
+    os = Column(String, nullable=False, default="")
+    tags = Column(ARRAY(String), nullable=False, default=list)
+    is_attacker = Column(Boolean, nullable=False, default=False)
+    manually_positioned = Column(Boolean, nullable=False, default=False)
+    auto_positioned = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(String, nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    extra_json = Column(JSONB, nullable=False, default=dict)
+
+
+class NetworkEdge(Base):
+    __tablename__ = "network_edges"
+
+    id = Column(String, primary_key=True)
+    network_id = Column(String, ForeignKey("networks.id", ondelete="CASCADE"), nullable=False)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    from_node_id = Column(String, nullable=False)
+    to_node_id = Column(String, nullable=False)
+    style = Column(String, nullable=False, default="solid")
+    type = Column(String, nullable=False, default="network")
+    label = Column(String, nullable=False, default="")
+    confidence = Column(Float, nullable=False, default=1.0)
+    source = Column(String, nullable=False, default="manual")
+    reason = Column(String, nullable=False, default="")
+    state = Column(String, nullable=False, default="manual")
+    verified = Column(Boolean, nullable=False, default=False)
+    is_manual = Column(Boolean, nullable=False, default=True)
+    manual_override = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(String, nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    extra_json = Column(JSONB, nullable=False, default=dict)
+
+
+class NetworkRegion(Base):
+    __tablename__ = "network_regions"
+
+    id = Column(String, primary_key=True)
+    network_id = Column(String, ForeignKey("networks.id", ondelete="CASCADE"), nullable=False)
+    pid = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    x = Column(Float, nullable=False, default=0)
+    y = Column(Float, nullable=False, default=0)
+    w = Column(Float, nullable=False, default=200)
+    h = Column(Float, nullable=False, default=100)
+    label = Column(String, nullable=False, default="")
+    note = Column(Text, nullable=False, default="")
+    fill = Column(String, nullable=False, default="")
+    stroke = Column(String, nullable=False, default="")
+    zone_type = Column(String, nullable=False, default="")
+    updated_at = Column(String, nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    extra_json = Column(JSONB, nullable=False, default=dict)

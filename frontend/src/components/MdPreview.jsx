@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import DOMPurify from 'dompurify';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js/lib/core';
@@ -201,7 +202,7 @@ function buildComponents(accent) {
           <CopyBtn text={code} accent={accent} />
           <pre style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: lang ? '32px 16px 14px' : '14px 16px', overflowX: 'auto', margin: 0, lineHeight: 1.65 }}>
             <code
-              dangerouslySetInnerHTML={{ __html: highlighted }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(highlighted) }}
               style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: '#c8cdd6' }}
             />
           </pre>

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
@@ -26,7 +26,7 @@ def list_objectives(pid: str | None = None, db: Session = Depends(get_db), user:
 @router.post("", response_model=schemas.Objective)
 def create_objective(body: schemas.ObjectiveCreate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, body.pid, user, "objectives.create")
-    obj = models.Objective(**body.model_dump(), id=new_id("obj"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
+    obj = models.Objective(**body.model_dump(), id=new_id("obj"), ts=ts_now())
     db.add(obj)
     log_event(db, obj.pid, getattr(request.state, "username", None), "objective", "create",
               f"Objective added: {obj.title}", {"category": obj.category})
@@ -46,7 +46,7 @@ def update_objective(oid: str, body: schemas.ObjectiveUpdate, request: Request, 
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(obj, k, v)
     if body.status == "captured" and not obj.captured_at:
-        obj.captured_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+        obj.captured_at = ts_now()
     if body.status is not None and body.status != old_status:
         log_event(db, obj.pid, getattr(request.state, "username", None), "objective", "status",
                   f"Objective «{obj.title}» → {obj.status}", {"old": old_status, "new": obj.status})

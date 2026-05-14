@@ -2,7 +2,7 @@
  * Unified API re-export for backward compatibility.
  * Import from here or from individual domain modules.
  */
-import { req, upload, download, BASE, getToken } from './client.js';
+import { req, upload, download, BASE } from './client.js';
 
 export const api = {
   // Auth
@@ -12,6 +12,7 @@ export const api = {
   authMe:      ()         => req('GET',  '/auth/me'),
   authUpdateMe:(data)     => req('PATCH','/auth/me',      data),
   authChangePassword: (data) => req('POST', '/auth/change-password', data),
+  authLogout:  ()         => req('POST', '/auth/logout', undefined, false),
 
   // Admin
   adminListUsers:   ()          => req('GET',    '/admin/users'),
@@ -146,7 +147,10 @@ export const api = {
   deleteCredHostNote: (id)          => req('DELETE', `/cred-host-notes/${id}`),
 
   // Search & presence
-  search:      (q, pid, limit = 60) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}&limit=${limit}`),
+  search:      (q, pid, limit = 40, offset = 0) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}&limit=${limit}&offset=${offset}`),
+  listSavedSearches:   ()           => req('GET',    '/saved-searches'),
+  createSavedSearch:   (data)       => req('POST',   '/saved-searches', data),
+  deleteSavedSearch:   (id)         => req('DELETE', `/saved-searches/${id}`),
   getPresence: ()        => req('GET', '/presence'),
   getWorkerStatus: ()    => req('GET', '/worker/status'),
   listModules: ()        => req('GET', '/modules'),
@@ -168,13 +172,29 @@ export const api = {
   deleteCustomSnippet: (id)         => req('DELETE', `/snippets/custom/${id}`),
   exportSnippets:      ()           => download('/snippets/export'),
   importSnippets:      (file)       => upload('/snippets/import', file),
+  exportKB:            (pid)        => download(`/kb/export${pid ? `?pid=${pid}` : ''}`),
+  importKB:            (file, pid)  => upload(`/kb/import${pid ? `?pid=${pid}` : ''}`, file),
+  exportPlaybooks:     ()           => download('/playbooks/custom/export'),
+  importPlaybooks:     (file)       => upload('/playbooks/custom/import', file),
+  listOperationPacks:  ()           => req('GET',    '/playbooks/packs'),
+  createOperationPack: (data)       => req('POST',   '/playbooks/packs', data),
+  deleteOperationPack: (packId)     => req('DELETE', `/playbooks/packs/${packId}`),
+
+  // BloodHound server-side import
+  importBloodHound: (pid, file) => upload(`/projects/${pid}/import/bloodhound`, file),
+
+  // MITRE ATT&CK
+  getMitreCoverage:  (pid) => req('GET', `/projects/${pid}/mitre/coverage`),
+  downloadReportPDF: async (pid) => {
+    const res = await fetch(`/api/projects/${pid}/report/pdf`, { credentials: 'include' });
+    if (!res.ok) throw new Error(`PDF generation failed: ${res.status}`);
+    return res.blob();
+  },
 
   // Batch import & project export/import
   batchImport:   (pid, data) => req('POST', `/import/${pid}`, data),
   exportProject: async (pid) => {
-    const res = await fetch(`/api/export/${pid}`, {
-      headers: { 'Authorization': `Bearer ${getToken()}` },
-    });
+    const res = await fetch(`/api/export/${pid}`, { credentials: 'include' });
     if (!res.ok) throw new Error(await res.text());
     const blob = await res.blob();
     const password = res.headers.get('X-Zip-Password') || null;
@@ -184,10 +204,9 @@ export const api = {
 
   // Topology
   topologyPreview: (pid, formData) => {
-    const token = localStorage.getItem('rt_token') || '';
     return fetch(`/api/projects/${pid}/topology/preview`, {
       method: 'POST', body: formData,
-      headers: { 'Authorization': `Bearer ${token}` },
+      credentials: 'include',
     }).then(async res => {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
@@ -204,6 +223,7 @@ export const api = {
   // Pivot observations
   listPivots:            (pid)          => req('GET',  `/projects/${pid}/pivots`),
   createPivot:           (pid, data)    => req('POST', `/projects/${pid}/pivots`, data),
+  updatePivot:           (pid, pivotId, data) => req('PATCH', `/projects/${pid}/pivots/${pivotId}`, data),
   deletePivot:           (pid, pivotId) => req('DELETE', `/projects/${pid}/pivots/${pivotId}`),
   collectPivots:         (pid, data)    => req('POST', `/projects/${pid}/pivots/collect`, data),
 
@@ -327,17 +347,15 @@ export const api = {
 
   // Knowledge base
   listKBArticles:    (params={})       => { const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v])=>v!=null))).toString(); return req('GET', `/kb${qs?`?${qs}`:''}`); },
+  getKBArticles:     (params={})       => { const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v])=>v!=null))).toString(); return req('GET', `/kb${qs?`?${qs}`:''}`); },
   getKBArticle:      (id)              => req('GET',  `/kb/${id}`),
   createKBArticle:   (data)            => req('POST', '/kb', data),
   updateKBArticle:   (id, data)        => req('PATCH', `/kb/${id}`, data),
   deleteKBArticle:   (id)              => req('DELETE', `/kb/${id}`),
+  seedMitreKB:       ()               => req('POST', '/kb/seed/mitre'),
 };
 
-/** Append auth token to a /api/uploads/... download URL for use in <a href> links. */
+/** Returns the URL unchanged — cookie auth handles authentication for download links. */
 export function downloadUrl(url) {
-  if (!url) return url;
-  const token = getToken();
-  if (!token) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
+  return url || '';
 }

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
@@ -26,7 +26,7 @@ def list_attack_paths(pid: str | None = None, db: Session = Depends(get_db), use
 @router.post("/api/attack-paths", response_model=schemas.AttackPath)
 def create_attack_path(body: schemas.AttackPathCreate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, body.pid, user, "attack_paths.update")
-    ap = models.AttackPath(**body.model_dump(), id=new_id("ap"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
+    ap = models.AttackPath(**body.model_dump(), id=new_id("ap"), ts=ts_now())
     db.add(ap)
     log_event(db, ap.pid, getattr(request.state, "username", None), "attack_path", "create", f"Attack path created: {ap.name}")
     db.commit()
@@ -83,7 +83,7 @@ def list_attack_steps(path_id: str | None = None, pid: str | None = None, db: Se
 @router.post("/api/attack-steps", response_model=schemas.AttackStep)
 def create_attack_step(body: schemas.AttackStepCreate, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     check_pid_access(db, body.pid, user, "attack_paths.update")
-    step = models.AttackStep(**body.model_dump(), id=new_id("as"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
+    step = models.AttackStep(**body.model_dump(), id=new_id("as"), ts=ts_now())
     db.add(step)
     db.commit()
     db.refresh(step)

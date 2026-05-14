@@ -1,4 +1,3 @@
-from copy import deepcopy
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -6,14 +5,18 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..core.events import bcast
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
+from ..core.network_data import (
+    get_nodes, get_edges, get_regions,
+    upsert_node, upsert_edge, upsert_region,
+    delete_node, delete_edge, delete_edges_by_node, delete_region,
+)
 from ..database import get_db
 
 
 AUTO_LINK_SUPPRESSIONS_KEY = "suppressed_auto_links"
-
 
 router = APIRouter(prefix="/api/projects/{pid}/network", tags=["network-map"])
 
@@ -34,7 +37,7 @@ def require_region_perm(pid: str, db: Session = Depends(get_db), user: models.Us
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return ts_now()
 
 
 def _get_network(pid: str, network_id: str, db: Session) -> models.Network:
@@ -77,14 +80,6 @@ def _edge_version(edge: dict) -> int:
 
 def _region_version(region: dict) -> int:
     return int(region.get("version") or 0) + 1
-
-
-def _json_list_copy(items):
-    return deepcopy(items or [])
-
-
-def _json_dict_copy(items):
-    return deepcopy(items or {})
 
 
 def _node_ref(node: dict | None) -> str:
@@ -146,8 +141,6 @@ def _sync_host_defaults(node: dict, host: models.Host | None):
 def create_network_node(pid: str, body: schemas.NetworkNodeCreate, request: Request, db: Session = Depends(get_db)):
     net = _get_network(pid, body.network_id, db)
     host = _get_host(pid, body.host_id, db)
-    nodes = _json_list_copy(net.nodes_json)
-    edges = _json_list_copy(net.edges_json)
     node = {
         "id": new_id("n"),
         "host_id": body.host_id,
@@ -170,8 +163,7 @@ def create_network_node(pid: str, body: schemas.NetworkNodeCreate, request: Requ
         "version": 1,
     }
     node = _sync_host_defaults(node, host)
-    nodes.append(node)
-    net.nodes_json = nodes
+    upsert_node(net.id, pid, node, db)
     db.commit()
     payload = {
         "network_id": net.id,
@@ -191,8 +183,8 @@ def update_network_node(pid: str, node_id: str, body: schemas.NetworkNodeUpdate,
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
     host = _get_host(pid, body.host_id, db) if body.host_id is not None else None
-    nodes = _json_list_copy(net.nodes_json)
-    idx, node = _find_node(nodes, node_id)
+    nodes = get_nodes(net.id, db)
+    _idx, node = _find_node(nodes, node_id)
     updates = body.model_dump(exclude_none=True, exclude={"client_mutation_id"})
     for key, value in updates.items():
         node[key] = value
@@ -201,8 +193,7 @@ def update_network_node(pid: str, node_id: str, body: schemas.NetworkNodeUpdate,
     node = _sync_host_defaults(node, host)
     node["updated_at"] = _now()
     node["version"] = _node_version(node)
-    nodes[idx] = node
-    net.nodes_json = nodes
+    upsert_node(net.id, pid, node, db)
     db.commit()
     payload = {
         "network_id": net.id,
@@ -221,16 +212,15 @@ def update_network_node_position(pid: str, node_id: str, body: schemas.NetworkNo
     if not network_id:
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
-    nodes = _json_list_copy(net.nodes_json)
-    idx, node = _find_node(nodes, node_id)
+    nodes = get_nodes(net.id, db)
+    _idx, node = _find_node(nodes, node_id)
     node["x"] = body.x
     node["y"] = body.y
     node["manually_positioned"] = body.manually_positioned
     node["auto_positioned"] = not body.manually_positioned
     node["updated_at"] = _now()
     node["version"] = _node_version(node)
-    nodes[idx] = node
-    net.nodes_json = nodes
+    upsert_node(net.id, pid, node, db)
     db.commit()
     payload = {
         "network_id": net.id,
@@ -253,14 +243,10 @@ def delete_network_node(pid: str, node_id: str, request: Request, db: Session = 
     if not network_id:
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
-    nodes = _json_list_copy(net.nodes_json)
-    edges = _json_list_copy(net.edges_json)
+    nodes = get_nodes(net.id, db)
     _idx, node = _find_node(nodes, node_id)
-    next_nodes = [item for item in nodes if item.get("id") != node_id]
-    deleted_edge_ids = [edge.get("id") for edge in edges if edge.get("from") == node_id or edge.get("to") == node_id]
-    next_edges = [edge for edge in edges if edge.get("id") not in deleted_edge_ids]
-    net.nodes_json = next_nodes
-    net.edges_json = next_edges
+    deleted_edge_ids = delete_edges_by_node(node_id, db)
+    delete_node(node_id, db)
     db.commit()
     actor_id = getattr(request.state, "uid", None)
     bcast(pid, "network", "node_deleted", {
@@ -284,14 +270,14 @@ def delete_network_node(pid: str, node_id: str, request: Request, db: Session = 
 @router.post("/links", dependencies=[Depends(require_link_perm)])
 def create_network_link(pid: str, body: schemas.NetworkLinkCreate, request: Request, db: Session = Depends(get_db)):
     net = _get_network(pid, body.network_id, db)
-    nodes = _json_list_copy(net.nodes_json)
-    meta = _json_dict_copy(net.meta_json)
+    nodes = get_nodes(net.id, db)
+    meta = dict(net.meta_json or {})
     node_ids = {node.get("id") for node in nodes}
     if body.from_node_id not in node_ids or body.to_node_id not in node_ids:
         raise HTTPException(400, "Both link endpoints must belong to the same project map")
     if body.from_node_id == body.to_node_id:
         raise HTTPException(400, "Self links are not allowed")
-    edges = _json_list_copy(net.edges_json)
+    edges = get_edges(net.id, db)
     for edge in edges:
         if edge.get("from") == body.from_node_id and edge.get("to") == body.to_node_id:
             raise HTTPException(409, "Link already exists")
@@ -313,8 +299,7 @@ def create_network_link(pid: str, body: schemas.NetworkLinkCreate, request: Requ
     }
     nodes_by_id = {node.get("id"): node for node in nodes}
     _clear_suppressed_auto_link(meta, _edge_ref(nodes_by_id.get(body.from_node_id), nodes_by_id.get(body.to_node_id)))
-    edges.append(edge)
-    net.edges_json = edges
+    upsert_edge(net.id, pid, edge, db)
     net.meta_json = meta
     db.commit()
     payload = {
@@ -334,12 +319,12 @@ def update_network_link(pid: str, link_id: str, body: schemas.NetworkLinkUpdate,
     if not network_id:
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
-    edges = _json_list_copy(net.edges_json)
-    nodes = _json_list_copy(net.nodes_json)
-    meta = _json_dict_copy(net.meta_json)
+    edges = get_edges(net.id, db)
+    nodes = get_nodes(net.id, db)
+    meta = dict(net.meta_json or {})
     node_ids = {node.get("id") for node in nodes}
     nodes_by_id = {node.get("id"): node for node in nodes}
-    idx, edge = _find_edge(edges, link_id)
+    _idx, edge = _find_edge(edges, link_id)
     prev_edge_ref = _edge_ref(nodes_by_id.get(edge.get("from")), nodes_by_id.get(edge.get("to")))
     updates = body.model_dump(exclude_none=True, exclude={"client_mutation_id"})
     if "from_node_id" in updates:
@@ -360,8 +345,7 @@ def update_network_link(pid: str, link_id: str, body: schemas.NetworkLinkUpdate,
     _clear_suppressed_auto_link(meta, _edge_ref(nodes_by_id.get(edge.get("from")), nodes_by_id.get(edge.get("to"))))
     edge["updated_at"] = _now()
     edge["version"] = _edge_version(edge)
-    edges[idx] = edge
-    net.edges_json = edges
+    upsert_edge(net.id, pid, edge, db)
     net.meta_json = meta
     db.commit()
     payload = {
@@ -381,13 +365,13 @@ def delete_network_link(pid: str, link_id: str, request: Request, db: Session = 
     if not network_id:
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
-    edges = _json_list_copy(net.edges_json)
-    nodes = _json_list_copy(net.nodes_json)
-    meta = _json_dict_copy(net.meta_json)
+    edges = get_edges(net.id, db)
+    nodes = get_nodes(net.id, db)
+    meta = dict(net.meta_json or {})
     nodes_by_id = {node.get("id"): node for node in nodes}
     _idx, edge = _find_edge(edges, link_id)
     _add_suppressed_auto_link(meta, _edge_ref(nodes_by_id.get(edge.get("from")), nodes_by_id.get(edge.get("to"))))
-    net.edges_json = [edge for edge in edges if edge.get("id") != link_id]
+    delete_edge(link_id, db)
     net.meta_json = meta
     db.commit()
     payload = {
@@ -403,7 +387,6 @@ def delete_network_link(pid: str, link_id: str, request: Request, db: Session = 
 @router.post("/regions", dependencies=[Depends(require_region_perm)])
 def create_network_region(pid: str, body: schemas.NetworkRegionCreate, request: Request, db: Session = Depends(get_db)):
     net = _get_network(pid, body.network_id, db)
-    regions = _json_list_copy(net.regions_json)
     region = {
         "id": new_id("r"),
         "x": body.x,
@@ -418,8 +401,7 @@ def create_network_region(pid: str, body: schemas.NetworkRegionCreate, request: 
         "updated_at": _now(),
         "version": 1,
     }
-    regions.append(region)
-    net.regions_json = regions
+    upsert_region(net.id, pid, region, db)
     db.commit()
     payload = {
         "network_id": net.id,
@@ -438,8 +420,8 @@ def update_network_region(pid: str, region_id: str, body: schemas.NetworkRegionU
     if not network_id:
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
-    regions = _json_list_copy(net.regions_json)
-    idx = next((i for i, region in enumerate(regions) if region.get("id") == region_id), None)
+    regions = get_regions(net.id, db)
+    idx = next((i for i, r in enumerate(regions) if r.get("id") == region_id), None)
     if idx is None:
         raise HTTPException(404, "Region not found")
     region = regions[idx]
@@ -448,8 +430,7 @@ def update_network_region(pid: str, region_id: str, body: schemas.NetworkRegionU
         region[key] = value
     region["updated_at"] = _now()
     region["version"] = _region_version(region)
-    regions[idx] = region
-    net.regions_json = regions
+    upsert_region(net.id, pid, region, db)
     db.commit()
     payload = {
         "network_id": net.id,
@@ -468,10 +449,10 @@ def delete_network_region(pid: str, region_id: str, request: Request, db: Sessio
     if not network_id:
         raise HTTPException(400, "network_id is required")
     net = _get_network(pid, network_id, db)
-    regions = _json_list_copy(net.regions_json)
-    if not any(region.get("id") == region_id for region in regions):
+    regions = get_regions(net.id, db)
+    if not any(r.get("id") == region_id for r in regions):
         raise HTTPException(404, "Region not found")
-    net.regions_json = [region for region in regions if region.get("id") != region_id]
+    delete_region(region_id, db)
     db.commit()
     payload = {
         "network_id": net.id,
