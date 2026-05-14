@@ -175,6 +175,9 @@ export const api = {
   importKB:            (file, pid)  => upload(`/kb/import${pid ? `?pid=${pid}` : ''}`, file),
   exportPlaybooks:     ()           => download('/playbooks/custom/export'),
   importPlaybooks:     (file)       => upload('/playbooks/custom/import', file),
+  listOperationPacks:  ()           => req('GET',    '/playbooks/packs'),
+  createOperationPack: (data)       => req('POST',   '/playbooks/packs', data),
+  deleteOperationPack: (packId)     => req('DELETE', `/playbooks/packs/${packId}`),
 
   // BloodHound server-side import
   importBloodHound: (pid, file) => upload(`/projects/${pid}/import/bloodhound`, file),

