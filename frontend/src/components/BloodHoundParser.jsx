@@ -452,7 +452,23 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
     relationships: true,
     networkEdges: true,
   });
+  const [serverResult, setServerResult] = useState(null);
+  const [serverImporting, setServerImporting] = useState(false);
   const fileInputRef = useRef();
+  const serverFileRef = useRef();
+
+  const doServerImport = async (file) => {
+    setServerImporting(true); setError(''); setServerResult(null);
+    try {
+      const result = await api.importBloodHound(pid, file);
+      setServerResult(result);
+      if (onDone) onDone();
+    } catch (e) {
+      setError('Server import error: ' + (e.message || String(e)));
+    } finally {
+      setServerImporting(false);
+    }
+  };
 
   // ── File loading ────────────────────────────────────────────────────────────
   const parseJsonFile = async (text, filename) => {
@@ -858,9 +874,10 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
         </div>
 
         {/* Drop zone */}
-        {!parsed && (
-          <div onDrop={onDrop} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
-               style={{ margin: 20, border: `2px dashed ${dragging ? accent : '#2a2d35'}`, borderRadius: 8, padding: '48px 20px', textAlign: 'center', cursor: 'pointer', background: dragging ? accent + '08' : 'transparent' }}
+        {!parsed && !serverResult && (
+          <>
+          <div onDrop={e => { e.preventDefault(); setDragging(false); const fs = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.json') || f.name.endsWith('.zip')); handleFiles(fs); }} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
+               style={{ margin: '20px 20px 8px', border: `2px dashed ${dragging ? accent : '#2a2d35'}`, borderRadius: 8, padding: '36px 20px', textAlign: 'center', cursor: 'pointer', background: dragging ? accent + '08' : 'transparent' }}
                onClick={() => fileInputRef.current?.click()}>
             <div style={{ fontSize: 34, marginBottom: 12 }}>🩸</div>
             <div style={{ fontSize: 13, color: '#c8cdd6', fontWeight: 700, fontFamily: 'Space Grotesk', marginBottom: 8 }}>Drop SharpHound / BloodHound exports</div>
@@ -870,6 +887,47 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
             </div>
             <input ref={fileInputRef} type="file" accept=".json,.zip" multiple style={{ display: 'none' }}
                    onChange={e => handleFiles(Array.from(e.target.files))} />
+          </div>
+          <div style={{ margin: '0 20px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>— или быстрый импорт на сервере —</div>
+            <button disabled={serverImporting} onClick={() => serverFileRef.current?.click()}
+              style={{ background: serverImporting ? '#1a1c22' : '#c07af014', border: '1px solid #c07af044', borderRadius: 5, padding: '7px 18px', cursor: serverImporting ? 'default' : 'pointer', color: '#c07af0', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+              {serverImporting ? '⏳ Importing…' : '⚡ Server Import (ZIP / JSON)'}
+            </button>
+            <div style={{ fontSize: 8, color: '#303540', fontFamily: 'JetBrains Mono' }}>DA detection · ACL edges · attack graph edges — всё за один запрос</div>
+            <input ref={serverFileRef} type="file" accept=".json,.zip" style={{ display: 'none' }}
+                   onChange={e => { const f = e.target.files[0]; if (f) doServerImport(f); }} />
+          </div>
+          </>
+        )}
+
+        {/* Server import result */}
+        {serverResult && !serverImporting && (
+          <div style={{ margin: 20 }}>
+            <div style={{ background: '#0d1f0d', border: '1px solid #39d35344', borderRadius: 8, padding: '16px 20px' }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#39d353', fontFamily: 'Space Grotesk', marginBottom: 12 }}>✓ Server Import Complete</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                {[
+                  ['Hosts created', serverResult.hosts_created, '#5b8af5'],
+                  ['Hosts updated', serverResult.hosts_updated, '#9098a8'],
+                  ['Creds created', serverResult.creds_created, '#39d353'],
+                  ['Creds updated', serverResult.creds_updated, '#9098a8'],
+                  ['Access edges', serverResult.edges_added, '#e8574a'],
+                  ['ACL edges', serverResult.acl_edges, '#cc2233'],
+                  ['DA users', serverResult.da_users, '#c07af0'],
+                  ['DA computers', serverResult.da_computers, '#c07af0'],
+                ].map(([label, val, color]) => (
+                  <div key={label} style={{ background: '#12141a', borderRadius: 5, padding: '8px 10px', textAlign: 'center' }}>
+                    <div style={{ fontSize: 18, fontWeight: 700, color, fontFamily: 'JetBrains Mono' }}>{val ?? 0}</div>
+                    <div style={{ fontSize: 8, color: '#505560', fontFamily: 'JetBrains Mono', marginTop: 2 }}>{label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button onClick={() => { setServerResult(null); setError(''); }} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Import again</button>
+              <button onClick={onClose} style={{ background: accent, border: 'none', borderRadius: 5, padding: '6px 20px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>Close</button>
+            </div>
           </div>
         )}
 

@@ -286,8 +286,8 @@ def get_attack_graph(
             continue
         from_node = network_node_by_id.get(str(edge.get("from") or ""), {})
         to_node = network_node_by_id.get(str(edge.get("to") or ""), {})
-        from_host_id = from_node.get("host_id")
-        to_host_id = to_node.get("host_id")
+        from_host_id = from_node.get("host_id") or str(edge.get("from_host_id") or "")
+        to_host_id = to_node.get("host_id") or str(edge.get("to_host_id") or "")
         if not from_host_id or not to_host_id:
             continue
         if from_host_id not in host_by_id or to_host_id not in host_by_id:

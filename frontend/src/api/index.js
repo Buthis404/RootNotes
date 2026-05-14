@@ -169,6 +169,9 @@ export const api = {
   exportSnippets:      ()           => download('/snippets/export'),
   importSnippets:      (file)       => upload('/snippets/import', file),
 
+  // BloodHound server-side import
+  importBloodHound: (pid, file) => upload(`/projects/${pid}/import/bloodhound`, file),
+
   // Batch import & project export/import
   batchImport:   (pid, data) => req('POST', `/import/${pid}`, data),
   exportProject: async (pid) => {
