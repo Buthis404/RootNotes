@@ -14,7 +14,7 @@ const TYPE_CFG = {
 const SEV_COLOR = { critical: '#cc2233', high: '#e8574a', medium: '#f09a3a', low: '#e8cc42', info: '#5b8af5' };
 const JOB_STATUS_COLOR = { done: '#39d353', running: '#f09a3a', failed: '#cc2233', pending: '#606570' };
 
-const FILTER_KEYS = ['type', 'severity', 'status', 'service', 'role', 'source', 'connector'];
+const FILTER_KEYS = ['type', 'severity', 'status', 'service', 'role', 'source', 'connector', 'tag'];
 
 function parseTokens(raw) {
   const filters = {};
@@ -54,6 +54,19 @@ function FilterChip({ k, v, accent, onRemove }) {
   );
 }
 
+function RelatedItem({ rel }) {
+  const cfg = TYPE_CFG[rel.type] || { color: '#606570' };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 16px 2px 28px' }}>
+      <div style={{ width: 4, height: 4, borderRadius: '50%', background: cfg.color, opacity: 0.6, flexShrink: 0 }} />
+      <span style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {rel.title}
+        {rel.snippet && <span style={{ color: '#404550' }}> · {rel.snippet}</span>}
+      </span>
+    </div>
+  );
+}
+
 function ResultRow({ item, active, onClick, projName, showPid }) {
   const cfg = TYPE_CFG[item.type] || { icon: 'search', color: '#606570', label: item.type };
   const ref = useRef(null);
@@ -73,48 +86,57 @@ function ResultRow({ item, active, onClick, projName, showPid }) {
     metaBadge = <Badge label="cracked" color="#39d353" />;
   }
 
-  return (
-    <div
-      ref={ref}
-      onClick={onClick}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px',
-        cursor: 'pointer', borderBottom: '1px solid #13151c',
-        background: active ? '#ffffff0c' : 'transparent', transition: 'background .08s',
-      }}
-      onMouseEnter={e => { if (!active) e.currentTarget.style.background = '#ffffff06'; }}
-      onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
-    >
-      {/* type dot */}
-      <div style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+  const hasRelated = item.related?.length > 0;
 
-      {/* main content */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {item.type === 'loot'
-              ? <span style={{ filter: 'blur(3px)', userSelect: 'none' }}>{item.title}</span>
-              : item.title}
-          </span>
-          {item.subtitle && (
-            <span style={{ fontSize: 11, color: '#505560', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {item.subtitle}
+  return (
+    <div style={{ borderBottom: '1px solid #13151c' }}>
+      <div
+        ref={ref}
+        onClick={onClick}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px',
+          cursor: 'pointer',
+          background: active ? '#ffffff0c' : 'transparent', transition: 'background .08s',
+        }}
+        onMouseEnter={e => { if (!active) e.currentTarget.style.background = '#ffffff06'; }}
+        onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+      >
+        {/* type dot */}
+        <div style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+
+        {/* main content */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {item.type === 'loot'
+                ? <span style={{ filter: 'blur(3px)', userSelect: 'none' }}>{item.title}</span>
+                : item.title}
             </span>
+            {item.subtitle && (
+              <span style={{ fontSize: 11, color: '#505560', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.subtitle}
+              </span>
+            )}
+          </div>
+          {item.snippet && (
+            <div style={{ fontSize: 10, color: '#404550', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {item.snippet}
+            </div>
           )}
         </div>
-        {item.snippet && (
-          <div style={{ fontSize: 10, color: '#404550', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {item.snippet}
-          </div>
-        )}
-      </div>
 
-      {/* badges */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
-        {metaBadge}
-        <Badge label={cfg.label} color={cfg.color} />
-        {showPid && <span style={{ fontSize: 9, color: '#353840', fontFamily: 'JetBrains Mono' }}>{projName(item.pid)}</span>}
+        {/* badges */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+          {metaBadge}
+          <Badge label={cfg.label} color={cfg.color} />
+          {showPid && <span style={{ fontSize: 9, color: '#353840', fontFamily: 'JetBrains Mono' }}>{projName(item.pid)}</span>}
+        </div>
       </div>
+      {hasRelated && (
+        <div style={{ paddingBottom: 4 }}>
+          {item.related.map((r, i) => <RelatedItem key={i} rel={r} />)}
+        </div>
+      )}
     </div>
   );
 }
@@ -244,7 +266,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
               <Icon name="search" size={28} color="#2a2d35" />
               <div style={{ marginTop: 10, fontSize: 12, color: '#404550' }}>Type to search hosts, creds, notes, findings, loot, jobs</div>
               <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center' }}>
-                {['type:host', 'type:finding severity:critical', 'type:cred service:smb', 'status:open', 'type:job status:done'].map(ex => (
+                {['type:host', 'type:finding severity:critical', 'type:cred service:smb', 'tag:DC', 'status:open', 'type:job status:done'].map(ex => (
                   <button key={ex} onClick={() => setQuery(ex)} style={{ background: '#ffffff06', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{ex}</button>
                 ))}
               </div>
@@ -275,7 +297,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
           <span style={{ fontSize: 9, color: '#303540', fontFamily: 'JetBrains Mono' }}>↵ open</span>
           <span style={{ fontSize: 9, color: '#303540', fontFamily: 'JetBrains Mono' }}>ESC close</span>
           <span style={{ fontSize: 9, color: '#303540', fontFamily: 'JetBrains Mono', marginLeft: 8 }}>
-            filter: <span style={{ color: '#505560' }}>type: severity: status: service: role: source:</span>
+            filter: <span style={{ color: '#505560' }}>type: severity: status: service: role: tag: source:</span>
           </span>
           {results && (
             <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginLeft: 'auto' }}>

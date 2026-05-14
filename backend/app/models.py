@@ -165,6 +165,7 @@ class AttackStep(Base):
     id = Column(String, primary_key=True)
     path_id = Column(String, ForeignKey("attack_paths.id", ondelete="CASCADE"), nullable=False)
     pid = Column(String, nullable=False)
+    host_id = Column(String, ForeignKey("hosts.id", ondelete="SET NULL"), nullable=True)
     step_order = Column(Integer, nullable=False, default=0)
     node_type = Column(String, nullable=False, default="host")
     label = Column(String, nullable=False, default="")
@@ -345,6 +346,9 @@ class Job(Base):
     related_entity_type = Column(String, nullable=False, default="")
     related_entity_id = Column(String, nullable=False, default="")
     retry_of_job_id = Column(String, nullable=False, default="")
+    priority = Column(Integer, nullable=False, default=0)      # 0=normal, 10=high, -10=bulk/low
+    retry_count = Column(Integer, nullable=False, default=0)   # how many auto-retries have run
+    max_retries = Column(Integer, nullable=False, default=0)   # 0 = no auto-retry
     created_at = Column(String, nullable=False)
     started_at = Column(String, nullable=False, default="")
     finished_at = Column(String, nullable=False, default="")

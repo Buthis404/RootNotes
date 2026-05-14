@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from '../api.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -184,7 +184,7 @@ function HostNode({ node, selected, privMode, onMouseDown, onClick }) {
 }
 
 // ── Edge component ───────────────────────────────────────────────────────────
-function GraphEdge({ edge, nodes }) {
+function GraphEdge({ edge, nodes, privMode, highlightedPathIds, dimmed }) {
   const src = nodes.find(n => n.id === (edge.source || edge.from));
   const tgt = nodes.find(n => n.id === (edge.target || edge.to));
   if (!src || !tgt || src === tgt) return null;
@@ -194,8 +194,10 @@ function GraphEdge({ edge, nodes }) {
   const isPivot = edge.kind === 'pivot';
   const isPivotRoute = edge.kind === 'pivot_route';
   const isDomainAdmin = isAccess && edge.access_type === 'domain_admin';
+  const isPrivPath = privMode && edge.on_priv_path;
 
-  const color = isPivotRoute ? ACCESS_COLOR.pivot_route
+  const color = isPrivPath ? '#e8574a'
+    : isPivotRoute ? ACCESS_COLOR.pivot_route
     : isPivot ? ACCESS_COLOR.pivot
     : isAccess
       ? (edge.access_type === 'exploit' ? '#cc2233'
@@ -222,31 +224,51 @@ function GraphEdge({ edge, nodes }) {
   const lx = (1 - t) ** 2 * sx + 2 * (1 - t) * t * mx + t ** 2 * tx;
   const ly = (1 - t) ** 2 * sy + 2 * (1 - t) * t * my + t ** 2 * ty - 6;
 
-  const strokeDash = isPivotRoute ? '3 6'
+  const strokeDash = isPrivPath ? '10 4'
+    : isPivotRoute ? '3 6'
     : isPivot ? '5 3'
     : isDomainAdmin && !edge.verified ? '6 4'
     : isAccess && !edge.verified ? '6 4'
     : isPath ? '3 5'
     : undefined;
 
-  const strokeW = isDomainAdmin ? 2.5 : isAccess ? 2.2 : isPivot || isPivotRoute ? 1.8 : 1.5;
-  const opacity = isPivotRoute ? 0.45 : isAccess || isDomainAdmin ? 0.8 : 0.55;
+  const strokeW = isPrivPath ? 3 : isDomainAdmin ? 2.5 : isAccess ? 2.2 : isPivot || isPivotRoute ? 1.8 : 1.5;
+  const opacity = dimmed ? 0.12
+    : isPrivPath ? 1
+    : isPivotRoute ? 0.45
+    : isAccess || isDomainAdmin ? 0.8 : 0.55;
 
   return (
     <g>
+      {/* Glow under priv path edges */}
+      {isPrivPath && (
+        <path d={d} fill="none" stroke="#e8574a" strokeWidth={8} strokeOpacity={0.12} strokeLinecap="round" />
+      )}
       <path d={d} fill="none" stroke={color}
         strokeWidth={strokeW}
         strokeOpacity={opacity}
         strokeDasharray={strokeDash}
-        markerEnd={`url(#${markerId})`} />
-      {edge.label && !isPivotRoute && (
-        <>
-          <rect x={lx - 28} y={ly - 9} width={56} height={12} rx={3} fill="#07080b" opacity={0.9} />
-          <text x={lx} y={ly} textAnchor="middle" fontSize={8} fill={color} fontFamily="JetBrains Mono" opacity={0.9}>
-            {edge.label.slice(0, 16)}
-          </text>
-        </>
-      )}
+        markerEnd={`url(#${markerId})`}>
+        {isPrivPath && (
+          <animate attributeName="stroke-dashoffset" from="0" to="-28" dur="1.2s" repeatCount="indefinite" />
+        )}
+      </path>
+      {edge.label && !isPivotRoute && (() => {
+        // For credential edges: show username only (strip domain\ prefix)
+        const rawLabel = edge.kind === 'credential'
+          ? (edge.label.includes('\\') ? edge.label.split('\\').pop() : edge.label)
+          : edge.label;
+        const displayLabel = rawLabel.length > 14 ? rawLabel.slice(0, 13) + '…' : rawLabel;
+        const boxW = Math.max(56, displayLabel.length * 5.2 + 12);
+        return (
+          <>
+            <rect x={lx - boxW / 2} y={ly - 9} width={boxW} height={12} rx={3} fill="#07080b" opacity={0.9} />
+            <text x={lx} y={ly} textAnchor="middle" fontSize={8} fill={color} fontFamily="JetBrains Mono" opacity={dimmed ? 0.2 : 0.9}>
+              {displayLabel}
+            </text>
+          </>
+        );
+      })()}
     </g>
   );
 }
@@ -289,6 +311,8 @@ export default function AttackGraphView({ selectedProject, accent }) {
   const [allFindings, setAllFindings] = useState([]);
   const [privMode, setPrivMode] = useState(false);
   const [showPivotRoutes, setShowPivotRoutes] = useState(true);
+  const [showPathsPanel, setShowPathsPanel] = useState(false);
+  const [selectedPathIdx, setSelectedPathIdx] = useState(null);
 
   const isPanning = useRef(false);
   const panStart = useRef({ x: 0, y: 0, px: 0, py: 0 });
@@ -407,6 +431,25 @@ export default function AttackGraphView({ selectedProject, accent }) {
 
   const stats = graphData?.stats || {};
   const privilegePaths = graphData?.privilege_paths || [];
+  const privilegePathDetails = graphData?.privilege_path_details || [];
+  const pivotChains = graphData?.pivot_chains || [];
+
+  // When a specific path is selected, highlight only its nodes/edges
+  const selectedPathNodeIds = useMemo(() => {
+    if (selectedPathIdx === null || !privilegePaths[selectedPathIdx]) return null;
+    return new Set(privilegePaths[selectedPathIdx]);
+  }, [selectedPathIdx, privilegePaths]);
+
+  const selectedPathEdgePairs = useMemo(() => {
+    if (selectedPathIdx === null || !privilegePaths[selectedPathIdx]) return null;
+    const path = privilegePaths[selectedPathIdx];
+    const pairs = new Set();
+    for (let i = 0; i < path.length - 1; i++) {
+      pairs.add(`${path[i]}:${path[i + 1]}`);
+      pairs.add(`${path[i + 1]}:${path[i]}`);
+    }
+    return pairs;
+  }, [selectedPathIdx, privilegePaths]);
 
   const selectedNodeEdges = selectedNode
     ? allEdges.filter(e => e.from === selectedNode.id || e.to === selectedNode.id)
@@ -460,6 +503,7 @@ export default function AttackGraphView({ selectedProject, accent }) {
               { label: 'priv paths', val: stats.privilege_paths, c: '#e8574a' },
               { label: 'DA hosts', val: stats.da_capable_hosts, c: '#e8574a' },
               { label: 'pivot routes', val: stats.pivot_route_edges, c: ACCESS_COLOR.pivot_route },
+              { label: 'pivot chains', val: stats.pivot_chains, c: ACCESS_COLOR.pivot },
             ].map(({ label, val, c }) => val > 0 && (
               <span key={label} style={{ fontSize: 11, color: '#505560', fontFamily: 'JetBrains Mono' }}>
                 <span style={{ color: c }}>{val}</span> {label}
@@ -468,10 +512,15 @@ export default function AttackGraphView({ selectedProject, accent }) {
           </div>
         )}
         <div style={{ display: 'flex', gap: 6 }}>
-          {btn(() => setPrivMode(v => !v), privMode ? '● Priv Paths' : '○ Priv Paths', {
+          {btn(() => { setPrivMode(v => !v); if (!privMode) setShowPathsPanel(true); }, privMode ? '● Priv Paths' : '○ Priv Paths', {
             borderColor: privMode ? '#e8574a88' : '#2a2d35',
             color: privMode ? '#e8574a' : '#606570',
             background: privMode ? '#e8574a11' : 'transparent',
+          })}
+          {privilegePaths.length > 0 && btn(() => setShowPathsPanel(v => !v), showPathsPanel ? '● Paths' : '○ Paths', {
+            borderColor: showPathsPanel ? '#e8574a88' : '#2a2d35',
+            color: showPathsPanel ? '#e8574a' : '#606570',
+            background: showPathsPanel ? '#e8574a11' : 'transparent',
           })}
           {btn(() => setShowPivotRoutes(v => !v), showPivotRoutes ? '● Pivots' : '○ Pivots', {
             borderColor: showPivotRoutes ? ACCESS_COLOR.pivot_route + '88' : '#2a2d35',
@@ -484,6 +533,82 @@ export default function AttackGraphView({ selectedProject, accent }) {
       </div>
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+        {/* ── Paths panel ── */}
+        {showPathsPanel && privilegePathDetails.length > 0 && (
+          <div style={{
+            width: 240, background: '#0d0f14', borderRight: '1px solid #1e2029',
+            display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0,
+          }}>
+            <div style={{ padding: '10px 12px', borderBottom: '1px solid #1a1c22', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: '#e8574a', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.1em', flex: 1 }}>
+                DA Paths · {privilegePathDetails.length}
+              </span>
+              <button onClick={() => { setSelectedPathIdx(null); setShowPathsPanel(false); }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 13, padding: 0 }}>✕</button>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+              {privilegePathDetails.map((pathSteps, idx) => {
+                const isSelected = selectedPathIdx === idx;
+                return (
+                  <div key={idx}
+                    onClick={() => setSelectedPathIdx(isSelected ? null : idx)}
+                    style={{
+                      margin: '3px 8px', padding: '8px 10px', borderRadius: 6, cursor: 'pointer',
+                      background: isSelected ? '#e8574a11' : 'transparent',
+                      border: `1px solid ${isSelected ? '#e8574a44' : '#1a1c22'}`,
+                    }}>
+                    <div style={{ fontSize: 9, color: '#e8574a', fontFamily: 'JetBrains Mono', fontWeight: 700, marginBottom: 5, textTransform: 'uppercase' }}>
+                      Path {idx + 1} · {pathSteps.length} hops
+                    </div>
+                    {pathSteps.map((step, si) => (
+                      <div key={si} style={{ display: 'flex', flexDirection: 'column', marginBottom: si < pathSteps.length - 1 ? 2 : 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <div style={{
+                            width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                            background: si === 0 ? '#cc2233' : si === pathSteps.length - 1 ? '#e8574a' : '#5b8af5',
+                          }} />
+                          <span style={{ fontSize: 10, color: '#c8cdd6', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {step.label}
+                          </span>
+                        </div>
+                        {step.edge_to_next && (
+                          <div style={{ marginLeft: 11, fontSize: 8, color: '#404550', fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 3, marginBottom: 2 }}>
+                            <span style={{ color: '#2a2d35' }}>│</span>
+                            <span style={{ color: '#e8574a', background: '#e8574a11', borderRadius: 2, padding: '0 3px' }}>{step.edge_to_next}</span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+              {pivotChains.length > 0 && (
+                <>
+                  <div style={{ margin: '8px 8px 4px', fontSize: 9, color: '#c07af0', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.1em' }}>
+                    Pivot Chains · {pivotChains.length}
+                  </div>
+                  {pivotChains.map((chain, ci) => (
+                    <div key={ci} style={{ margin: '2px 8px', padding: '7px 10px', borderRadius: 6, background: '#c07af011', border: '1px solid #c07af033' }}>
+                      {chain.map((hid, si) => {
+                        const n = nodes.find(x => x.id === hid);
+                        return (
+                          <div key={si} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#c07af0', flexShrink: 0 }} />
+                            <span style={{ fontSize: 10, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>
+                              {n?.label || n?.ip || hid.slice(0, 10)}
+                            </span>
+                            {si < chain.length - 1 && <span style={{ fontSize: 8, color: '#c07af0', marginLeft: 4 }}>→</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* ── Canvas ── */}
         <div
@@ -524,7 +649,15 @@ export default function AttackGraphView({ selectedProject, accent }) {
                 ))}
               </defs>
               <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-                {edges.map((e, i) => <GraphEdge key={i} edge={e} nodes={nodes} />)}
+                {edges.map((e, i) => {
+                  const edgePairKey = `${e.from}:${e.to}`;
+                  const edgePairKeyRev = `${e.to}:${e.from}`;
+                  const isOnSelected = selectedPathEdgePairs
+                    ? selectedPathEdgePairs.has(edgePairKey) || selectedPathEdgePairs.has(edgePairKeyRev)
+                    : null;
+                  const dimmed = selectedPathEdgePairs !== null && !isOnSelected && e.kind !== 'credential';
+                  return <GraphEdge key={i} edge={e} nodes={nodes} privMode={privMode} dimmed={dimmed} />;
+                })}
                 {nodes.map(n => (
                   <HostNode
                     key={n.id}
@@ -710,6 +843,34 @@ export default function AttackGraphView({ selectedProject, accent }) {
                   <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>+{selectedNodeAccessEdges.length - 8} more</div>
                 )}
               </PanelSection>
+
+              {/* Pivot chains involving this host */}
+              {(() => {
+                const involvedChains = pivotChains.filter(chain => chain.includes(selectedNode.id));
+                if (involvedChains.length === 0) return null;
+                return (
+                  <PanelSection title="Pivot Chains" count={involvedChains.length}>
+                    {involvedChains.map((chain, ci) => (
+                      <div key={ci} style={{ background: '#0a0c10', border: '1px solid #c07af033', borderRadius: 5, padding: '7px 9px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                          {chain.map((hid, si) => {
+                            const n = nodes.find(x => x.id === hid);
+                            const isSelf = hid === selectedNode.id;
+                            return (
+                              <React.Fragment key={si}>
+                                <span style={{ fontSize: 9, color: isSelf ? '#c07af0' : '#808590', fontFamily: 'JetBrains Mono', fontWeight: isSelf ? 700 : 400 }}>
+                                  {n?.label || n?.ip || hid.slice(0, 10)}
+                                </span>
+                                {si < chain.length - 1 && <span style={{ fontSize: 9, color: '#c07af066' }}>→</span>}
+                              </React.Fragment>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </PanelSection>
+                );
+              })()}
 
               {selectedNodePivotEdges.length > 0 && (
                 <PanelSection title="Pivot Routes" count={selectedNodePivotEdges.length}>

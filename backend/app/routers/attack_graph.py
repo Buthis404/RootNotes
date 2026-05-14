@@ -89,25 +89,30 @@ def _build_privilege_paths(
     access_edges: list[dict],
     attacker_host_ids: set[str],
     da_host_ids: set[str],
-) -> list[list[str]]:
+) -> tuple[list[list[str]], set[tuple[str, str]]]:
     """
     BFS from attacker nodes to DA-capable hosts through access edges.
-    Returns shortest privilege path for each reachable DA host.
+    Returns (paths, path_edge_pairs) where path_edge_pairs is the set of
+    (from_host_id, to_host_id) tuples forming privilege path edges.
     """
     if not attacker_host_ids or not da_host_ids:
-        return []
+        return [], set()
 
-    adjacency: dict[str, list[str]] = {}
+    # Build adjacency with edge technique labels
+    adjacency: dict[str, list[tuple[str, str]]] = {}  # src → [(dst, technique)]
     for edge in access_edges:
         src = str(edge.get("from") or "").strip()
         dst = str(edge.get("to") or "").strip()
         if not src or not dst:
             continue
-        adjacency.setdefault(src, []).append(dst)
-        if str(edge.get("access_type") or "").lower() in _BIDIRECTIONAL_ACCESS_EDGE_TYPES:
-            adjacency.setdefault(dst, []).append(src)
+        tech = str(edge.get("access_type") or edge.get("label") or "").strip()
+        adjacency.setdefault(src, []).append((dst, tech))
+        if tech.lower() in _BIDIRECTIONAL_ACCESS_EDGE_TYPES:
+            adjacency.setdefault(dst, []).append((src, tech))
 
     paths: list[list[str]] = []
+    path_edge_pairs: set[tuple[str, str]] = set()
+
     for da_id in da_host_ids:
         parent: dict[str, str | None] = {hid: None for hid in attacker_host_ids}
         queue: deque[str] = deque(attacker_host_ids)
@@ -117,7 +122,7 @@ def _build_privilege_paths(
             if current == da_id:
                 found = True
                 break
-            for nxt in adjacency.get(current, []):
+            for nxt, _ in adjacency.get(current, []):
                 if nxt not in parent:
                     parent[nxt] = current
                     queue.append(nxt)
@@ -129,8 +134,44 @@ def _build_privilege_paths(
                 cur = parent.get(cur)
             path.reverse()
             paths.append(path)
+            # Record the edge pairs forming this path
+            for i in range(len(path) - 1):
+                path_edge_pairs.add((path[i], path[i + 1]))
 
-    return paths
+    return paths, path_edge_pairs
+
+
+def _detect_pivot_chains(pivot_observations: list) -> list[list[str]]:
+    """
+    Detect multi-hop pivot chains: if host B is a pivot_host in one observation
+    and also a target_host_id in another, it forms a chain A→B→C.
+    Returns list of chains as host_id sequences.
+    """
+    pivot_host_ids: set[str] = {obs.pivot_host_id for obs in pivot_observations if obs.pivot_host_id}
+    # sources: observations where pivot_host is reached through target of another obs
+    target_to_obs: dict[str, list] = {}
+    for obs in pivot_observations:
+        if obs.target_host_id:
+            target_to_obs.setdefault(obs.target_host_id, []).append(obs)
+
+    chains: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    for obs in pivot_observations:
+        if obs.pivot_host_id not in target_to_obs:
+            continue
+        # pivot_host_id is the target of another observation — it's a relay node
+        for upstream_obs in target_to_obs[obs.pivot_host_id]:
+            src = upstream_obs.source_host_id or upstream_obs.pivot_host_id
+            relay = obs.pivot_host_id
+            dst = obs.target_host_id
+            if dst and src != dst and relay != dst:
+                chain_key = (src, relay, dst)
+                if chain_key not in seen:
+                    seen.add(chain_key)
+                    chains.append([src, relay, dst])
+
+    return chains
 
 
 @router.get("/api/projects/{pid}/attack-graph")
@@ -245,8 +286,8 @@ def get_attack_graph(
             continue
         from_node = network_node_by_id.get(str(edge.get("from") or ""), {})
         to_node = network_node_by_id.get(str(edge.get("to") or ""), {})
-        from_host_id = from_node.get("host_id")
-        to_host_id = to_node.get("host_id")
+        from_host_id = from_node.get("host_id") or str(edge.get("from_host_id") or "")
+        to_host_id = to_node.get("host_id") or str(edge.get("to_host_id") or "")
         if not from_host_id or not to_host_id:
             continue
         if from_host_id not in host_by_id or to_host_id not in host_by_id:
@@ -358,7 +399,7 @@ def get_attack_graph(
     stats["verified_reachable_hosts"] = len([hid for hid, d in verified_reachable_dist.items() if d > 0])
 
     # Privilege path analysis
-    privilege_paths = _build_privilege_paths(access_only, attacker_host_ids, da_host_ids)
+    privilege_paths, priv_path_edge_pairs = _build_privilege_paths(access_only, attacker_host_ids, da_host_ids)
     stats["privilege_paths"] = len(privilege_paths)
     stats["da_capable_hosts"] = len(da_host_ids)
 
@@ -366,6 +407,15 @@ def get_attack_graph(
     for path in privilege_paths:
         for node_id in path:
             da_path_nodes.add(node_id)
+
+    # Mark privilege-path edges (only access edges — not credential or path step edges)
+    for edge in edges:
+        if edge.get("kind") not in ("access", "pivot"):
+            edge["on_priv_path"] = False
+            continue
+        fh = str(edge.get("from") or "")
+        th = str(edge.get("to") or "")
+        edge["on_priv_path"] = (fh, th) in priv_path_edge_pairs or (th, fh) in priv_path_edge_pairs
 
     for node in nodes:
         node_id = node.get("id") or ""
@@ -388,6 +438,10 @@ def get_attack_graph(
             ),
         }
 
+    # Pivot chains (multi-hop)
+    pivot_chains = _detect_pivot_chains(pivot_observations)
+    stats["pivot_chains"] = len(pivot_chains)
+
     # Attack path step edges
     for path in attack_paths:
         steps = db.query(models.AttackStep).filter(
@@ -405,6 +459,7 @@ def get_attack_graph(
                 "cred_id": None,
                 "cred_type": None,
                 "kind": "path",
+                "on_priv_path": False,
             })
             stats["path_edges"] += 1
             _ensure_step_node(nodes, src_step)
@@ -412,10 +467,30 @@ def get_attack_graph(
 
     compromised_count = sum(1 for h in hosts if h.status in ("pwned", "owned"))
 
+    # Build privilege path narrative (node label chains)
+    host_label = {h.id: (h.hostname or h.ip or h.id) for h in hosts}
+    privilege_path_details = []
+    for path in privilege_paths:
+        steps_detail = []
+        for i, hid in enumerate(path):
+            label = host_label.get(hid, hid[:12])
+            edge_tech = ""
+            if i < len(path) - 1:
+                # Find the access edge between path[i] and path[i+1]
+                nxt = path[i + 1]
+                for e in access_only:
+                    if e.get("from") == hid and e.get("to") == nxt:
+                        edge_tech = e.get("access_type") or e.get("label") or ""
+                        break
+            steps_detail.append({"id": hid, "label": label, "edge_to_next": edge_tech})
+        privilege_path_details.append(steps_detail)
+
     return {
         "nodes": nodes,
         "edges": edges,
         "privilege_paths": privilege_paths,
+        "privilege_path_details": privilege_path_details,
+        "pivot_chains": pivot_chains,
         "stats": {
             "hosts": len(hosts),
             "edges": len(edges),

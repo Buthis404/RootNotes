@@ -50,6 +50,7 @@ function ThinkingDots() {
 
 export default function AIChatPanel({ selectedProject, accent }) {
   const [open, setOpen] = useState(false);
+  const [btnHover, setBtnHover] = useState(false);
   const [history, setHistory] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -109,14 +110,18 @@ export default function AIChatPanel({ selectedProject, accent }) {
       {/* Toggle button */}
       <button
         onClick={() => setOpen(v => !v)}
+        onMouseEnter={() => setBtnHover(true)}
+        onMouseLeave={() => setBtnHover(false)}
         style={{
-          position: 'fixed', bottom: 24, right: 24, zIndex: 999,
-          width: 48, height: 48, borderRadius: '50%',
+          position: 'fixed', bottom: 20, right: 20, zIndex: 999,
+          width: 40, height: 40, borderRadius: '50%',
           background: open ? '#1a1c22' : accent, border: open ? `2px solid ${accent}` : 'none',
           cursor: 'pointer', color: open ? accent : '#fff',
-          fontSize: 13, fontWeight: 700, fontFamily: 'Space Grotesk',
-          boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-          transition: 'all .2s',
+          fontSize: 11, fontWeight: 700, fontFamily: 'Space Grotesk',
+          boxShadow: '0 3px 12px rgba(0,0,0,0.5)',
+          transition: 'opacity .2s, transform .2s',
+          opacity: open || btnHover ? 1 : 0.35,
+          transform: btnHover && !open ? 'scale(1.1)' : 'scale(1)',
         }}
         title={open ? 'Close AI' : 'Open AI Agent'}
       >
