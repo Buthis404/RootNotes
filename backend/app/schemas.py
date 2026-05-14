@@ -11,7 +11,12 @@ _Tags = Annotated[List[_TagItem], Field(max_length=100)]
 
 _SEVERITIES = {"info", "low", "medium", "high", "critical"}
 _FINDING_STATUSES = {"open", "in_progress", "resolved", "accepted", "candidate", "confirmed"}
-_HOST_STATUSES = {"unknown", "up", "down", "pwned", "unreachable", "attacker", "access", "compromised"}
+_HOST_STATUSES = {
+    # canonical states actually emitted by frontend (NODE_STATUS in constants.js)
+    "unknown", "alive", "scanned", "access", "pwned", "owned",
+    # back-compat aliases used by importers, C2 connectors, and legacy data
+    "up", "down", "unreachable", "attacker", "compromised",
+}
 _HOST_ROLES = {
     "unknown", "workstation", "server", "dc", "domain_controller",
     "router", "printer", "iot", "attacker", "pivot",
