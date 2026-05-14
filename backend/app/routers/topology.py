@@ -1509,79 +1509,131 @@ def _run_smart_build(
                 edges_added += 1
 
     # ── P3: Host activity evidence edges (incl. C2 sessions) ─────────
+    # Multi-hop routing: sessions chain through earlier sessions in the same
+    # scope (first session in a scope becomes the local "pivot" for later ones).
+    # Fallback order per session host:
+    #   1. earliest session in the SAME scope (sessions_by_scope)
+    #   2. scope.via_host_id (explicit pivot)
+    #   3. _find_pivot_host auto-detection in entry scopes
+    #   4. attacker_nids[0] direct
     if include_access_edges and attacker_nids:
         _exec_types = {"exec", "postex", "lateral", "c2"}
         _type_map = {"exec": "shell", "postex": "shell", "lateral": "lateral", "c2": "c2_session"}
         acts = db.query(models.HostActivity).filter(
             models.HostActivity.pid == pid,
             models.HostActivity.status == "done",
-        ).all()
+            models.HostActivity.activity_type.in_(_exec_types),
+        ).order_by(models.HostActivity.ts.asc()).all()
 
-        # Pre-build: for each non-entry scope, find its auto-detected pivot host node.
-        # C2 session edges route through the pivot rather than directly from the attacker,
-        # showing the actual path: attacker → junction_device → compromised_host.
         entry_gw_ips: set[str] = {
             sr.get("gateway_ip", "") for sr in scope_region_defs if sr.get("is_entry")
         }
-        _c2_pivot_by_cidr: dict[str, str] = {}  # cidr → node_id of pivot host
-        for sr in scope_region_defs:
-            if sr.get("is_entry") or sr.get("via_host_id"):
-                continue
-            ph = _find_pivot_host(sr["net_obj"], scope_region_defs, hosts_meta, entry_gw_ips)
-            if ph:
-                pnid = hid_to_nid.get(ph["id"])
-                if pnid:
-                    _c2_pivot_by_cidr[sr["cidr"]] = pnid
 
-        def _pivot_nid_for(target_host_id: str) -> str | None:
-            """Return the junction-device node_id the target is reachable through, if any."""
-            th = next((h for h in hosts_meta if h["id"] == target_host_id), None)
-            if not th or not th.get("ip"):
+        def _scope_for_ip(ip: str) -> dict | None:
+            if not ip:
                 return None
             for sr in scope_region_defs:
-                if sr.get("is_entry"):
-                    continue
-                if _ip_in_network(th["ip"], sr["net_obj"]):
-                    return _c2_pivot_by_cidr.get(sr["cidr"])
+                if _ip_in_network(ip, sr["net_obj"]):
+                    return sr
             return None
 
+        # Cache auto-junction node per non-entry scope (computed lazily once)
+        _auto_pivot_by_cidr: dict[str, str | None] = {}
+
+        def _auto_pivot_nid(sr: dict) -> str | None:
+            cidr = sr["cidr"]
+            if cidr in _auto_pivot_by_cidr:
+                return _auto_pivot_by_cidr[cidr]
+            ph = _find_pivot_host(sr["net_obj"], scope_region_defs, hosts_meta, entry_gw_ips)
+            nid = hid_to_nid.get(ph["id"]) if ph else None
+            _auto_pivot_by_cidr[cidr] = nid
+            return nid
+
+        # Track sessions established per scope (ts-ordered).
+        sessions_by_scope: dict[str, list[dict]] = {}
+
         for act in acts:
-            if act.activity_type not in _exec_types:
-                continue
             target_nid = hid_to_nid.get(act.host_id)
             if not target_nid:
                 continue
             etype = _type_map.get(act.activity_type, "shell")
+            target_host = next((h for h in hosts_meta if h["id"] == act.host_id), None)
+            target_ip = (target_host or {}).get("ip") or ""
+            target_scope = _scope_for_ip(target_ip)
+            target_cidr = target_scope["cidr"] if target_scope else ""
 
-            if act.activity_type == "c2":
-                # Route C2 session through junction device when the target lives
-                # in a remote scope behind a VPN-GW / pivot host.
-                pivot_nid = _pivot_nid_for(act.host_id)
-                from_nid = pivot_nid if pivot_nid else attacker_nids[0]
-            else:
+            # ── Compute previous hop (from_nid) ──
+            from_nid: str | None = None
+            route_reason = ""
+
+            if target_scope and not target_scope.get("is_entry"):
+                # 1. Earlier session in the same scope (sort already ASC by ts)
+                for prev in sessions_by_scope.get(target_cidr, []):
+                    if prev["host_id"] != act.host_id:
+                        from_nid = prev["target_nid"]
+                        route_reason = (
+                            f"via earlier session on "
+                            f"{prev['hostname'] or prev['host_id']}"
+                        )
+                        break
+                # 2. via_host_id pivot configured on the scope
+                if not from_nid and target_scope.get("via_host_id"):
+                    via_nid = hid_to_nid.get(target_scope["via_host_id"])
+                    if via_nid and via_nid != target_nid:
+                        from_nid = via_nid
+                        route_reason = f"via scope.via_host {target_scope['via_host_id']}"
+                # 3. Auto-detected junction host (router/VPN-GW)
+                if not from_nid:
+                    auto_nid = _auto_pivot_nid(target_scope)
+                    if auto_nid and auto_nid != target_nid:
+                        from_nid = auto_nid
+                        route_reason = "via auto-detected junction"
+
+            # 4. Fallback: direct from attacker
+            if not from_nid:
                 from_nid = attacker_nids[0]
+                route_reason = route_reason or "direct from attacker"
 
             if from_nid == target_nid:
                 continue
+
             # L2: skip if P1 cred_validation already wrote a verified edge
             #     for the same (attacker, target, role) tuple.
             if (from_nid, target_nid, etype) in p1_access_pairs:
+                # still record session so later hosts can chain through it
+                if target_cidr:
+                    sessions_by_scope.setdefault(target_cidr, []).append({
+                        "host_id": act.host_id, "target_nid": target_nid,
+                        "ts": act.ts or "",
+                        "hostname": (target_host or {}).get("hostname", ""),
+                    })
                 continue
-            # C2 session edges are auto-inferred (rebuilt each smart-build).
-            # Other activity types (exec/lateral) are observed/verified.
+
             is_c2 = act.activity_type == "c2"
             decayed, stale = _decay_confidence(0.9, act.ts or "", confidence_decay_days)
             if _add_edge(from_nid, target_nid, {
                 "type": etype, "label": etype.replace("_", " "),
                 "confidence": round(decayed, 3),
                 "source": "auto" if is_c2 else "host_activity",
-                "reason": f"Host activity: {act.title or act.activity_type} [{act.ts}]",
+                "reason": (
+                    f"Host activity: {act.title or act.activity_type} "
+                    f"[{act.ts}] — {route_reason}"
+                ),
                 "state": "stale" if stale else ("inferred" if is_c2 else "observed"),
                 "verified": False if (is_c2 or stale) else True,
                 "is_manual": False,
                 "ts": act.ts or "",
             }):
                 edges_added += 1
+
+            # Record this session so subsequent sessions in the same scope
+            # can chain through it.
+            if target_cidr:
+                sessions_by_scope.setdefault(target_cidr, []).append({
+                    "host_id": act.host_id, "target_nid": target_nid,
+                    "ts": act.ts or "",
+                    "hostname": (target_host or {}).get("hostname", ""),
+                })
 
     # ── P4: Domain membership edges (DC → members) ───────────────────
     if include_domain_edges:
