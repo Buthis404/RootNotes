@@ -37,6 +37,9 @@ def _job_dict(job: models.Job) -> dict:
         "related_entity_type": job.related_entity_type,
         "related_entity_id": job.related_entity_id,
         "retry_of_job_id": job.retry_of_job_id,
+        "priority": getattr(job, "priority", 0) or 0,
+        "retry_count": getattr(job, "retry_count", 0) or 0,
+        "max_retries": getattr(job, "max_retries", 0) or 0,
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
@@ -62,6 +65,8 @@ def _clone_job_for_queue(db: Session, source: models.Job, *, created_by: str, re
         related_entity_id=source.related_entity_id,
         request_json=source.request_json or {},
         retry_of_job_id=retry_of_job_id,
+        priority=getattr(source, "priority", 0) or 0,
+        max_retries=getattr(source, "max_retries", 0) or 0,
     )
 
 
@@ -170,7 +175,7 @@ async def rerun_job(
     if not supports_queued_execution(source.connector_key, source.operation):
         raise HTTPException(400, "Queued rerun is not supported for this connector/operation")
     cloned = _clone_job_for_queue(db, source, created_by=getattr(user, "username", "") or "")
-    schedule_job_run(cloned.id)
+    schedule_job_run(cloned.id, pid=pid, priority=10)
     return _job_dict(cloned)
 
 
@@ -192,7 +197,7 @@ async def retry_job(
     if not supports_queued_execution(source.connector_key, source.operation):
         raise HTTPException(400, "Queued retry is not supported for this connector/operation")
     cloned = _clone_job_for_queue(db, source, created_by=getattr(user, "username", "") or "", retry_of_job_id=source.id)
-    schedule_job_run(cloned.id)
+    schedule_job_run(cloned.id, pid=pid, priority=10)
     return _job_dict(cloned)
 
 

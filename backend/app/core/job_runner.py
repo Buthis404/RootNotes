@@ -25,9 +25,9 @@ def supports_queued_execution(connector_key: str, operation: str) -> bool:
     return (connector_key, operation) in _SUPPORTED_QUEUED_OPERATIONS
 
 
-def schedule_job_run(job_id: str) -> None:
+def schedule_job_run(job_id: str, *, pid: str = "", priority: int = 0) -> None:
     from .worker_pool import get_pool
-    get_pool().submit(job_id)
+    get_pool().submit(job_id, pid=pid, priority=priority)
 
 
 async def run_queued_job(job_id: str, cancel_token: CancellationToken | None = None) -> None:
