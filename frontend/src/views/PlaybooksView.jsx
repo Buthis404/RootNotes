@@ -574,6 +574,120 @@ function CredPicker({ creds, onPick, accent }) {
 }
 
 
+const TAG_COLORS = { recon: '#5b8af5', web: '#6fc8f0', ad: '#c07af0', enum: '#5b8af5', creds: '#e8574a', lateral: '#e8cc42', smb: '#f09a3a', impacket: '#c07af0', nmap: '#39d353', 'post-exploitation': '#e8574a' };
+function tagColor(t) { return TAG_COLORS[t] || '#606570'; }
+
+function PacksPanel({ packs, accent, onInsert, onDelete, onClose }) {
+  const [filter, setFilter] = useState('');
+  const filtered = packs.filter(p => !filter || p.name.toLowerCase().includes(filter.toLowerCase()) || (p.tags || []).some(t => t.includes(filter.toLowerCase())));
+  const builtin = filtered.filter(p => p.is_builtin);
+  const custom = filtered.filter(p => !p.is_builtin);
+
+  const PackCard = ({ pack }) => (
+    <div style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: '12px 14px', marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, color: '#e0e4ec', fontWeight: 600, marginBottom: 4 }}>{pack.name}</div>
+          {pack.description && <div style={{ fontSize: 10, color: '#606570', lineHeight: 1.5, marginBottom: 6 }}>{pack.description}</div>}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+            {(pack.tags || []).map(t => <span key={t} style={{ fontSize: 8, color: tagColor(t), background: tagColor(t) + '18', border: `1px solid ${tagColor(t)}33`, borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{t}</span>)}
+            <span style={{ fontSize: 8, color: '#404550', background: '#ffffff08', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>{pack.steps.length} step{pack.steps.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {pack.steps.map((s, i) => <span key={i} style={{ fontSize: 8, color: '#505560', fontFamily: 'JetBrains Mono' }}>{i + 1}. {s.title || s.operation}</span>)}
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+          <button onClick={() => onInsert(pack)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', whiteSpace: 'nowrap' }}>Insert</button>
+          {!pack.is_builtin && <button onClick={() => onDelete(pack.id)} style={{ background: 'transparent', border: '1px solid #cc233344', borderRadius: 4, padding: '4px 8px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Delete</button>}
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', zIndex: 2000, paddingTop: 60, paddingRight: 24 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 10, width: 460, maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 8px 40px rgba(0,0,0,0.6)' }}>
+        <div style={{ padding: '16px 18px 12px', borderBottom: '1px solid #1e2029', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: '#e0e4ec', fontFamily: 'Space Grotesk' }}>Operation Packs</div>
+          <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter…" style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 8px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', width: 140 }} />
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 16, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+          {builtin.length > 0 && <>
+            <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Built-in packs</div>
+            {builtin.map(p => <PackCard key={p.id} pack={p} />)}
+          </>}
+          {custom.length > 0 && <>
+            <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', margin: '12px 0 8px' }}>Custom packs</div>
+            {custom.map(p => <PackCard key={p.id} pack={p} />)}
+          </>}
+          {filtered.length === 0 && <div style={{ fontSize: 11, color: '#404550', textAlign: 'center', padding: 32 }}>No packs found</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SavePackModal({ steps, accent, onClose, onSaved }) {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [tags, setTags] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!name.trim()) { setErr('Name is required'); return; }
+    setSaving(true); setErr('');
+    try {
+      const pack = await api.createOperationPack({
+        name: name.trim(),
+        description: description.trim(),
+        steps: steps.map(s => ({ ...s })),
+        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+      });
+      onSaved(pack);
+      onClose();
+    } catch (e) { setErr(e?.message || 'Failed to save'); }
+    finally { setSaving(false); }
+  };
+
+  const inp2 = { background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', width: '100%', boxSizing: 'border-box' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 8, padding: 24, width: 380, boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 18 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#e0e4ec', fontFamily: 'Space Grotesk', flex: 1 }}>Save as Operation Pack</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 16, padding: 0 }}>×</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Pack name *</div>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. My Recon Pack" style={inp2} autoFocus />
+          </div>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Description</div>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="What does this pack do?" style={{ ...inp2, resize: 'vertical' }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase' }}>Tags (comma separated)</div>
+            <input value={tags} onChange={e => setTags(e.target.value)} placeholder="recon, web, ad" style={inp2} />
+          </div>
+          <div style={{ fontSize: 10, color: '#505560' }}>{steps.length} step{steps.length !== 1 ? 's' : ''} will be saved</div>
+          {err && <div style={{ fontSize: 10, color: '#cc2233' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
+            <button onClick={save} disabled={saving} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 16px', cursor: saving ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: saving ? 0.7 : 1 }}>
+              {saving ? 'Saving…' : 'Save Pack'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [playbooks, setPlaybooks] = useState([]);
   const [runs, setRuns] = useState([]);
@@ -599,12 +713,15 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
   const [batchResult, setBatchResult] = useState(null);
   const [activeTab, setActiveTab] = useState('playbooks'); // 'playbooks' | 'scheduled'
   const [importing, setImporting] = useState(false);
+  const [packs, setPacks] = useState([]);
+  const [showPacksPanel, setShowPacksPanel] = useState(false);
+  const [showSavePackModal, setShowSavePackModal] = useState(false);
 
   const load = useCallback(async () => {
     if (!selectedProject) return;
     setLoading(true);
     try {
-      const [pb, runData, connectorData, templateData, hostData, credData, scopeData] = await Promise.all([
+      const [pb, runData, connectorData, templateData, hostData, credData, scopeData, packData] = await Promise.all([
         api.listPlaybooks(),
         api.listPlaybookRuns(selectedProject, { limit: 100 }),
         api.listConnectors().catch(() => ({ connectors: [] })),
@@ -612,6 +729,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
         api.getHosts(selectedProject).catch(() => []),
         api.getCreds(selectedProject).catch(() => []),
         api.getScopes(selectedProject).catch(() => []),
+        api.listOperationPacks().catch(() => ({ packs: [] })),
       ]);
       setPlaybooks(pb.playbooks || []);
       setRuns(runData.runs || []);
@@ -620,6 +738,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
       setHosts(Array.isArray(hostData) ? hostData : []);
       setCreds(Array.isArray(credData) ? credData : []);
       setScopes(Array.isArray(scopeData) ? scopeData : []);
+      setPacks(packData.packs || []);
       setSelectedPlaybookId(prev => prev || pb.playbooks?.[0]?.id || '');
     } catch (e) {
       setError(e.message || 'Failed to load playbooks');
@@ -916,6 +1035,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={() => setEditor(prev => ({ ...prev, steps: [...prev.steps, stepTemplates[0] ? buildStepFromTemplate(stepTemplates[0]) : emptyStep()] }))} style={toolbarBtn(accent, false)}>Add step</button>
+                  <button onClick={() => setShowPacksPanel(true)} style={toolbarBtn('#e8cc42', false)}>Packs</button>
+                  {editor.steps.length > 0 && <button onClick={() => setShowSavePackModal(true)} style={toolbarBtn('#c07af0', false)}>Save as pack</button>}
                   <button onClick={savePlaybook} disabled={saving} style={toolbarBtn(accent, true)}>{saving ? 'Saving...' : 'Save playbook'}</button>
                   <button onClick={cancelEdit} style={toolbarBtn('#808590', false)}>Cancel</button>
                 </div>
@@ -1169,6 +1290,32 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
           </div>
         </div>
       </div>}
+
+      {showPacksPanel && (
+        <PacksPanel
+          packs={packs}
+          accent={accent}
+          onInsert={(pack) => {
+            const newSteps = (pack.steps || []).map(s => ({ ...s }));
+            setEditor(prev => ({ ...prev, steps: [...prev.steps, ...newSteps] }));
+            setShowPacksPanel(false);
+          }}
+          onDelete={async (packId) => {
+            await api.deleteOperationPack(packId).catch(() => {});
+            setPacks(prev => prev.filter(p => p.id !== packId));
+          }}
+          onClose={() => setShowPacksPanel(false)}
+        />
+      )}
+
+      {showSavePackModal && (
+        <SavePackModal
+          steps={editor.steps}
+          accent={accent}
+          onClose={() => setShowSavePackModal(false)}
+          onSaved={(pack) => setPacks(prev => [...prev, pack])}
+        />
+      )}
     </div>
   );
 }
