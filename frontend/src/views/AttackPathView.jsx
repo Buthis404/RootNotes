@@ -1,7 +1,131 @@
 import { useState, useEffect, useRef } from 'react';
-
-
 import Icon from '../components/Icon.jsx';
+import { api } from '../api.js';
+
+// Cache KB MITRE articles for the session
+let _kbTechniqueCache = null;
+async function loadKBTechniques() {
+  if (_kbTechniqueCache) return _kbTechniqueCache;
+  try {
+    const articles = await api.getKBArticles({ category: 'MITRE ATT&CK' });
+    _kbTechniqueCache = articles.map(a => {
+      const mid = (a.tags || []).find(t => /^T\d{4}/.test(t)) || '';
+      const name = a.title.includes(' — ') ? a.title.split(' — ')[1] : a.title;
+      const tacticTag = (a.tags || []).find(t => t !== 'mitre' && !/^T\d/.test(t));
+      const tactic = tacticTag
+        ? tacticTag.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        : 'Other';
+      return { id: mid, name, tactic, kb_id: a.id };
+    }).filter(t => t.id);
+    return _kbTechniqueCache;
+  } catch {
+    return [];
+  }
+}
+
+const TACTIC_ORDER_AP = [
+  'Reconnaissance', 'Initial Access', 'Execution', 'Persistence',
+  'Privilege Escalation', 'Defense Evasion', 'Credential Access',
+  'Discovery', 'Lateral Movement', 'Collection',
+  'Command and Control', 'Exfiltration', 'Impact', 'Other',
+];
+
+function TechniqueInput({ value, mitreId, onChange, accent }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(value || '');
+  const [hints, setHints] = useState([]);
+  const ref = useRef(null);
+
+  useEffect(() => { setQuery(value || ''); }, [value]);
+
+  useEffect(() => { loadKBTechniques().then(setHints); }, []);
+
+  useEffect(() => {
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const matches = q.length > 0
+    ? hints.filter(t =>
+        t.name.toLowerCase().includes(q) ||
+        t.id.toLowerCase().includes(q) ||
+        t.tactic.toLowerCase().includes(q)
+      )
+    : hints;
+
+  // Group by tactic
+  const grouped = {};
+  for (const t of matches) {
+    if (!grouped[t.tactic]) grouped[t.tactic] = [];
+    grouped[t.tactic].push(t);
+  }
+  const tacticOrder = TACTIC_ORDER_AP.filter(tc => grouped[tc]);
+
+  const pick = t => {
+    setQuery(t.name);
+    onChange(t.name, t.id);
+    setOpen(false);
+  };
+
+  const kbEmpty = hints.length === 0;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div style={{ position: 'relative' }}>
+        <input
+          value={query}
+          onChange={e => { setQuery(e.target.value); onChange(e.target.value, mitreId); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          placeholder={kbEmpty ? 'Type technique name… (seed MITRE to KB for dropdown)' : 'Search technique…'}
+          style={{ width: '100%', background: '#07080b', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 32px 7px 10px', color: '#d0d4dc', fontSize: 12, outline: 'none', boxSizing: 'border-box' }}
+        />
+        {query && (
+          <button
+            onMouseDown={e => { e.preventDefault(); setQuery(''); onChange('', ''); }}
+            style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#505560', fontSize: 13, lineHeight: 1 }}
+          >×</button>
+        )}
+      </div>
+      {open && (hints.length > 0 || q) && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200,
+          background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6,
+          boxShadow: '0 12px 32px #00000099', maxHeight: 320, overflow: 'auto', marginTop: 2,
+        }}>
+          {kbEmpty && (
+            <div style={{ padding: '10px 12px', fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono' }}>
+              Seed MITRE ATT&CK to KB first to enable technique dropdown
+            </div>
+          )}
+          {tacticOrder.map(tactic => (
+            <div key={tactic}>
+              <div style={{ padding: '5px 10px 3px', fontSize: 8, fontWeight: 700, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', background: '#07080b', position: 'sticky', top: 0 }}>
+                {tactic}
+              </div>
+              {grouped[tactic].map(t => (
+                <div
+                  key={t.id}
+                  onMouseDown={e => { e.preventDefault(); pick(t); }}
+                  style={{ padding: '5px 10px 5px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#ffffff0a'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <span style={{ fontSize: 8, fontFamily: 'JetBrains Mono', color: accent, width: 60, flexShrink: 0 }}>{t.id}</span>
+                  <span style={{ fontSize: 11, color: '#c8cdd6' }}>{t.name}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          {q && matches.length === 0 && (
+            <div style={{ padding: '10px 12px', fontSize: 10, color: '#505560' }}>No matches for "{query}"</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const NODE_TYPES = {
   external: { label: 'External',  color: '#808590', icon: 'globe'  },
@@ -107,7 +231,12 @@ function StepModal({ step, isNew, onSave, onClose, accent, hosts = [] }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>Technique (how accessed)</div>
-              {inp('technique', 'e.g. Kerberoasting')}
+              <TechniqueInput
+                value={form.technique}
+                mitreId={form.mitre_id}
+                accent={accent}
+                onChange={(name, id) => setForm(f => ({ ...f, technique: name, mitre_id: id ?? f.mitre_id }))}
+              />
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>MITRE ID</div>

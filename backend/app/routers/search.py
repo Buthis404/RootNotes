@@ -9,7 +9,7 @@ from ..core.access import check_pid_access, get_user_member_pids
 
 router = APIRouter(tags=["search"])
 
-_FILTER_KEYS = {"type", "severity", "status", "service", "role", "source", "connector"}
+_FILTER_KEYS = {"type", "severity", "status", "service", "role", "source", "connector", "tag"}
 
 
 def _parse_query(raw: str):
@@ -86,6 +86,8 @@ def search(
             hq = hq.filter(models.Host.role == filters["role"])
         if status_f:
             hq = hq.filter(models.Host.status == status_f)
+        if filters.get("tag"):
+            hq = hq.filter(func.array_to_string(models.Host.tags, ",").ilike(f"%{filters['tag']}%"))
         if use_fts:
             vec_expr = (
                 func.coalesce(models.Host.ip, "") + " "
@@ -103,12 +105,26 @@ def search(
                 models.Host.notes.ilike(like),
             ))
         for h in hq.limit(limit).all():
+            # related: creds and findings linked to this host
+            related = []
+            linked_creds = db.query(models.Cred).filter(
+                models.Cred.pid == h.pid, models.Cred.host == h.ip
+            ).limit(5).all()
+            for c in linked_creds:
+                related.append({"type": "cred", "id": c.id, "title": c.username, "snippet": c.service or ""})
+            linked_findings = db.query(models.Finding).filter(
+                models.Finding.pid == h.pid,
+                models.Finding.host_id == h.id,
+            ).limit(3).all()
+            for f in linked_findings:
+                related.append({"type": "finding", "id": f.id, "title": f.title, "snippet": f.severity or ""})
             items.append({
                 "type": "host", "id": h.id, "pid": h.pid,
                 "title": h.ip,
                 "subtitle": h.hostname or "",
                 "snippet": (h.os or "") + (" • " + h.role if h.role else ""),
                 "meta": {"status": h.status, "role": h.role, "os": h.os},
+                "related": related,
             })
 
     # ── Creds ─────────────────────────────────────────────────────────────────
@@ -116,6 +132,8 @@ def search(
         cq = _scope(db.query(models.Cred), models.Cred, pids, pid)
         if filters.get("service"):
             cq = cq.filter(models.Cred.service == filters["service"])
+        if filters.get("tag"):
+            cq = cq.filter(func.array_to_string(models.Cred.tags, ",").ilike(f"%{filters['tag']}%"))
         if use_fts:
             vec_expr = (
                 func.coalesce(models.Cred.username, "") + " "

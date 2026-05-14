@@ -878,7 +878,7 @@ export default function App() {
         {tab === 'domains' && (
           <DomainsView selectedProject={selectedProject} accent={acc} />
         )}
-        {tab === 'kb' && <KBView selectedProject={selectedProject} accent={acc} currentUser={currentUser} />}
+        {tab === 'kb' && <KBView selectedProject={selectedProject} accent={acc} currentUser={currentUser} attackSteps={attackSteps.filter(s => s.pid === selectedProject)} />}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}
             selectedProject={selectedProject} accent={acc} />
