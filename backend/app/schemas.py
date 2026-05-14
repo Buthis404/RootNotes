@@ -533,6 +533,9 @@ class ScopeBase(BaseModel):
     scope_type: str = "cidr"
     in_scope: bool = True
     description: str = ""
+    gateway_ip: str = ""
+    is_entry: bool = False
+    via_host_id: str = ""
 
 
 class ScopeCreate(ScopeBase):
@@ -561,6 +564,9 @@ class ScopeUpdate(BaseModel):
     scope_type: Optional[str] = None
     in_scope: Optional[bool] = None
     description: Optional[str] = None
+    gateway_ip: Optional[str] = None
+    is_entry: Optional[bool] = None
+    via_host_id: Optional[str] = None
 
 class Scope(ScopeBase):
     id: str

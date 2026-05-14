@@ -42,19 +42,26 @@ Operations change the project. Automatically.
 ### Intelligence
 Everything your team needs to know about the engagement in one place.
 
-- **Hosts** — inventory with status (`up / access / pwned`), roles, ports, services, tags, linked credentials
+- **Hosts** — inventory with status (`up / access / pwned`), roles, ports, services, tags, linked credentials; tabbed detail panel (Details · Activity · Creds · Path)
 - **Credentials** — plaintext, NTLM, Kerberos tickets; domain/local; cracked state; host linkage
 - **Findings** — severity, CVE/CVSS, proof, recommendations, MITRE IDs, workflow status
 - **Notes** — Markdown with attachments, phases, tags, live collaboration
 - **Knowledge Base** — Markdown articles (global or project-scoped) with full-text search
 - **Attack Path** — ordered escalation steps with MITRE technique fields; link steps to real hosts
+- **Scope** — CIDR/domain/hostname entries with gateway, entry-point flag, and "reachable via" pivot host
 
 ### Visualization
 Two graph views showing different angles on the same engagement state.
 
-**Network Map** — topology canvas with VLAN regions, overlay modes (threats / sessions / access / roles), drag-and-drop layout, host inspector with activity timeline.
+**Network Map** — topology canvas with VLAN regions, overlay modes (Threats · Sessions · Access · Roles · Pivots), drag-and-drop layout, host inspector with activity timeline. Entry uplink edges shown in orange. Subnets accessible only via a pivot host show `⇄ via [host]` on the region.
 
-**Attack Graph** — interactive canvas showing hosts connected by credential paths. Drag nodes to reposition. Click any node to see linked credentials, findings that mention it, ports and services.
+**Attack Graph** — interactive canvas showing hosts connected by credential paths, access edges, pivot routes, and privilege escalation chains. Node badges for DA/DC status and reachability distance. Side panel shows privilege path and pivot routes for selected host.
+
+### Pivots
+- Manual pivot creation from the Network Map toolbar (tool, type, route CIDR, status)
+- Auto-collection from chisel / ligolo / Adaptix via SSH collector
+- Pivot route edges: all hosts in route CIDR linked to pivot node on the Attack Graph
+- Scope `via_host_id`: mark a subnet as reachable only via a specific machine — Smart Build adds route edges and the region shows the pivot annotation
 
 ### Evidence pipeline
 - Loot: files, hashes, secrets, configs — upload/download with auth, linked to host + job + credential
@@ -68,13 +75,13 @@ Executive summary built from real project data: compromised hosts, cracked crede
 
 ## Screenshots
 
-### Network Map — overlay modes: Threats · Sessions · Access · Roles
-![Network](docs/screenshots/03_network.png)
+### Network Map — topology canvas with VLAN regions and overlay modes
+![Network Map](docs/screenshots/03_network.png)
 
-### Attack Graph — interactive canvas with linked creds and findings
-![Attack Graph](docs/screenshots/attackgraph.png)
+### Attack Graph — privilege paths, pivot routes, DA/DC node badges
+![Attack Graph](docs/screenshots/15_attackgraph.png)
 
-### Hosts
+### Hosts — tabbed panel: Details · Activity · Creds · Path
 ![Hosts](docs/screenshots/04_hosts.png)
 
 ### Credentials
@@ -92,11 +99,20 @@ Executive summary built from real project data: compromised hosts, cracked crede
 ### Knowledge Base
 ![Knowledge Base](docs/screenshots/09_kb.png)
 
-### Global Search
-![Search](docs/screenshots/10_search.png)
+### Scope — with gateway, entry-point, and pivot host fields
+![Scope](docs/screenshots/14_scope.png)
+
+### Attack Path
+![Attack Path](docs/screenshots/13_attackpath.png)
+
+### Jobs
+![Jobs](docs/screenshots/11_jobs.png)
 
 ### Report
-![Report](docs/screenshots/15_report.png)
+![Report](docs/screenshots/16_report.png)
+
+### Timeline
+![Timeline](docs/screenshots/17_timeline.png)
 
 ---
 
@@ -177,4 +193,3 @@ nginx ──► frontend   (React + Vite, static build)
 - Confidential note content is encrypted at rest when the note carries tags like `confidential`, `secret`, `sensitive`, `opsec`, or `restricted`
 - Sensitive text loot values are encrypted at rest for non-file artifacts
 - Read-audit events are recorded when users view credential secrets, confidential notes, sensitive loot, or download protected files
-- Project owners/admins can trigger `POST /api/projects/{pid}/purge` to remove a project and its uploaded files quickly after an operation

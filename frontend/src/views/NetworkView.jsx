@@ -1153,6 +1153,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     if (t === 'lateral' || t === 'pivot') return { stroke: '#e8cc42', sw: 2, dash: '5 3', anim: true };
     if (t === 'domain_member') return { stroke: '#8f7af5', sw: 1.5, dash: '8 4', anim: false };
     if (t === 'auth_path' || t === 'trust') return { stroke: '#c07af0', sw: 1.5, dash: '6 3', anim: false };
+    if (t === 'uplink') return { stroke: '#f09a3a', sw: 2, dash: '7 3', anim: true };
     if (t === 'same_subnet' || t === 'lan') return { stroke: '#3a4a5a', sw: 1, dash: '5 5', anim: false };
     if (t === 'routed') return { stroke: '#2a3a50', sw: 1, dash: '3 7', anim: false };
     // Legacy style string
@@ -1169,6 +1170,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     const t = typeof edge === 'string' ? '' : (edge?.type || '');
     if (s === 'exploit') return 'url(#me)';
     if (s === 'lateral' || t === 'lateral' || t === 'pivot') return 'url(#ml)';
+    if (t === 'uplink') return 'url(#morange)';
     if (s === 'tunnel') return 'url(#mt)';
     if (t === 'domain_admin') return 'url(#mred)';
     if (t === 'domain_member' || t === 'auth_path' || t === 'trust') return 'url(#mp)';
@@ -1242,7 +1244,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             <defs>
               <pattern id="sg" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#ffffff05" strokeWidth="1" /></pattern>
               <pattern id="lg" width="100" height="100" patternUnits="userSpaceOnUse"><path d="M 100 0 L 0 0 0 100" fill="none" stroke="#ffffff09" strokeWidth="1" /></pattern>
-              {[['mgreen', '#39d353'], ['me', '#cc2233'], ['ml', '#e8cc42'], ['mt', '#5b8af5'], ['mp', '#8f7af5'], ['mgray', '#2a3548'], ['mred', '#e8574a']].map(([id, c]) => <marker key={id} id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill={c} /></marker>)}
+              {[['mgreen', '#39d353'], ['me', '#cc2233'], ['ml', '#e8cc42'], ['mt', '#5b8af5'], ['mp', '#8f7af5'], ['mgray', '#2a3548'], ['mred', '#e8574a'], ['morange', '#f09a3a']].map(([id, c]) => <marker key={id} id={id} markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill={c} /></marker>)}
             </defs>
             <g ref={canvasGroupRef} transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
               <rect x="-50000" y="-50000" width="100000" height="100000" fill="url(#sg)" style={{ pointerEvents: 'none' }} />
@@ -1252,6 +1254,12 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                 <text x="14" y="22" fontSize="12" fill={region.stroke || '#5b8af5'} fontFamily="Space Grotesk" fontWeight="700" style={{ pointerEvents: 'none' }}>{region.label}</text>
                 {region.zone_type && <text x="14" y="36" fontSize="9" fill={region.stroke || '#5b8af5'} fontFamily="JetBrains Mono" fontWeight="600" style={{ pointerEvents: 'none', opacity: 0.8 }}>[{region.zone_type.toUpperCase()}]</text>}
                 {region.note ? <text x="14" y={region.zone_type ? 48 : 38} fontSize="9" fill="#c8cdd6" fontFamily="JetBrains Mono" style={{ pointerEvents: 'none' }}>{region.note}</text> : null}
+                {region.via_host_id ? (() => {
+                  const viaHost = projectHosts.find(h => h.id === region.via_host_id);
+                  const viaLabel = `⇄ via ${viaHost?.hostname || viaHost?.ip || 'pivot'}`;
+                  const yOff = (region.zone_type ? 48 : 38) + (region.note ? 13 : 0);
+                  return <text x="14" y={yOff} fontSize="9" fill="#c07af0" fontFamily="JetBrains Mono" fontWeight="600" style={{ pointerEvents: 'none' }}>{viaLabel}</text>;
+                })() : null}
                 {selectedRegionId === region.id && regionEditMode && ['nw','ne','sw','se'].map(corner => {
                   const pos = {
                     nw: { x: 0, y: 0 },
@@ -1268,8 +1276,8 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                 const mx = (fn.x + tn.x) / 2;
                 const my = (fn.y + tn.y) / 2;
                 const edgeLabel = String(edge.label || '').trim();
-                const _ACCESS_EDGE_TYPES = new Set(['ssh','winrm','smb_admin','local_admin','shell','c2_session','lateral','pivot','auth_path']);
-                const isAccessEdge = _ACCESS_EDGE_TYPES.has(edge.type || '');
+                const _ACCESS_EDGE_TYPES = new Set(['ssh','winrm','smb_admin','local_admin','shell','c2_session','lateral','pivot','auth_path','uplink']);
+                const isAccessEdge = _ACCESS_EDGE_TYPES.has(edge.type || '') || edge.source === 'scope_via';
                 const edgeDimmed = attackPathSet
                   ? !attackPathSet.edges.has(edge.id)
                   : (accessOverlay && !isAccessEdge);
@@ -1354,7 +1362,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             </div>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Edges</div>
-              {[['Access (verified)', '#39d353'], ['Access (inferred)', '#39d35399'], ['Domain admin', '#e8574a'], ['Exploit', '#cc2233'], ['Lateral/Pivot', '#e8cc42'], ['Tunnel', '#5b8af5'], ['Domain', '#8f7af5'], ['Subnet', '#3a4a5a']].map(([l, c]) => <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 14, height: 1.5, background: c, display: 'inline-block' }} /><span style={{ fontSize: 9, color: '#606570' }}>{l}</span></div>)}
+              {[['Access (verified)', '#39d353'], ['Access (inferred)', '#39d35399'], ['Entry uplink', '#f09a3a'], ['Domain admin', '#e8574a'], ['Exploit', '#cc2233'], ['Lateral/Pivot', '#e8cc42'], ['Tunnel', '#5b8af5'], ['Domain', '#8f7af5'], ['Subnet', '#3a4a5a']].map(([l, c]) => <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 14, height: 1.5, background: c, display: 'inline-block' }} /><span style={{ fontSize: 9, color: '#606570' }}>{l}</span></div>)}
             </div>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Keyboard shortcuts</div>
@@ -1424,18 +1432,107 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
   );
 }
 
+function AddPivotModal({ projectId, hosts, accent, onClose, onCreated }) {
+  const [form, setForm] = useState({ pivot_host_id: '', source_host_id: '', tool: 'chisel', pivot_type: 'socks5', route_cidr: '', bind_address: '', status: 'active', notes: '' });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!form.pivot_host_id) { setErr('Select pivot host'); return; }
+    setSaving(true); setErr('');
+    try {
+      await api.createPivot(projectId, { ...form, pid: projectId });
+      onCreated();
+      onClose();
+    } catch (e) {
+      setErr(e?.message || 'Failed to create pivot');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inp = { background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 8px', color: '#c8cdd6', fontSize: 11, outline: 'none', fontFamily: 'JetBrains Mono', width: '100%', boxSizing: 'border-box' };
+  const lbl = { fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 8, padding: 24, width: 400, boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 20 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#e0e4ec', fontFamily: 'Space Grotesk', flex: 1 }}>Add Pivot</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', fontSize: 16, padding: 0 }}>×</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <div style={lbl}>Pivot Host *</div>
+            <select value={form.pivot_host_id} onChange={e => setForm(s => ({ ...s, pivot_host_id: e.target.value }))} style={inp}>
+              <option value="">Select host…</option>
+              {hosts.map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip}{h.ip && h.hostname ? ` (${h.ip})` : ''}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={lbl}>Source Host (optional)</div>
+            <select value={form.source_host_id} onChange={e => setForm(s => ({ ...s, source_host_id: e.target.value }))} style={inp}>
+              <option value="">— attacker default —</option>
+              {hosts.filter(h => h.is_attacker).map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip} (attacker)</option>)}
+              {hosts.filter(h => !h.is_attacker).map(h => <option key={h.id} value={h.id}>{h.hostname || h.ip}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <div style={lbl}>Tool</div>
+              <select value={form.tool} onChange={e => setForm(s => ({ ...s, tool: e.target.value }))} style={inp}>
+                {['chisel', 'ligolo', 'ligolo-ng', 'metasploit', 'ssh', 'other'].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={lbl}>Type</div>
+              <select value={form.pivot_type} onChange={e => setForm(s => ({ ...s, pivot_type: e.target.value }))} style={inp}>
+                {['socks5', 'socks4', 'route', 'portfwd', 'reverse'].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <div style={lbl}>Route CIDR (network reachable via pivot)</div>
+            <input value={form.route_cidr} onChange={e => setForm(s => ({ ...s, route_cidr: e.target.value }))} placeholder="10.10.20.0/24" style={inp} />
+          </div>
+          <div>
+            <div style={lbl}>Bind Address (optional)</div>
+            <input value={form.bind_address} onChange={e => setForm(s => ({ ...s, bind_address: e.target.value }))} placeholder="127.0.0.1:1080" style={inp} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={lbl}>Status:</div>
+            {[['active', '#39d353'], ['inactive', '#808590']].map(([s, c]) => (
+              <button key={s} onClick={() => setForm(f => ({ ...f, status: s }))}
+                style={{ background: form.status === s ? c + '22' : 'transparent', border: `1px solid ${form.status === s ? c + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: form.status === s ? c : '#505560', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                {s}
+              </button>
+            ))}
+          </div>
+          {err && <div style={{ fontSize: 10, color: '#cc2233' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <button onClick={onClose} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
+            <button onClick={save} disabled={saving} style={{ background: accent, border: 'none', borderRadius: 4, padding: '6px 16px', cursor: saving ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: saving ? 0.7 : 1 }}>
+              {saving ? 'Saving…' : 'Add Pivot'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function NetworkView({ projectId, accent, accentGreen, networks, onCreateNetwork, onUpdateNetwork, onDeleteNetwork, onCreateHost, onUpdateHost, onSyncHostByIp, hosts, onAddActivity, onUpdateActivity, onDeleteActivity, onRefreshHosts, onRefreshNetworks, markLocalOp, animateLinks = true, findings = [], objectives = [], creds = [], attackSteps = [] }) {
   const [activeNetId, setActiveNetId] = useState(null);
   const [editingName, setEditingName] = useState(null);
   const [nameVal, setNameVal] = useState('');
   const [showTopologyBuilder, setShowTopologyBuilder] = useState(false);
-  const [autoBuilding, setAutoBuilding] = useState(false);
   const [smartBuilding, setSmartBuilding] = useState(false);
   const [topologyEnabled, setTopologyEnabled] = useState(true);
   const [accessOverlay, setAccessOverlay] = useState(false);
   const [overlayMode, setOverlayMode] = useState('none'); // 'none'|'threats'|'sessions'|'access'|'pivots'|'roles'
   const [allActivities, setAllActivities] = useState([]);
   const [pivots, setPivots] = useState([]);
+  const [showAddPivot, setShowAddPivot] = useState(false);
 
   useEffect(() => {
     if (networks.length > 0) {
@@ -1543,6 +1640,17 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
         if (host.status === 'pwned') set(host.id, { color: '#e8574a', label: 'Pwned', priority: 5 });
         else if (host.status === 'access') set(host.id, { color: '#f09a3a', label: 'Access', priority: 4 });
       }
+      // Entry gateway nodes — nodes that are the target of an uplink edge in the active network
+      const activeNetObj = networks.find(n => n.id === activeNetId);
+      const netEdges = activeNetObj?.edges || activeNetObj?.edges_json || [];
+      const netNodes = activeNetObj?.nodes || activeNetObj?.nodes_json || [];
+      const nodeById = new Map(netNodes.map(n => [n.id, n]));
+      for (const edge of netEdges) {
+        if ((edge.type || '') === 'uplink') {
+          const toNode = nodeById.get(String(edge.to || ''));
+          if (toNode?.host_id) set(toNode.host_id, { color: '#f09a3a', label: 'Entry gateway', priority: 6 });
+        }
+      }
     }
 
     if (overlayMode === 'pivots') {
@@ -1562,28 +1670,7 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
     }
 
     return map.size > 0 ? map : null;
-  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities, pivots]);
-
-  const mappedIps = useMemo(
-    () => new Set((activeNet?.nodes || []).map(n => n.ip).filter(Boolean)),
-    [activeNet],
-  );
-  const unmappedHosts = useMemo(
-    () => projectHosts.filter(h => h.ip && !mappedIps.has(h.ip)),
-    [projectHosts, mappedIps],
-  );
-
-  const handleAutoBuild = async () => {
-    setAutoBuilding(true);
-    try {
-      await api.topologyAutoBuild(projectId, { keep_manual_positions: true });
-      await onRefreshNetworks?.();
-    } catch (e) {
-      console.error('Auto-build failed:', e);
-    } finally {
-      setAutoBuilding(false);
-    }
-  };
+  }, [overlayMode, creds, objectives, findings, attackSteps, projectHosts, allActivities, pivots, networks, activeNetId]);
 
   const handleSmartBuild = async () => {
     setSmartBuilding(true);
@@ -1631,26 +1718,6 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
       {/* Row 2: topology controls + overlay selector */}
       {topologyEnabled && (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', background: '#0a0b0f', borderBottom: '1px solid #1a1c22', flexShrink: 0, overflowX: 'auto' }}>
-        {/* Auto-layout button — amber when unmapped hosts exist */}
-        {projectHosts.length > 0 && (
-          <button
-            onClick={handleAutoBuild}
-            disabled={autoBuilding}
-            title={unmappedHosts.length > 0
-              ? `Place ${unmappedHosts.length} unmapped hosts on map and re-run layout`
-              : 'Re-run layout algorithm for all nodes'}
-            style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: autoBuilding ? 'default' : 'pointer', color: unmappedHosts.length > 0 ? '#f09a3a' : '#404550', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', opacity: autoBuilding ? 0.6 : 1, transition: 'color .15s', flexShrink: 0 }}
-          >
-            <Icon name="reset" size={11} color="currentColor" />
-            {autoBuilding ? 'Building…' : 'Auto-layout'}
-            {unmappedHosts.length > 0 && !autoBuilding && (
-              <span style={{ background: '#f09a3a22', border: '1px solid #f09a3a55', borderRadius: 10, padding: '1px 6px', fontSize: 9, color: '#f09a3a', fontFamily: 'JetBrains Mono' }}>
-                +{unmappedHosts.length}
-              </span>
-            )}
-          </button>
-        )}
-
         {/* Smart Build */}
         {projectHosts.length > 0 && (
           <button
@@ -1699,6 +1766,15 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
           );
         })()}
 
+        {/* Add Pivot manually */}
+        <button
+          onClick={() => setShowAddPivot(true)}
+          title="Manually add a pivot observation"
+          style={{ background: 'transparent', border: 'none', borderRight: '1px solid #1a1c22', padding: '7px 14px', cursor: 'pointer', color: '#c07af0', display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'JetBrains Mono', transition: 'color .15s', flexShrink: 0 }}
+        >
+          <Icon name="plus" size={11} color="currentColor" />
+          Add Pivot
+        </button>
         {/* Collect Pivots */}
         <button
           onClick={handleCollectPivots}
@@ -1733,12 +1809,12 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
             {projectHosts.length} project hosts are not on this map
           </span>
           <button
-            onClick={handleAutoBuild}
-            disabled={autoBuilding}
-            style={{ background: '#f09a3a', border: 'none', borderRadius: 5, padding: '6px 14px', cursor: autoBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, opacity: autoBuilding ? 0.7 : 1 }}
+            onClick={handleSmartBuild}
+            disabled={smartBuilding}
+            style={{ background: '#39d353', border: 'none', borderRadius: 5, padding: '6px 14px', cursor: smartBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, opacity: smartBuilding ? 0.7 : 1 }}
           >
-            <Icon name="reset" size={11} color="#fff" />
-            {autoBuilding ? 'Building…' : `Auto-layout ${projectHosts.length} hosts`}
+            <Icon name="target" size={11} color="#fff" />
+            {smartBuilding ? 'Building…' : 'Smart Build'}
           </button>
         </div>
       )}
@@ -1754,15 +1830,28 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
                 <Icon name="plus" size={12} color="currentColor" /> Create empty map
               </button>
               {topologyEnabled && projectHosts.length > 0 && (
-                <button onClick={handleAutoBuild} disabled={autoBuilding} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 18px', cursor: autoBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, opacity: autoBuilding ? 0.7 : 1 }}>
-                  <Icon name="reset" size={12} color="#fff" />
-                  {autoBuilding ? 'Building…' : `Auto-build from ${projectHosts.length} hosts`}
+                <button onClick={handleSmartBuild} disabled={smartBuilding} style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 18px', cursor: smartBuilding ? 'default' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, opacity: smartBuilding ? 0.7 : 1 }}>
+                  <Icon name="target" size={12} color="#fff" />
+                  {smartBuilding ? 'Building…' : 'Smart Build'}
                 </button>
               )}
             </div>
           </div>
         )
       }
+
+      {showAddPivot && (
+        <AddPivotModal
+          projectId={projectId}
+          hosts={projectHosts}
+          accent={accent}
+          onClose={() => setShowAddPivot(false)}
+          onCreated={async () => {
+            const data = await api.listPivots(projectId).catch(() => ({ items: [] }));
+            setPivots(data?.items || []);
+          }}
+        />
+      )}
     </div>
   );
 }

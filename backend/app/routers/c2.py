@@ -28,6 +28,47 @@ from ..plugins.registry import registry
 
 logger = get_logger(__name__)
 
+_C2_STATUS_RANK = {"unknown": 0, "up": 1, "alive": 1, "access": 2, "pwned": 3, "owned": 4}
+
+
+def _normalize_host_status(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"owned", "pwned", "access", "up", "alive", "unknown"}:
+        return raw
+    if raw in {"compromised", "compromise"}:
+        return "pwned"
+    return ""
+
+
+def _has_live_session_signal(host_data: dict) -> bool:
+    return bool(
+        str(host_data.get("beacon_id") or "").strip()
+        or str(host_data.get("agent_id") or "").strip()
+        or str(host_data.get("process") or "").strip()
+        or str(host_data.get("pid") or "").strip()
+    )
+
+
+def _status_from_c2_host(existing_status: str, host_data: dict) -> str:
+    explicit = _normalize_host_status(host_data.get("status") or "")
+    if explicit:
+        return explicit if _C2_STATUS_RANK.get(explicit, 0) >= _C2_STATUS_RANK.get((existing_status or "").strip().lower(), 0) else existing_status
+
+    current = (existing_status or "").strip().lower()
+    if _has_live_session_signal(host_data) and host_data.get("alive", True):
+        tier = _classify_privilege(host_data.get("username") or "")
+        candidate = {"user": "access", "admin": "pwned", "system": "owned"}.get(tier, "access")
+        return candidate if _C2_STATUS_RANK.get(candidate, 0) >= _C2_STATUS_RANK.get(current, 0) else existing_status
+
+    if current:
+        return existing_status
+    return "up" if host_data.get("alive", True) else "unknown"
+
+
+def _c2_owns_host_status(host: models.Host, source: str) -> bool:
+    tags = {str(tag).strip().lower() for tag in (host.tags or []) if str(tag).strip()}
+    return (host.import_source or "").strip().lower() == source.lower() or ({"c2", source.lower()} <= tags)
+
 
 def _require_c2():
     m = registry.get("c2_integration")
@@ -1092,8 +1133,14 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 existing.domain = domain
             if os_clean and os_clean != "Unknown" and (not existing.os or existing.os in ("Linux", "Unknown", "")):
                 existing.os = os_clean
-            if h.get("alive", True):
-                existing.status = "pwned"
+            derived_status = _status_from_c2_host("", h)
+            if _c2_owns_host_status(existing, source):
+                if derived_status:
+                    existing.status = derived_status
+            else:
+                next_status = _status_from_c2_host(existing.status or "", h)
+                if next_status:
+                    existing.status = next_status
             if new_notes and new_notes not in (existing.notes or ""):
                 existing.notes = ((existing.notes or "") + "\n\n---\n" + new_notes).strip()
             if source not in (existing.tags or []):
@@ -1105,6 +1152,7 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
         else:
             if not h.get("alive", True):
                 continue
+            initial_status = _status_from_c2_host("", h)
             hobj = models.Host(
                 id=new_id("hst"),
                 pid=pid,
@@ -1112,7 +1160,7 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 hostname=hostname,
                 os=os_clean,
                 domain=domain,
-                status="pwned",
+                status=initial_status or "up",
                 tags=["c2", source],
                 notes=new_notes,
                 import_source=source,
@@ -1518,7 +1566,7 @@ def _classify_privilege(username: str) -> str:
 
 
 _PRIV_RANK = {"system": 2, "admin": 1, "user": 0}
-_PRIV_STATUS = {"system": "pwned", "admin": "pwned", "user": "access"}
+_PRIV_STATUS = {"system": "owned", "admin": "pwned", "user": "access"}
 _PRIV_LABEL  = {"system": "SYSTEM", "admin": "admin", "user": "user"}
 
 
