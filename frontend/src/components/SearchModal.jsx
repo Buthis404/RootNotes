@@ -9,6 +9,8 @@ const TYPE_CFG = {
   finding: { icon: 'bug',      color: '#cc2233', label: 'Finding' },
   loot:    { icon: 'loot',     color: '#39d353', label: 'Loot' },
   job:     { icon: 'jobs',     color: '#6fc8f0', label: 'Job' },
+  kb:      { icon: 'kb',       color: '#43c8a0', label: 'KB' },
+  snippet: { icon: 'snippets', color: '#e8cc42', label: 'Snippet' },
 };
 
 const SEV_COLOR = { critical: '#cc2233', high: '#e8574a', medium: '#f09a3a', low: '#e8cc42', info: '#5b8af5' };
@@ -67,6 +69,32 @@ function RelatedItem({ rel }) {
   );
 }
 
+// Highlight style injected once
+const HL_STYLE = `
+.search-hl b { color: #f0c842; font-weight: 700; background: #f0c84218; border-radius: 2px; padding: 0 1px; }
+`;
+
+function SnippetText({ html, text }) {
+  if (html) {
+    return (
+      <>
+        <style>{HL_STYLE}</style>
+        <span
+          className="search-hl"
+          dangerouslySetInnerHTML={{ __html: html }}
+          style={{ fontSize: 10, color: '#404550', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}
+        />
+      </>
+    );
+  }
+  if (!text) return null;
+  return (
+    <div style={{ fontSize: 10, color: '#404550', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      {text}
+    </div>
+  );
+}
+
 function ResultRow({ item, active, onClick, projName, showPid }) {
   const cfg = TYPE_CFG[item.type] || { icon: 'search', color: '#606570', label: item.type };
   const ref = useRef(null);
@@ -115,11 +143,10 @@ function ResultRow({ item, active, onClick, projName, showPid }) {
               </span>
             )}
           </div>
-          {item.snippet && (
-            <div style={{ fontSize: 10, color: '#404550', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {item.snippet}
-            </div>
-          )}
+          <SnippetText
+            html={item.snippet_html ? item.snippet : null}
+            text={item.snippet_html ? null : item.snippet}
+          />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
           {metaBadge}
@@ -139,6 +166,7 @@ function ResultRow({ item, active, onClick, projName, showPid }) {
 const TYPE_TO_VIEW = {
   host: 'hosts', cred: 'creds', note: 'notes',
   finding: 'findings', loot: 'loot', job: 'jobs',
+  kb: 'kb', snippet: 'snippets',
 };
 
 function SaveNamePopover({ accent, onSave, onCancel }) {
@@ -175,10 +203,13 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
   const [query, setQuery] = useState('');
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [scopeAll, setScopeAll] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const [savedSearches, setSavedSearches] = useState([]);
   const [showSavePopover, setShowSavePopover] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [allItems, setAllItems] = useState([]);
   const inputRef = useRef(null);
   const timerRef = useRef(null);
   const saveWrapRef = useRef(null);
@@ -199,24 +230,41 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
     return () => document.removeEventListener('mousedown', handler);
   }, [showSavePopover]);
 
+  // Fresh search when query/scope changes
   useEffect(() => {
     const q = query.trim();
-    if (!q || q.length < 2) { setResults(null); setActiveIdx(0); return; }
+    if (!q || q.length < 2) { setResults(null); setAllItems([]); setOffset(0); setActiveIdx(0); return; }
     setLoading(true);
+    setOffset(0);
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(async () => {
       try {
         const pid = scopeAll ? '' : selectedProject;
-        const r = await api.search(query, pid);
+        const r = await api.search(query, pid, 40, 0);
         setResults(r);
+        setAllItems(r.items || []);
         setActiveIdx(0);
-      } catch { setResults(null); }
+      } catch { setResults(null); setAllItems([]); }
       setLoading(false);
     }, 220);
     return () => clearTimeout(timerRef.current);
   }, [query, scopeAll, selectedProject]);
 
-  const items = results?.items || [];
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !results?.has_more) return;
+    setLoadingMore(true);
+    try {
+      const pid = scopeAll ? '' : selectedProject;
+      const newOffset = offset + 40;
+      const r = await api.search(query, pid, 40, newOffset);
+      setOffset(newOffset);
+      setAllItems(prev => [...prev, ...(r.items || [])]);
+      setResults(r);
+    } catch {}
+    setLoadingMore(false);
+  }, [loadingMore, results, offset, query, scopeAll, selectedProject]);
+
+  const items = allItems;
   const { filters } = parseTokens(query);
 
   const removeFilter = useCallback((key) => {
@@ -263,6 +311,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
   const total = results?.total ?? 0;
   const facets = results?.facets?.type || {};
   const hasQuery = query.trim().length >= 2;
+  const hasMore = results?.has_more && (offset + 40) < total;
 
   return (
     <div
@@ -385,7 +434,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
               <div>
                 <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Examples</div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {['type:host', 'type:finding severity:critical', 'type:cred service:smb', 'tag:DC', 'status:open', 'type:job status:done'].map(ex => (
+                  {['type:host', 'type:finding severity:critical', 'type:cred service:smb', 'tag:DC', 'status:open', 'type:job status:done', 'type:kb', 'type:snippet'].map(ex => (
                     <button key={ex} onClick={() => setQuery(ex)} style={{ background: '#ffffff06', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{ex}</button>
                   ))}
                 </div>
@@ -401,7 +450,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
 
           {items.map((item, idx) => (
             <ResultRow
-              key={`${item.type}-${item.id}`}
+              key={`${item.type}-${item.id}-${idx}`}
               item={item}
               active={idx === activeIdx}
               projName={projName}
@@ -409,6 +458,23 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
               onClick={() => { onNavigate(TYPE_TO_VIEW[item.type] || item.type); onClose(); }}
             />
           ))}
+
+          {/* Load more */}
+          {hasMore && (
+            <div style={{ padding: '10px 18px', textAlign: 'center' }}>
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                style={{
+                  background: 'transparent', border: `1px solid #2a2d35`,
+                  borderRadius: 5, padding: '5px 20px', cursor: loadingMore ? 'wait' : 'pointer',
+                  color: '#505560', fontSize: 10, fontFamily: 'JetBrains Mono',
+                }}
+              >
+                {loadingMore ? 'Loading…' : `Load more (${total - items.length} left)`}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -421,7 +487,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
           </span>
           {results && (
             <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', marginLeft: 'auto' }}>
-              {total} result{total !== 1 ? 's' : ''}
+              {items.length}{total > items.length ? `/${total}` : ''} result{total !== 1 ? 's' : ''}
             </span>
           )}
         </div>

@@ -251,6 +251,45 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text("ALTER TABLE attack_steps ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE SET NULL"))
+    # ── FTS GIN indexes ──────────────────────────────────────────────────────
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_hosts_fts ON hosts
+        USING GIN (to_tsvector('english',
+            coalesce(ip,'') || ' ' || coalesce(hostname,'') || ' ' ||
+            coalesce(os,'') || ' ' || coalesce(notes,'')
+        ))
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_creds_fts ON creds
+        USING GIN (to_tsvector('english',
+            coalesce(username,'') || ' ' || coalesce(service,'') || ' ' ||
+            coalesce(host,'') || ' ' || coalesce(notes,'')
+        ))
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_notes_fts ON notes
+        USING GIN (to_tsvector('english',
+            coalesce(title,'') || ' ' || coalesce(content,'')
+        ))
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_findings_fts ON findings
+        USING GIN (to_tsvector('english',
+            coalesce(title,'') || ' ' || coalesce(description,'') || ' ' || coalesce(cve,'')
+        ))
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_kb_articles_fts ON kb_articles
+        USING GIN (to_tsvector('english',
+            coalesce(title,'') || ' ' || coalesce(content,'')
+        ))
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_custom_snippets_fts ON custom_snippets
+        USING GIN (to_tsvector('english',
+            coalesce(title,'') || ' ' || coalesce(command,'') || ' ' || coalesce(opsec,'')
+        ))
+    """))
 
 
 # ── Scheduled playbooks background task ──────────────────────────────
