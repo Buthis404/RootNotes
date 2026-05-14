@@ -345,6 +345,9 @@ class Job(Base):
     related_entity_type = Column(String, nullable=False, default="")
     related_entity_id = Column(String, nullable=False, default="")
     retry_of_job_id = Column(String, nullable=False, default="")
+    priority = Column(Integer, nullable=False, default=0)      # 0=normal, 10=high, -10=bulk/low
+    retry_count = Column(Integer, nullable=False, default=0)   # how many auto-retries have run
+    max_retries = Column(Integer, nullable=False, default=0)   # 0 = no auto-retry
     created_at = Column(String, nullable=False)
     started_at = Column(String, nullable=False, default="")
     finished_at = Column(String, nullable=False, default="")

@@ -1157,14 +1157,16 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
         job_id = job_ids[idx]
         step = steps[idx] if idx < len(steps) else {}
         db = SessionLocal()
+        run_pid = ""
         try:
             run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
             if not run or run.status == "cancelled":
                 return
+            run_pid = run.pid
         finally:
             db.close()
 
-        schedule_job_run(job_id)
+        schedule_job_run(job_id, pid=run_pid)
         result = await _wait_for_job(job_id, run_id)
         completed.append(result)
         condition_idx, condition_stop = _resolve_result_condition_target(step, result or {}, status=result.get("status"), total_steps=total_steps)

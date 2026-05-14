@@ -1,16 +1,20 @@
 """
 Worker pool — bounded asyncio task pool for queued job execution.
 
-Replaces unbounded asyncio.create_task() with a controlled concurrency model:
-- max_workers slots running simultaneously
-- internal asyncio.Queue for pending jobs
-- startup recovery: re-queues any persisted 'queued' jobs
-- graceful shutdown: drains queue on stop()
+Concurrency model:
+- max_workers total slots running simultaneously
+- max_per_project slots per project (prevents one project starving others)
+- PriorityQueue: lower priority_key = runs first
+  priority_key = (-job.priority, monotonic counter) so high-priority jobs come first
+  and within same priority, FIFO order is preserved
+- Startup recovery: re-queues persisted 'queued' jobs
+- Graceful shutdown: drains on stop()
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,15 +23,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_WORKERS = 5
+_DEFAULT_MAX_PER_PROJECT = 2
 
 
 class WorkerPool:
-    def __init__(self, max_workers: int = _DEFAULT_MAX_WORKERS):
+    def __init__(self, max_workers: int = _DEFAULT_MAX_WORKERS, max_per_project: int = _DEFAULT_MAX_PER_PROJECT):
         self._max_workers = max_workers
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._max_per_project = max_per_project
+        # PriorityQueue items: (priority_key, counter, job_id, pid)
+        self._queue: asyncio.PriorityQueue[tuple[int, int, str, str]] = asyncio.PriorityQueue()
+        self._counter = 0  # monotonic, for FIFO within same priority
         self._worker_tasks: list[asyncio.Task] = []
         self._running = False
         self._active_job_ids: set[str] = set()
+        self._active_per_project: dict[str, int] = {}
         self._cancel_tokens: dict[str, object] = {}  # job_id → CancellationToken
 
     async def start(self) -> None:
@@ -37,13 +46,15 @@ class WorkerPool:
         for _ in range(self._max_workers):
             t = asyncio.create_task(self._worker_loop())
             self._worker_tasks.append(t)
-        logger.info("WorkerPool started: max_workers=%d", self._max_workers)
+        logger.info("WorkerPool started: max_workers=%d max_per_project=%d", self._max_workers, self._max_per_project)
 
-    def submit(self, job_id: str) -> None:
-        self._queue.put_nowait(job_id)
+    def submit(self, job_id: str, *, pid: str = "", priority: int = 0) -> None:
+        """Enqueue a job. Higher priority int = runs sooner."""
+        self._counter += 1
+        # negate priority so that higher int = lower queue key = dequeued first
+        self._queue.put_nowait((-priority, self._counter, job_id, pid))
 
     def cancel_job(self, job_id: str) -> bool:
-        """Signal a running job to stop. Returns True if the token was found and fired."""
         token = self._cancel_tokens.get(job_id)
         if token is not None:
             token.cancel()
@@ -70,15 +81,33 @@ class WorkerPool:
     def active_jobs(self) -> list[str]:
         return list(self._active_job_ids)
 
+    @property
+    def per_project_counts(self) -> dict[str, int]:
+        return dict(self._active_per_project)
+
     async def _worker_loop(self) -> None:
         while self._running:
             try:
-                job_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                item = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+
+            neg_priority, counter, job_id, pid = item
+
+            # Per-project concurrency check — if over limit, re-queue and yield
+            if pid and self._active_per_project.get(pid, 0) >= self._max_per_project:
+                # Put back, let other workers drain different projects first
+                await asyncio.sleep(0.5)
+                self._queue.put_nowait(item)
+                self._queue.task_done()
+                continue
+
             self._active_job_ids.add(job_id)
+            if pid:
+                self._active_per_project[pid] = self._active_per_project.get(pid, 0) + 1
+
             from .transport import CancellationToken
             token = CancellationToken()
             self._cancel_tokens[job_id] = token
@@ -90,6 +119,12 @@ class WorkerPool:
             finally:
                 self._cancel_tokens.pop(job_id, None)
                 self._active_job_ids.discard(job_id)
+                if pid:
+                    count = self._active_per_project.get(pid, 1) - 1
+                    if count <= 0:
+                        self._active_per_project.pop(pid, None)
+                    else:
+                        self._active_per_project[pid] = count
                 self._queue.task_done()
 
 
@@ -100,12 +135,12 @@ _pool: WorkerPool | None = None
 def get_pool() -> WorkerPool:
     global _pool
     if _pool is None:
-        _pool = WorkerPool(max_workers=_DEFAULT_MAX_WORKERS)
+        _pool = WorkerPool(max_workers=_DEFAULT_MAX_WORKERS, max_per_project=_DEFAULT_MAX_PER_PROJECT)
     return _pool
 
 
 async def startup_recovery(db) -> int:
-    """Re-queue any persisted 'queued' jobs on startup. Mark interrupted 'running' jobs as failed."""
+    """Re-queue persisted 'queued' jobs on startup. Mark interrupted 'running' jobs as failed."""
     from .. import models
     from ..core.job_tracker import finish_job
 
@@ -118,14 +153,19 @@ async def startup_recovery(db) -> int:
         finish_job(db, job, status="failed", error_output="[interrupted] Worker restarted while job was running")
         logger.warning("Marked interrupted job %s as failed", job.id)
 
-    # Re-queue persisted queued jobs
-    queued_jobs = db.query(models.Job).filter(models.Job.status == "queued").order_by(models.Job.created_at).all()
+    # Re-queue persisted queued jobs (ordered by priority desc, then created_at asc)
+    queued_jobs = (
+        db.query(models.Job)
+        .filter(models.Job.status == "queued")
+        .order_by(models.Job.priority.desc(), models.Job.created_at)
+        .all()
+    )
     for job in queued_jobs:
         from .job_runner import supports_queued_execution
         if supports_queued_execution(job.connector_key, job.operation):
-            pool.submit(job.id)
+            pool.submit(job.id, pid=job.pid, priority=getattr(job, "priority", 0) or 0)
             recovered += 1
-            logger.info("Re-queued job %s (%s/%s)", job.id, job.connector_key, job.operation)
+            logger.info("Re-queued job %s (%s/%s) priority=%d", job.id, job.connector_key, job.operation, getattr(job, "priority", 0) or 0)
         else:
             finish_job(db, job, status="failed", error_output="[interrupted] Job type cannot be re-queued after restart")
 

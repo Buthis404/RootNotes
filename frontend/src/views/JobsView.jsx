@@ -331,6 +331,9 @@ function JobRow({ job, pid, accent, onCancel, onDelete, onRerun, onRetry, onLive
             <MetaBadge value={job.connector_key || ''} color="#6fc8f0" />
             <MetaBadge value={OP_CFG[job.operation]?.label || job.operation} color={OP_CFG[job.operation]?.color || '#808590'} />
             <MetaBadge value={job.related_entity_type && job.related_entity_id ? `${job.related_entity_type}:${job.related_entity_id.slice(0, 8)}` : ''} color="#606570" />
+            {job.priority >= 10 && <MetaBadge value="⬆ HIGH" color="#f09a3a" />}
+            {job.priority <= -10 && <MetaBadge value="⬇ BULK" color="#808590" />}
+            {job.retry_count > 0 && <MetaBadge value={`↻ retry ${job.retry_count}${job.max_retries > 0 ? `/${job.max_retries}` : ''}`} color="#c07af0" />}
           </div>
           {job.target && <div style={{ color: '#6a7080', fontSize: 11, marginTop: 2 }}>{job.target}</div>}
           <StructuredBadges result={job.result_json} />
@@ -386,6 +389,8 @@ function JobRow({ job, pid, accent, onCancel, onDelete, onRerun, onRetry, onLive
                 {job.scope_id && <span>Scope ID: <code style={{ color: '#a0a8b8' }}>{job.scope_id}</code></span>}
                 {summarizeResult(job.result_json) && <span>Result: <code style={{ color: '#a0a8b8' }}>{summarizeResult(job.result_json)}</code></span>}
                 {playbookRunId && <span>Playbook run: <code style={{ color: '#5b8af5', fontFamily: 'JetBrains Mono', fontSize: 10 }}>{playbookRunId}</code></span>}
+                {job.retry_count > 0 && <span>Retry: <code style={{ color: '#c07af0' }}>{job.retry_count}{job.max_retries > 0 ? `/${job.max_retries}` : ''}</code></span>}
+                {job.retry_of_job_id && <span>Retry of: <code style={{ color: '#c07af0', fontFamily: 'JetBrains Mono', fontSize: 10 }}>{job.retry_of_job_id.slice(0, 12)}</code></span>}
               </div>
             )}
             <EnrichmentPanel enrichment={job.result_json?.enrichment} />

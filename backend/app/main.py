@@ -247,6 +247,9 @@ with engine.begin() as conn:
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_checklist_items_pid ON checklist_items(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_scopes_pid ON scopes(pid)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_objectives_pid ON objectives(pid)"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0"))
+    conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 0"))
 
 
 # ── Scheduled playbooks background task ──────────────────────────────
@@ -739,8 +742,10 @@ async def worker_status(db: Session = Depends(get_db)):
     running_db = db.query(_models.Job).filter(_models.Job.status == "running").count()
     return {
         "max_workers": pool._max_workers,
+        "max_per_project": pool._max_per_project,
         "active": pool.active_count,
         "active_jobs": pool.active_jobs,
+        "per_project": pool.per_project_counts,
         "queue_size": pool.queue_size,
         "queued_in_db": queued_db,
         "running_in_db": running_db,
