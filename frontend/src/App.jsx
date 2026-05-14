@@ -881,6 +881,8 @@ export default function App() {
         {tab === 'kb' && <KBView selectedProject={selectedProject} accent={acc} currentUser={currentUser} attackSteps={attackSteps.filter(s => s.pid === selectedProject)} />}
         {tab === 'report' && (
           <ReportView projects={projects} notes={notes} hosts={hosts} creds={creds} findings={findings} hostActivities={hostActivities}
+            attackPaths={attackPaths.filter(p => p.pid === selectedProject)}
+            attackSteps={attackSteps.filter(s => s.pid === selectedProject)}
             selectedProject={selectedProject} accent={acc} />
         )}
         {tab === 'admin' && currentUser?.role === 'admin' && (

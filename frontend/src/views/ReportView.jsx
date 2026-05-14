@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx';
 import { StatusDot, PhaseTag, HostStatusBadge, CredTypeBadge } from '../components/UI.jsx';
 import { PHASES, PHASE_COLORS, NODE_STATUS, SEVERITY, FINDING_STATUS } from '../constants.js';
 import { isAttackerHost } from '../utils/hostMeta.js';
+import { api } from '../api.js';
 
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const SEV_COLORS = {
@@ -23,7 +24,7 @@ function mdEscape(s) { return (s || '').replace(/\|/g, '\\|'); }
 function mdRow(...cells) { return '| ' + cells.map(c => mdEscape(String(c ?? ''))).join(' | ') + ' |'; }
 function mdSep(n) { return '|' + ' --- |'.repeat(n); }
 
-export default function ReportView({ projects, notes, hosts, creds, findings = [], hostActivities = [], selectedProject, accent }) {
+export default function ReportView({ projects, notes, hosts, creds, findings = [], hostActivities = [], selectedProject, accent, attackPaths = [], attackSteps = [] }) {
   const proj = projects.find(p => p.id === selectedProject);
   const pNotes = notes.filter(n => n.pid === selectedProject);
   const pHosts = hosts.filter(h => h.pid === selectedProject && !isAttackerHost(h));
@@ -39,6 +40,26 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
   const date = new Date().toISOString().slice(0, 10);
 
   const [showMdPreview, setShowMdPreview] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  const exportPDF = async () => {
+    if (!selectedProject) return;
+    setPdfLoading(true);
+    try {
+      const blob = await api.downloadReportPDF(selectedProject);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const safeName = (proj?.name || 'report').replace(/[^a-z0-9]/gi, '_');
+      a.href = url;
+      a.download = `${safeName}_report_${date}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('PDF generation failed: ' + e.message);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
 
   // ── Markdown export ──────────────────────────────────────────────────
 
@@ -345,11 +366,17 @@ export default function ReportView({ projects, notes, hosts, creds, findings = [
           <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginTop: 4 }}>
             <button onClick={exportMarkdown}
               style={{ background: '#1e2230', border: '1px solid #2a2d35', borderRadius: 6, padding: '8px 14px', cursor: 'pointer', color: '#c8cdd6', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7 }}>
-              <Icon name="export" size={12} color="#808590" /> Export MD
+              <Icon name="export" size={12} color="#808590" /> MD
             </button>
             <button onClick={exportHTML}
-              style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7 }}>
-              <Icon name="export" size={12} color="#fff" /> Export HTML
+              style={{ background: '#1e2230', border: '1px solid #2a2d35', borderRadius: 6, padding: '8px 14px', cursor: 'pointer', color: '#c8cdd6', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7 }}>
+              <Icon name="export" size={12} color="#808590" /> HTML
+            </button>
+            <button
+              onClick={exportPDF}
+              disabled={pdfLoading}
+              style={{ background: accent, border: 'none', borderRadius: 6, padding: '8px 14px', cursor: pdfLoading ? 'wait' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 7, opacity: pdfLoading ? 0.6 : 1 }}>
+              <Icon name="export" size={12} color="#fff" /> {pdfLoading ? 'Generating…' : 'Export PDF'}
             </button>
           </div>
         </div>
