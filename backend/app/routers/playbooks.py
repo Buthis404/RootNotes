@@ -1,8 +1,11 @@
 import asyncio
+import io
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -1637,3 +1640,51 @@ async def _launch_playbook_run(pid: str, playbook_id: str, body_dict: dict, crea
         return None
     finally:
         db.close()
+
+
+# ── Custom playbook export / import ──────────────────────────────────────────
+
+@router.get("/api/playbooks/custom/export")
+def export_custom_playbooks(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    items = db.query(models.CustomPlaybook).order_by(models.CustomPlaybook.title).all()
+    data = [
+        {"title": p.title, "description": p.description, "steps": p.steps_json or []}
+        for p in items
+    ]
+    payload = json.dumps({"format": "rootnotes-playbooks", "version": "1", "playbooks": data}, ensure_ascii=False, indent=2).encode()
+    return StreamingResponse(io.BytesIO(payload), media_type="application/json",
+                             headers={"Content-Disposition": 'attachment; filename="custom_playbooks.json"'})
+
+
+@router.post("/api/playbooks/custom/import", status_code=201)
+async def import_custom_playbooks(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    raw = json.loads((await file.read()).decode())
+    items = raw if isinstance(raw, list) else raw.get("playbooks", [])
+    now = datetime.now(timezone.utc).isoformat()
+    created = skipped = 0
+    existing_titles = {p.title.strip().lower() for p in db.query(models.CustomPlaybook).all()}
+    for item in items:
+        title = (item.get("title") or "").strip()
+        if not title or title.lower() in existing_titles:
+            skipped += 1
+            continue
+        db.add(models.CustomPlaybook(
+            id=f"pbk_{uuid4().hex[:10]}",
+            title=title,
+            description=item.get("description", ""),
+            steps_json=item.get("steps", []),
+            created_by=user.username,
+            created_at=now,
+            updated_at=now,
+        ))
+        existing_titles.add(title.lower())
+        created += 1
+    db.commit()
+    return {"created": created, "skipped": skipped}
