@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 
@@ -292,3 +296,57 @@ def search(
         "findings": [i for i in items if i["type"] == "finding"],
         "loots":    [i for i in items if i["type"] == "loot"],
     }
+
+
+# ── Saved searches ────────────────────────────────────────────────────────────
+
+class SavedSearchCreate(BaseModel):
+    name: str
+    query: str
+    pid: str | None = None
+
+
+@router.get("/api/saved-searches")
+def list_saved_searches(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    rows = db.query(models.SavedSearch).filter(
+        models.SavedSearch.user_id == user.id
+    ).order_by(models.SavedSearch.created_at.desc()).all()
+    return [{"id": r.id, "name": r.name, "query": r.query, "pid": r.pid, "created_at": r.created_at} for r in rows]
+
+
+@router.post("/api/saved-searches", status_code=201)
+def create_saved_search(
+    body: SavedSearchCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    row = models.SavedSearch(
+        id=str(uuid.uuid4()),
+        user_id=user.id,
+        name=body.name.strip() or body.query[:40],
+        query=body.query,
+        pid=body.pid or None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "name": row.name, "query": row.query, "pid": row.pid, "created_at": row.created_at}
+
+
+@router.delete("/api/saved-searches/{sid}", status_code=204)
+def delete_saved_search(
+    sid: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    row = db.query(models.SavedSearch).filter(
+        models.SavedSearch.id == sid,
+        models.SavedSearch.user_id == user.id,
+    ).first()
+    if not row:
+        raise HTTPException(404)
+    db.delete(row)
+    db.commit()

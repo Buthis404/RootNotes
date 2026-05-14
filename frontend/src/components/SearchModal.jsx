@@ -101,10 +101,7 @@ function ResultRow({ item, active, onClick, projName, showPid }) {
         onMouseEnter={e => { if (!active) e.currentTarget.style.background = '#ffffff06'; }}
         onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
       >
-        {/* type dot */}
         <div style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
-
-        {/* main content */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -124,8 +121,6 @@ function ResultRow({ item, active, onClick, projName, showPid }) {
             </div>
           )}
         </div>
-
-        {/* badges */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
           {metaBadge}
           <Badge label={cfg.label} color={cfg.color} />
@@ -146,16 +141,63 @@ const TYPE_TO_VIEW = {
   finding: 'findings', loot: 'loot', job: 'jobs',
 };
 
+function SaveNamePopover({ accent, onSave, onCancel }) {
+  const [name, setName] = useState('');
+  const ref = useRef(null);
+  useEffect(() => ref.current?.focus(), []);
+  return (
+    <div style={{
+      position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 10,
+      background: '#13151c', border: `1px solid ${accent}44`, borderRadius: 8,
+      padding: '10px 12px', boxShadow: '0 8px 24px #00000088', minWidth: 220,
+    }}>
+      <div style={{ fontSize: 10, color: '#606570', marginBottom: 6, fontFamily: 'JetBrains Mono' }}>Save search as</div>
+      <input
+        ref={ref}
+        value={name}
+        onChange={e => setName(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') onSave(name);
+          if (e.key === 'Escape') onCancel();
+        }}
+        placeholder="Name…"
+        style={{ width: '100%', background: '#0e1016', border: `1px solid #2a2d35`, borderRadius: 4, padding: '5px 8px', color: '#e0e4ec', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none', marginBottom: 8 }}
+      />
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        <button onClick={onCancel} style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: '#606570', fontSize: 10 }}>Cancel</button>
+        <button onClick={() => onSave(name)} style={{ background: accent, border: 'none', borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600 }}>Save</button>
+      </div>
+    </div>
+  );
+}
+
 export default function SearchModal({ accent, selectedProject, projects, onNavigate, onClose }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [scopeAll, setScopeAll] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [savedSearches, setSavedSearches] = useState([]);
+  const [showSavePopover, setShowSavePopover] = useState(false);
   const inputRef = useRef(null);
   const timerRef = useRef(null);
+  const saveWrapRef = useRef(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
+
+  useEffect(() => {
+    api.listSavedSearches().then(setSavedSearches).catch(() => {});
+  }, []);
+
+  // Close popover on outside click
+  useEffect(() => {
+    if (!showSavePopover) return;
+    const handler = e => {
+      if (saveWrapRef.current && !saveWrapRef.current.contains(e.target)) setShowSavePopover(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showSavePopover]);
 
   useEffect(() => {
     const q = query.trim();
@@ -178,21 +220,17 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
   const { filters } = parseTokens(query);
 
   const removeFilter = useCallback((key) => {
-    setQuery(q => {
-      return q.split(/\s+/).filter(tok => {
-        const m = tok.match(/^(\w+):/);
-        return !(m && m[1] === key);
-      }).join(' ');
-    });
+    setQuery(q => q.split(/\s+/).filter(tok => {
+      const m = tok.match(/^(\w+):/);
+      return !(m && m[1] === key);
+    }).join(' '));
   }, []);
 
   const handleKey = useCallback((e) => {
     if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setActiveIdx(i => Math.min(i + 1, items.length - 1));
+      e.preventDefault(); setActiveIdx(i => Math.min(i + 1, items.length - 1));
     } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setActiveIdx(i => Math.max(i - 1, 0));
+      e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const item = items[activeIdx];
@@ -200,10 +238,31 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
     }
   }, [items, activeIdx, onNavigate, onClose]);
 
+  const handleSave = async (name) => {
+    setShowSavePopover(false);
+    try {
+      const ss = await api.createSavedSearch({
+        name: name.trim() || query.trim().slice(0, 40),
+        query: query.trim(),
+        pid: scopeAll ? null : selectedProject,
+      });
+      setSavedSearches(prev => [ss, ...prev]);
+    } catch {}
+  };
+
+  const handleDelete = async (id, e) => {
+    e.stopPropagation();
+    try {
+      await api.deleteSavedSearch(id);
+      setSavedSearches(prev => prev.filter(s => s.id !== id));
+    } catch {}
+  };
+
   const projName = id => projects.find(p => p.id === id)?.name || id;
   const filterEntries = Object.entries(filters);
   const total = results?.total ?? 0;
   const facets = results?.facets?.type || {};
+  const hasQuery = query.trim().length >= 2;
 
   return (
     <div
@@ -213,7 +272,7 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
       <div style={{ width: 700, maxHeight: '78vh', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 12, display: 'flex', flexDirection: 'column', boxShadow: '0 32px 80px #00000099', overflow: 'hidden' }}>
 
         {/* Input row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', borderBottom: '1px solid #1e2029', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', borderBottom: '1px solid #1e2029', flexShrink: 0, position: 'relative' }}>
           <Icon name="search" size={16} color={loading ? accent : '#505560'} />
           <input
             ref={inputRef}
@@ -223,6 +282,30 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
             placeholder="Search… type:host severity:critical status:open …"
             style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#e0e4ec', fontSize: 13, fontFamily: 'JetBrains Mono' }}
           />
+
+          {/* Save button */}
+          {hasQuery && (
+            <div ref={saveWrapRef} style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowSavePopover(v => !v)}
+                title="Save search"
+                style={{
+                  background: showSavePopover ? `${accent}22` : 'transparent',
+                  border: `1px solid ${showSavePopover ? accent + '66' : '#2a2d35'}`,
+                  borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
+                  color: showSavePopover ? accent : '#505560', fontSize: 11, flexShrink: 0,
+                  display: 'flex', alignItems: 'center', gap: 4,
+                }}
+              >
+                <span style={{ fontSize: 12 }}>⭐</span>
+                <span style={{ fontSize: 9, fontFamily: 'JetBrains Mono' }}>Save</span>
+              </button>
+              {showSavePopover && (
+                <SaveNamePopover accent={accent} onSave={handleSave} onCancel={() => setShowSavePopover(false)} />
+              )}
+            </div>
+          )}
+
           <button
             onClick={() => setScopeAll(v => !v)}
             style={{ background: scopeAll ? accent + '22' : 'transparent', border: `1px solid ${scopeAll ? accent + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: scopeAll ? accent : '#505560', fontSize: 9, fontFamily: 'JetBrains Mono', flexShrink: 0 }}
@@ -259,21 +342,58 @@ export default function SearchModal({ accent, selectedProject, projects, onNavig
           </div>
         )}
 
-        {/* Results list */}
+        {/* Results / empty state */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {!query.trim() && (
-            <div style={{ padding: '36px 18px', textAlign: 'center' }}>
-              <Icon name="search" size={28} color="#2a2d35" />
-              <div style={{ marginTop: 10, fontSize: 12, color: '#404550' }}>Type to search hosts, creds, notes, findings, loot, jobs</div>
-              <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center' }}>
-                {['type:host', 'type:finding severity:critical', 'type:cred service:smb', 'tag:DC', 'status:open', 'type:job status:done'].map(ex => (
-                  <button key={ex} onClick={() => setQuery(ex)} style={{ background: '#ffffff06', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{ex}</button>
-                ))}
+          {!hasQuery && (
+            <div style={{ padding: '24px 18px' }}>
+
+              {/* Saved searches */}
+              {savedSearches.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Saved searches</div>
+                  {savedSearches.map(ss => (
+                    <div
+                      key={ss.id}
+                      onClick={() => { setScopeAll(!ss.pid); setQuery(ss.query); }}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px',
+                        borderRadius: 6, cursor: 'pointer', marginBottom: 2,
+                        background: 'transparent', transition: 'background .08s',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = '#ffffff08'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <span style={{ fontSize: 11, color: '#606570', flexShrink: 0 }}>⭐</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ss.name}</div>
+                        <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ss.query}</div>
+                      </div>
+                      {ss.pid && (
+                        <span style={{ fontSize: 9, color: '#353840', fontFamily: 'JetBrains Mono', flexShrink: 0 }}>{projName(ss.pid)}</span>
+                      )}
+                      <span
+                        onClick={e => handleDelete(ss.id, e)}
+                        style={{ fontSize: 12, color: '#353840', cursor: 'pointer', flexShrink: 0, padding: '0 2px' }}
+                        title="Delete"
+                      >×</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Quick examples */}
+              <div>
+                <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Examples</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {['type:host', 'type:finding severity:critical', 'type:cred service:smb', 'tag:DC', 'status:open', 'type:job status:done'].map(ex => (
+                    <button key={ex} onClick={() => setQuery(ex)} style={{ background: '#ffffff06', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#505560', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{ex}</button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
 
-          {results && total === 0 && query.trim() && (
+          {results && total === 0 && hasQuery && (
             <div style={{ padding: '36px 18px', textAlign: 'center', color: '#404550', fontSize: 12 }}>
               Nothing found for «{query}»
             </div>

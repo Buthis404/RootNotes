@@ -440,3 +440,14 @@ class HostCollection(Base):
     created_by = Column(String, nullable=False, default="")
     created_at = Column(String, nullable=False)
     updated_at = Column(String, nullable=False)
+
+
+class SavedSearch(Base):
+    __tablename__ = "saved_searches"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String, nullable=False)
+    query = Column(String, nullable=False)
+    pid = Column(String, nullable=True)
+    created_at = Column(String, nullable=False)
