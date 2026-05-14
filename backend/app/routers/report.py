@@ -150,7 +150,7 @@ def _build_html(
             {connector}"""
         attack_path_html += f"""
         <div class="attack-path-block">
-          <div class="ap-path-name">{_e(path.title or path.name or "Attack Path")}</div>
+          <div class="ap-path-name">{_e(path.name or "Attack Path")}</div>
           {step_items}
         </div>"""
 
@@ -159,7 +159,7 @@ def _build_html(
     for s in scopes:
         scope_rows += f"""
         <tr>
-          <td style="font-family:monospace">{_e(s.target)}</td>
+          <td style="font-family:monospace">{_e(s.value)}</td>
           <td style="color:#555">{_e(s.scope_type)}</td>
           <td style="color:#555">{_e(s.description)}</td>
         </tr>"""
@@ -358,7 +358,8 @@ def generate_pdf_report(
             headers={"Content-Disposition": f'attachment; filename="report_{pid}.html"'},
         )
 
-    safe_name = (project.name or pid).replace(" ", "_").replace("/", "-")[:40]
+    import re
+    safe_name = re.sub(r'[^\w\-]', '_', (project.name or pid))[:40]
     filename = f"{safe_name}_report_{datetime.now(timezone.utc).strftime('%Y%m%d')}.pdf"
 
     return Response(
