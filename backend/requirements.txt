@@ -16,3 +16,4 @@ httpx==0.27.0
 pyzipper==0.3.6
 weasyprint==62.3
 pydyf==0.11.0
+redis[hiredis]==5.2.1

@@ -13,7 +13,8 @@ from ..core.access import check_object_access, check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.ssh_exec import run_ssh_command
-from ..core.utils import new_id
+from ..core.network_data import get_nodes, get_edges, replace_edges
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 from ..plugins.state import list_attacker_targets
 from .c2 import _load_integrations, _visible_integrations_for_pid
@@ -158,8 +159,8 @@ def _adaptix_tunnel_observations(pid: str, db: Session) -> list[dict]:
                 "notes": f"listener={tunnel.get('listener','')} client={tunnel.get('client','')} forward={tunnel.get('forward_host','')}:{tunnel.get('forward_port','')}",
                 "collector_target_id": cfg.get("id", ""),
                 "fingerprint": hashlib.sha1(f"adaptix:{cfg.get('id')}:{tunnel_id}:{bind_address}".encode()).hexdigest(),
-                "ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
-                "last_seen": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+                "ts": ts_now(),
+                "last_seen": ts_now(),
             })
     return items
 
@@ -289,9 +290,9 @@ def _sync_pivot_edges(pid: str, db: Session):
     network = db.query(models.Network).filter(models.Network.pid == pid).order_by(models.Network.id).first()
     if not network:
         return
-    nodes = list(network.nodes_json or [])
+    nodes = get_nodes(network.id, db)
     node_by_host_id = {node.get("host_id"): node for node in nodes if node.get("host_id")}
-    keep_edges = [edge for edge in list(network.edges_json or []) if edge.get("source") != "pivot_observation"]
+    keep_edges = [edge for edge in get_edges(network.id, db) if edge.get("source") != "pivot_observation"]
     pivot_edges = []
     seen = set()
     observations = [item for item in get_all_pivot_items(pid, db) if item.get("status") == "active"]
@@ -342,9 +343,9 @@ def _sync_pivot_edges(pid: str, db: Session):
                         "pivot_observation_id": obs.get("id"),
                         "collector_target_id": obs.get("collector_target_id", ""),
                     })
-    network.edges_json = keep_edges + pivot_edges
+    replace_edges(network.id, network.pid, keep_edges + pivot_edges, db)
     db.commit()
-    bcast(pid, "network", "layout_applied", {"network": schemas.Network.from_orm_obj(network).model_dump(), "updated_at": datetime.utcnow().isoformat()})
+    bcast(pid, "network", "layout_applied", {"network": schemas.Network.from_orm_obj(network).model_dump(), "updated_at": ts_now()})
 
 
 @router.get("")
@@ -374,8 +375,8 @@ def create_pivot(pid: str, body: schemas.PivotObservationCreate, request: Reques
         status=body.status,
         notes=body.notes,
         fingerprint=fingerprint,
-        ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
-        last_seen=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        ts=ts_now(),
+        last_seen=ts_now(),
     )
     db.add(obs)
     db.commit()
@@ -394,7 +395,7 @@ def update_pivot(pivot_id: str, pid: str, body: schemas.PivotObservationUpdate, 
     check_object_access(db, pid, user, "network.manage_links")
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(obs, field, value)
-    obs.last_seen = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    obs.last_seen = ts_now()
     db.commit()
     db.refresh(obs)
     _sync_pivot_edges(pid, db)
@@ -427,7 +428,7 @@ def collect_pivots(pid: str, body: PivotCollectBody, request: Request, db: Sessi
         db.query(models.PivotObservation).filter(models.PivotObservation.pid == pid, models.PivotObservation.collector_target_id == target.get("id", "")).delete(synchronize_session=False)
         db.commit()
     created = []
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    now = ts_now()
     for item in observations:
         fingerprint = hashlib.sha1(f"ssh:{pid}:{source_host_id}:{pivot_host.id if pivot_host else ''}:{item['tool']}:{item['pivot_type']}:{item['route_cidr']}:{item['bind_address']}".encode()).hexdigest()
         obs = models.PivotObservation(

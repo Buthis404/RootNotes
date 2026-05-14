@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import DOMPurify from 'dompurify';
 import Icon from './Icon.jsx';
 import { api } from '../api.js';
 
@@ -81,7 +82,7 @@ function SnippetText({ html, text }) {
         <style>{HL_STYLE}</style>
         <span
           className="search-hl"
-          dangerouslySetInnerHTML={{ __html: html }}
+          dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html, { ALLOWED_TAGS: ['b'] }) }}
           style={{ fontSize: 10, color: '#404550', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}
         />
       </>

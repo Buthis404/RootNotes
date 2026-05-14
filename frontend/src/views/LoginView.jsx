@@ -16,7 +16,6 @@ export default function LoginView({ accent, isFirstRun, onAuth }) {
       const res = isFirstRun
         ? await api.authSetup({ username: username.trim(), password })
         : await api.authLogin({ username: username.trim(), password });
-      localStorage.setItem('rt_token', res.access_token);
       onAuth(res.user);
     } catch (err) {
       setError(err.message);

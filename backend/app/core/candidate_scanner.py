@@ -23,6 +23,7 @@ from typing import Optional
 
 from .. import models
 from ..core.utils import new_id
+from .network_data import get_nodes, get_edges
 
 _SENSITIVE_ROLES = {"domain_controller", "server", "file_server", "database"}
 _ADMIN_ACCESS = {"local_admin", "domain_admin", "shell"}
@@ -165,8 +166,8 @@ def run_scan(db, pid: str) -> CandidateResult:
 
     # ── R5: verified access-graph edges ──────────────────────────────────────
     if network:
-        edges = network.edges_json or []
-        nodes = {n["id"]: n for n in (network.nodes_json or [])}
+        edges = get_edges(network.id, db)
+        nodes = {n["id"]: n for n in get_nodes(network.id, db)}
         for edge in edges:
             if not edge.get("verified"):
                 continue

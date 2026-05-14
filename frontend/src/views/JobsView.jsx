@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from '../api.js';
 import { toastError } from '../components/Toast.jsx';
-import { getToken } from '../api/client.js';
 
 const STATUS_CFG = {
   queued:    { color: '#a0a8b8', label: 'Queued' },
@@ -129,9 +128,8 @@ function LiveOutputPanel({ pid, jobId, accent, onClose }) {
 
   useEffect(() => {
     const url = api.streamJobOutput(pid, jobId);
-    const token = getToken();
-    // SSE doesn't support custom headers natively — pass token as query param
-    const es = new EventSource(`${url}?token=${encodeURIComponent(token || '')}`);
+    // EventSource sends cookies automatically for same-origin requests
+    const es = new EventSource(url);
     esRef.current = es;
     es.onmessage = (e) => {
       try {

@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 from . import models
 from .database import get_db, engine, SessionLocal
 from .ws import manager
-from .core.config import JWT_SECRET, JWT_ALGO, UPLOAD_ROOT
+from .core.config import JWT_SECRET, JWT_ALGO, UPLOAD_ROOT, CORS_ORIGINS, COOKIE_NAME
 from .core.limiter import limiter
 from .core.security import decode_token, gen_password, hash_password
 from .core.deps import decode_ws_token
@@ -245,6 +245,9 @@ async def lifespan(app: FastAPI):
     finally:
         recovery_db.close()
 
+    # Start Redis pub/sub for WebSocket broadcast
+    await manager.startup()
+
     # Start background tasks
     task_c2 = asyncio.create_task(_c2_auto_sync_loop())
     task_scheduler = asyncio.create_task(_scheduled_playbooks_loop())
@@ -252,6 +255,7 @@ async def lifespan(app: FastAPI):
     task_c2.cancel()
     task_scheduler.cancel()
     await pool.stop()
+    await manager.shutdown()
     for t in (task_c2, task_scheduler):
         try:
             await t
@@ -268,15 +272,25 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
 
 # ── Auth middleware ───────────────────────────────────────────────────
-_PUBLIC_PATHS = ("/api/auth/login", "/api/auth/setup", "/api/auth/status", "/api/webhooks/")
+_PUBLIC_PATHS = ("/api/auth/login", "/api/auth/setup", "/api/auth/status", "/api/auth/logout", "/api/webhooks/")
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -284,6 +298,11 @@ async def auth_middleware(request: Request, call_next):
     if not path.startswith("/api/") or path.startswith(_PUBLIC_PATHS):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
+    # Cookie auth (httpOnly, set by /api/auth/login)
+    if not auth.startswith("Bearer "):
+        cookie_token = request.cookies.get(COOKIE_NAME, "")
+        if cookie_token:
+            auth = f"Bearer {cookie_token}"
     # SSE/EventSource can't set headers — allow token via query param for stream endpoints
     if not auth.startswith("Bearer "):
         qs_token = request.query_params.get("token", "")
@@ -426,7 +445,9 @@ async def download_upload(
 # ── WebSocket ─────────────────────────────────────────────────────────
 @app.websocket("/ws/{pid}")
 async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Session = Depends(get_db)):
-    user = decode_ws_token(token, db)
+    # Accept token from query param or cookie
+    effective_token = token or ws.cookies.get(COOKIE_NAME, "")
+    user = decode_ws_token(effective_token, db)
     if not user:
         await ws.close(code=4001)
         return
@@ -447,21 +468,43 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
                     await ws.send_text('{"type":"pong"}')
                     continue
                 if msg.get("type") == "focus":
-                    manager.set_focus(ws, msg.get("note_id"))
+                    await manager.set_focus(ws, msg.get("note_id"))
                 elif msg.get("type") == "blur":
-                    manager.set_focus(ws, None)
+                    await manager.set_focus(ws, None)
                 await manager.broadcast_presence(pid)
             except Exception as e:
                 logger.warning("WebSocket message parse error for pid=%s: %s", pid, e)
     except WebSocketDisconnect:
-        manager.disconnect(ws, pid)
+        await manager.disconnect(ws, pid)
         await manager.broadcast_presence(pid)
 
 
 # ── Health & presence ─────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    import shutil
+    from .database import engine
+    checks = {}
+
+    # DB check
+    try:
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as e:
+        checks["db"] = f"error: {e}"
+
+    # Disk check (upload volume)
+    try:
+        usage = shutil.disk_usage("/data/uploads")
+        free_pct = usage.free / usage.total * 100
+        checks["disk_free_pct"] = round(free_pct, 1)
+        checks["disk"] = "ok" if free_pct > 5 else "low"
+    except Exception as e:
+        checks["disk"] = f"error: {e}"
+
+    ok = all(v == "ok" or (isinstance(v, (int, float)) and v > 5) for v in checks.values())
+    return {"status": "ok" if ok else "degraded", **checks}
 
 
 @app.get("/api/presence")

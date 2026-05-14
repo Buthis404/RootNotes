@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from .. import models
 from ..core.deps import require_admin
 from ..core.ssh_exec import run_ssh_command
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..plugins.loader import load_plugin_module
 from ..plugins.registry import registry
 from ..plugins.state import list_modules, create_custom_module, update_module, delete_custom_module, delete_uploaded_module, MODULE_NAME_RE, list_attacker_targets, list_attacker_targets_safe, save_attacker_targets
@@ -260,7 +260,7 @@ def admin_create_attacker_target(body: AttackerSSHTargetBody, admin: models.User
         "exec_jump_username": body.exec_jump_username.strip(),
         "project_ids": body.project_ids,
         "enabled": body.enabled,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": ts_now(),
     }
     targets.append(target)
     save_attacker_targets(targets)

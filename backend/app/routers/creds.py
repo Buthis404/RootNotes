@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
-from ..core.utils import new_id, normalize_domain, domains_match
+from ..core.utils import new_id, normalize_domain, domains_match, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 from ..core.permissions import get_membership, get_permissions_for_role
@@ -48,21 +48,27 @@ def _validate_domain_host_links(pid: str, domain: str, host_ids: list[str], db: 
 
 @router.get("", response_model=list[schemas.Cred])
 def list_creds(
+    response: Response,
     pid: str | None = None,
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
     if pid:
         check_pid_access(db, pid, user, "credentials.read")
-        creds = db.query(models.Cred).filter(models.Cred.pid == pid).all()
-        if creds and _can_read_secret(user, pid, db):
-            log_event(db, pid, getattr(user, "username", None), "audit", "read_credential_secrets", f"Credential secrets viewed ({len(creds)})", {"count": len(creds)})
-            db.commit()
+        q = db.query(models.Cred).filter(models.Cred.pid == pid)
     elif user.role == "admin":
-        creds = db.query(models.Cred).all()
+        q = db.query(models.Cred)
     else:
         member_pids = get_user_member_pids(db, user)
-        creds = db.query(models.Cred).filter(models.Cred.pid.in_(member_pids)).all()
+        q = db.query(models.Cred).filter(models.Cred.pid.in_(member_pids))
+    total = q.count()
+    response.headers["X-Total-Count"] = str(total)
+    creds = q.offset(offset).limit(limit).all()
+    if pid and creds and _can_read_secret(user, pid, db):
+        log_event(db, pid, getattr(user, "username", None), "audit", "read_credential_secrets", f"Credential secrets viewed ({len(creds)})", {"count": len(creds)})
+        db.commit()
     return [_cred_out(c, user, db) for c in creds]
 
 

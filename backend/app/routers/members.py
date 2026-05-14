@@ -14,7 +14,7 @@ from ..core.permissions import (
     get_membership, get_permissions_for_role, add_project_owner,
     PROJECT_ROLES, user_has_permission,
 )
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 
 router = APIRouter(prefix="/api/projects", tags=["members"])
 
@@ -83,7 +83,7 @@ def _upsert_member(pid: str, user_id: str, role: str, actor_id: str, db: Session
         project_id=pid,
         user_id=user_id,
         role=role,
-        created_at=datetime.utcnow().isoformat(),
+        created_at=ts_now(),
         created_by=actor_id,
         is_active=True,
     )

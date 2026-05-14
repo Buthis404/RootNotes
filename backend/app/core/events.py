@@ -1,9 +1,8 @@
 import asyncio
-from datetime import datetime
 from sqlalchemy.orm import Session
 
 from .. import models
-from .utils import new_id
+from .utils import new_id, ts_now
 from ..ws import manager
 
 
@@ -24,7 +23,7 @@ def log_event(
         action=action,
         label=label,
         meta=meta or {},
-        ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        ts=ts_now(),
     ))
 
 

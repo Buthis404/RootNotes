@@ -21,7 +21,7 @@ from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command
 from ..core.exec_context import build_remote_execution_command
 from ..core.route_selection import choose_route_aware_target
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 from ..plugins.registry import registry
 from ..plugins.state import list_attacker_targets
@@ -222,7 +222,7 @@ async def run_nmap_scan(
     parsed = _parse_nmap_xml(stdout)
 
     created, updated = 0, 0
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
 
     host_list = []
     for h in parsed:
@@ -368,7 +368,7 @@ async def run_nuclei_scan(
 
     parsed = _parse_nuclei_jsonl(result.get("stdout", ""))
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
 
     existing_titles = {f.title for f in db.query(models.Finding).filter(models.Finding.pid == pid).all()}
     created_findings = []
@@ -525,7 +525,7 @@ async def run_cme_scan(
 
     parsed = _parse_cme_output(result.get("stdout", "") + result.get("stderr", ""))
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
 
     created_hosts, created_creds = 0, 0
     host_objects = []
@@ -688,7 +688,7 @@ async def run_httpx(
     stdout = result.get("stdout", "")
     parsed = _parse_httpx_jsonl(stdout)
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     hosts_found = len({r["host"] for r in parsed if r["host"]})
     urls_found = len(parsed)
     activities_created = 0
@@ -820,7 +820,7 @@ async def run_ffuf(
     stdout = result.get("stdout", "")
     parsed = _parse_ffuf_json(stdout)
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     paths_found = len(parsed)
     findings_created = 0
 

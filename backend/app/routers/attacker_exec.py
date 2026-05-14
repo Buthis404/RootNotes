@@ -13,7 +13,7 @@ from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command, is_transport_failure as _is_transport_failure
 from ..core.exec_context import build_remote_execution_command
 from ..core.route_selection import annotate_targets_with_route_context, choose_route_aware_target
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..core.crypto import decrypt_str
 from ..database import get_db
 from ..plugins.registry import registry
@@ -215,7 +215,7 @@ async def execute_attacker_command(
         if not attacker_host:
             raise HTTPException(400, "No host is available in the project to attach execution output")
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ts = ts_now()
     title = body.snippet_title.strip() or (body.command.strip().splitlines()[0][:80] if body.command.strip() else "Remote command")
 
     exec_username = getattr(request.state, "username", None)
