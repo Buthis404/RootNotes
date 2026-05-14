@@ -147,6 +147,9 @@ export const api = {
 
   // Search & presence
   search:      (q, pid, limit = 60) => req('GET', `/search?q=${encodeURIComponent(q)}${pid ? `&pid=${pid}` : ''}&limit=${limit}`),
+  listSavedSearches:   ()           => req('GET',    '/saved-searches'),
+  createSavedSearch:   (data)       => req('POST',   '/saved-searches', data),
+  deleteSavedSearch:   (id)         => req('DELETE', `/saved-searches/${id}`),
   getPresence: ()        => req('GET', '/presence'),
   getWorkerStatus: ()    => req('GET', '/worker/status'),
   listModules: ()        => req('GET', '/modules'),
