@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Smart Build — SB4 Edge MITRE / noise / kill-chain tagging
+
+Action-class edges now carry three metadata fields in `extra_json`:
+- `mitre_techniques` — MITRE ATT&CK IDs (e.g. `["T1078"]`)
+- `noise_level` — `low` / `med` / `high` (OPSEC noise)
+- `kill_chain_stage` — `lateral_movement` / `execution` / `command_and_control` / etc.
+
+Classification by source:
+| Source | MITRE | Noise | Stage |
+|--------|-------|-------|-------|
+| `cred_validation` | T1078 | med | lateral_movement |
+| `bulk_exec` | T1059 | high | execution |
+| `host_activity` (c2) | T1071 | low | command_and_control |
+| `host_activity` (lateral) | T1021 | med | lateral_movement |
+| `host_activity` (postex) | T1059 | high | execution |
+| `host_activity` (other) | T1059 | med | execution |
+| `pivot_observation` | T1090 | low | command_and_control |
+
+Inference sources (`auto` subnet/domain_member, `scope_via`, `internet_facing`, `bloodhound`) are NOT tagged — they describe topology, not actions.
+
+Backend:
+- New `_edge_action_tags(source, edge_type, activity_type)` helper in `topology.py`
+- Three `_add_edge` call sites (P1 cred_validation, P2 bulk_exec, P3 host_activity) merge the result into `edge_data`
+- One-time backfill loop after `manual_edges = [...]` enriches pre-SB4 host_activity / pivot edges that survived the auto filter
+
+Frontend:
+- `NetworkView.jsx` side panel: three new chips next to confidence for any edge carrying these fields — purple MITRE list, colour-coded noise (green/amber/red), blue kill-chain stage. Tooltip on hover.
+
+---
+
 ### Smart Build — SB3 Tier-0/1/2 host classification
 
 Smart Build now classifies every host into one of three AD tiers and surfaces it both as a node tag and a coloured chip on the network map.
