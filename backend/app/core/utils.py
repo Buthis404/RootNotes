@@ -1,3 +1,4 @@
+import hashlib
 import re
 import uuid
 import json
@@ -12,6 +13,16 @@ from .. import models
 
 def new_id(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
+
+
+def stable_edge_id(from_nid: str, to_nid: str, source: str, kind: str = "") -> str:
+    """Deterministic edge id from (from, to, source, kind).
+
+    Used by smart-build and other auto-edge producers so that UI state
+    (selection, hover, manual position annotations) survives rebuild.
+    """
+    raw = f"{from_nid or ''}|{to_nid or ''}|{source or ''}|{kind or ''}".encode("utf-8")
+    return "edg" + hashlib.sha1(raw).hexdigest()[:12]
 
 
 def ts_now() -> str:
