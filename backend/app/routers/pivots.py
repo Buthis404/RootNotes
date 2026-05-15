@@ -14,7 +14,7 @@ from ..core.deps import get_current_user
 from ..core.events import bcast, log_event
 from ..core.ssh_exec import run_ssh_command
 from ..core.network_data import get_nodes, get_edges, replace_edges
-from ..core.utils import new_id, ts_now
+from ..core.utils import new_id, stable_edge_id, ts_now
 from ..database import get_db
 from ..plugins.state import list_attacker_targets
 from .c2 import _load_integrations, _visible_integrations_for_pid
@@ -306,7 +306,7 @@ def _sync_pivot_edges(pid: str, db: Session):
             if key not in seen:
                 seen.add(key)
                 pivot_edges.append({
-                    "id": new_id("edg"),
+                    "id": stable_edge_id(source_node.get("id"), pivot_node.get("id"), "pivot_observation", obs.get("id") or ""),
                     "from": source_node.get("id"),
                     "to": pivot_node.get("id"),
                     "style": "tunnel",
@@ -328,7 +328,7 @@ def _sync_pivot_edges(pid: str, db: Session):
                 if key not in seen:
                     seen.add(key)
                     pivot_edges.append({
-                        "id": new_id("edg"),
+                        "id": stable_edge_id(pivot_node.get("id"), target_node.get("id"), "pivot_observation", obs.get("id") or ""),
                         "from": pivot_node.get("id"),
                         "to": target_node.get("id"),
                         "style": "tunnel",

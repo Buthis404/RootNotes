@@ -25,7 +25,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
-from ..core.utils import new_id, normalize_domain, ts_now
+from ..core.utils import new_id, normalize_domain, stable_edge_id, ts_now
 from ..core.layout import compute_layout
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
@@ -813,7 +813,7 @@ def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session =
                     continue
                 existing_edge_keys.add(key)
                 existing_edges.append({
-                    "id": new_id("edg"),
+                    "id": stable_edge_id(src_node, dst_node, link.source or "auto", link.link_type or ""),
                     "from": src_node,
                     "to": dst_node,
                     "type": link.link_type,
@@ -1078,7 +1078,8 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
         seen_auto_keys.add(key)
         seen_auto_keys.add((dst_nid, src_nid))
         new_auto_edges.append({
-            "id": new_id("edg"), "from": src_nid, "to": dst_nid,
+            "id": stable_edge_id(src_nid, dst_nid, link.source or "auto", link.link_type or ""),
+            "from": src_nid, "to": dst_nid,
             "type": link.link_type, "confidence": link.confidence, "source": link.source,
             "reason": link.reason, "state": "inferred", "verified": False,
         })
@@ -1438,7 +1439,13 @@ def _run_smart_build(
         edges_by_source[src_key] = edges_by_source.get(src_key, 0) + 1
         if edge_data.get("state") == "stale":
             edges_stale += 1
-        new_auto_edges.append({"id": new_id("edg"), "from": from_nid, "to": to_nid, **edge_data})
+        # Stable edge id — deterministic from (from, to, source, kind).
+        # Prefer access_role over type, since the same (from,to,source) pair
+        # can carry several access roles (ssh/winrm/local_admin) as separate edges.
+        roles = edge_data.get("access_roles") or []
+        kind = str(roles[0]) if roles else str(edge_data.get("type") or "")
+        edge_id = stable_edge_id(from_nid, to_nid, str(edge_data.get("source") or "auto"), kind)
+        new_auto_edges.append({"id": edge_id, "from": from_nid, "to": to_nid, **edge_data})
         return True
 
     # L2: pairs written by P1 cred_validation — used to dedup P3 host_activity.

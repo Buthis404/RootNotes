@@ -1,5 +1,19 @@
 # RootNotes — Changelog
 
+## Unreleased
+
+### Smart Build — L1 stable edge IDs
+
+- New `stable_edge_id(from_nid, to_nid, source, kind)` helper in `core/utils.py` — SHA1-derived deterministic edge id (format `edg<12hex>`)
+- `_run_smart_build._add_edge` and the legacy `topology/apply` + `topology/auto-build` edge writers switched from random `new_id("edg")` to `stable_edge_id`
+- `kind` priority: first `access_role` if present, otherwise `type` — same `(from, to, source)` pair can carry several access edges (ssh / winrm / local_admin) as separate stable ids
+- Pivot observation edges in `pivots.py` are now keyed by `pivot_observation_id` so the same observation always yields the same edge id across re-syncs
+- Manual edges created from UI (`network_map.py`, `bulk_actions.py`) still use random ids — they are inserted once and never regenerated
+
+Effect: UI state (selection, hover, manual node position annotations) keyed by edge id survives Smart Build / Auto-Build / Pivot Sync rebuilds.
+
+---
+
 ## v0.2.2 — 2026-05-14
 
 ### Smart Build — Access graph deepening
