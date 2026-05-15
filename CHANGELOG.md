@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Smart Build — SB3 Tier-0/1/2 host classification
+
+Smart Build now classifies every host into one of three AD tiers and surfaces it both as a node tag and a coloured chip on the network map.
+
+- **Tier 0** — domain controllers, DA/EA-equivalent hosts (role=`domain_controller`, tags `dc` / `da` / `ea` / `bh:dc` / `bh:da-member`)
+- **Tier 1** — admin-power servers: targets of admin-class edges (`smb_admin`, `admin_to`, `local_admin`, `dcsync`, ACL writes `generic_all`/`write_dacl`/`generic_write`/`write_owner`/`ext_rights`, `allowed_to_delegate`); hosts with `HostActivity.technique` starting with `T1003` (LSASS / SAM / NTDS credential dumping); hosts tagged `bh:admin`
+- **Tier 2** — workstations / everything else
+
+Backend changes:
+- `SmartBuildRequest.include_tier_zones: bool = True` (default on)
+- After all edges are built, `_run_smart_build` iterates over `all_hosts` and writes `node.extra_json.tier` (0 / 1 / 2) plus a `tier:N` tag (replacing any prior `tier:*` tag — idempotent across rebuilds)
+- Result now contains `tier_counts: {tier_0, tier_1, tier_2}`
+
+Frontend changes (`NetworkView.jsx`):
+- T0 / T1 coloured chips in the top-right corner of each node (red `#e8574a` / amber `#f09a3a`)
+- T2 nodes are intentionally silent — chip is only drawn for T0/T1 to keep the map readable
+
+---
+
 ### Fix — Smart Build position stability
 
 Repeating Smart Build no longer scatters the network map.

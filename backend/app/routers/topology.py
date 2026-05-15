@@ -1260,6 +1260,7 @@ def _run_smart_build(
     include_subnet_edges: bool = True,
     include_regions: bool = True,
     include_internet_facing: bool = True,
+    include_tier_zones: bool = True,
     confidence_decay_days: float = 14.0,
     dry_run: bool = False,
 ) -> dict:
@@ -1844,6 +1845,79 @@ def _run_smart_build(
                 }):
                     edges_added += 1
 
+    # ── SB3: Tier-0/1/2 classification ───────────────────────────────
+    # Tier 0 — DCs, DA-equivalent hosts, krbtgt holders
+    # Tier 1 — admin-power servers reachable from Tier 0 (admin edges, LSASS dumps, bh:admin)
+    # Tier 2 — workstations / everything else
+    tier_counts = {"tier_0": 0, "tier_1": 0, "tier_2": 0}
+    if include_tier_zones:
+        _TIER0_TAGS = {"da", "ea", "krbtgt", "domain-admin", "enterprise-admin",
+                       "bh:dc", "bh:da-member", "dc"}
+        _TIER1_TAGS = {"bh:admin", "admin", "local-admin"}
+        _TIER1_EDGE_TYPES = {
+            "smb_admin", "admin_to", "local_admin", "dcsync",
+            "generic_all", "write_dacl", "generic_write", "write_owner",
+            "ext_rights", "allowed_to_delegate",
+        }
+        _TIER1_T1003_TECHNIQUE = "T1003"  # OS Credential Dumping (LSASS / SAM / NTDS)
+
+        # Collect hosts targeted by admin-power edges from any source
+        tier1_target_hids: set[str] = set()
+        all_edges_for_tier = manual_edges + new_auto_edges
+        # Build host_id → node_id reverse if needed; edges have from/to (node ids)
+        nid_to_hid = {n.get("id"): n.get("host_id") for n in existing_nodes if n.get("id")}
+        for e in all_edges_for_tier:
+            etype = (e.get("type") or "").lower()
+            if etype not in _TIER1_EDGE_TYPES:
+                continue
+            to_nid = e.get("to")
+            # Some edges (from BH importer) carry to_host_id directly
+            to_hid = nid_to_hid.get(to_nid) or e.get("to_host_id")
+            if to_hid:
+                tier1_target_hids.add(to_hid)
+
+        # HostActivity T1003 — LSASS dumps elevate the host to Tier 1
+        try:
+            t1003_rows = db.query(models.HostActivity).filter(
+                models.HostActivity.pid == pid,
+                models.HostActivity.technique.ilike(f"{_TIER1_T1003_TECHNIQUE}%"),
+            ).all()
+            for act in t1003_rows:
+                if act.host_id:
+                    tier1_target_hids.add(act.host_id)
+        except Exception:
+            # technique column or table may not exist in older deployments
+            pass
+
+        for h in all_hosts:
+            tags_lower = {(t or "").lower() for t in (h.tags or [])}
+            role_lower = (h.role or "").lower()
+            is_tier0 = (
+                role_lower == "domain_controller"
+                or bool(tags_lower & _TIER0_TAGS)
+            )
+            is_tier1 = (
+                h.id in tier1_target_hids
+                or bool(tags_lower & _TIER1_TAGS)
+            )
+            if is_tier0:
+                tier = 0
+            elif is_tier1:
+                tier = 1
+            else:
+                tier = 2
+            tier_counts[f"tier_{tier}"] += 1
+            tier_tag = f"tier:{tier}"
+            nid = hid_to_nid.get(h.id)
+            n = node_by_id.get(nid)
+            if n is not None:
+                n["tier"] = tier
+                node_tags = list(n.get("tags") or [])
+                # Replace any prior tier:N tag (tier may shift on rebuild)
+                node_tags = [t for t in node_tags if not (isinstance(t, str) and t.startswith("tier:"))]
+                node_tags.append(tier_tag)
+                n["tags"] = node_tags
+
     # ── Regions from scope CIDRs ──────────────────────────────────────
     regions_added = 0
     if include_regions and scope_region_defs:
@@ -2051,6 +2125,7 @@ def _run_smart_build(
         "edges_stale": edges_stale,
         "edges_by_source": dict(edges_by_source),
         "regions_added": regions_added,
+        "tier_counts": tier_counts,
         "last_smart_build": build_ts,
         "dry_run": dry_run,
     }
@@ -2082,6 +2157,7 @@ class SmartBuildRequest(BaseModel):
     include_subnet_edges: bool = True
     include_regions: bool = True
     include_internet_facing: bool = True
+    include_tier_zones: bool = True  # SB3 — Tier-0/1/2 classification + regions
     confidence_decay_days: float = 14.0
     dry_run: bool = False
 
@@ -2118,6 +2194,7 @@ def topology_smart_build(
         include_subnet_edges=body.include_subnet_edges,
         include_regions=body.include_regions,
         include_internet_facing=body.include_internet_facing,
+        include_tier_zones=body.include_tier_zones,
         confidence_decay_days=body.confidence_decay_days,
         dry_run=body.dry_run,
     )
