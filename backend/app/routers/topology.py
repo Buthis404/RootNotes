@@ -1253,6 +1253,7 @@ def _run_smart_build(
     pid: str,
     db: Session,
     keep_manual_positions: bool = True,
+    preserve_positions: bool = True,
     create_missing_networks: bool = True,
     include_access_edges: bool = True,
     include_domain_edges: bool = True,
@@ -1355,7 +1356,12 @@ def _run_smart_build(
         h_ip = p.get("ip", "")
         en = node_by_hid.get(h_id) or node_by_ip.get(h_ip)
         if en:
-            if not (en.get("manually_positioned") and keep_manual_positions):
+            is_pinned = en.get("manually_positioned") and keep_manual_positions
+            # preserve_positions: any existing node with x/y already set keeps
+            # its position across rebuilds. Without this, every Smart Build
+            # re-runs compute_layout and the map "scatters".
+            has_pos = en.get("x") is not None and en.get("y") is not None
+            if not is_pinned and not (preserve_positions and has_pos):
                 en["x"] = p["x"]
                 en["y"] = p["y"]
                 en["auto_positioned"] = True
@@ -1946,6 +1952,10 @@ def _run_smart_build(
         for node in existing_nodes:
             if node.get("manually_positioned"):
                 continue
+            # preserve_positions: node already has a position from a prior
+            # build → leave it alone, transit overlay won't shove it around
+            if preserve_positions and node.get("x") is not None and node.get("y") is not None:
+                continue
             host_id = node.get("host_id") or ""
             related_scopes = transit_scopes_by_host.get(host_id) or gateway_scopes_by_host.get(host_id, [])
             if len(related_scopes) >= 2:
@@ -1975,7 +1985,13 @@ def _run_smart_build(
         )
         anchor_region = entry_region or leftmost_region
         if anchor_region:
-            attacker_nodes = [node for node in existing_nodes if node.get("is_attacker") and not node.get("manually_positioned")]
+            # Skip attackers that already have a position when preserve_positions=True
+            attacker_nodes = [
+                node for node in existing_nodes
+                if node.get("is_attacker")
+                and not node.get("manually_positioned")
+                and not (preserve_positions and node.get("x") is not None and node.get("y") is not None)
+            ]
             base_x, base_y = _place_on_region_edge(anchor_region, "left")
             for idx, node in enumerate(attacker_nodes):
                 node["x"] = base_x - 120.0
@@ -2059,6 +2075,7 @@ def _run_smart_build(
 
 class SmartBuildRequest(BaseModel):
     keep_manual_positions: bool = True
+    preserve_positions: bool = True  # if True, existing nodes keep their x/y
     create_missing_networks: bool = True
     include_access_edges: bool = True
     include_domain_edges: bool = True
@@ -2094,6 +2111,7 @@ def topology_smart_build(
     result = _run_smart_build(
         pid, db,
         keep_manual_positions=body.keep_manual_positions,
+        preserve_positions=body.preserve_positions,
         create_missing_networks=body.create_missing_networks,
         include_access_edges=body.include_access_edges,
         include_domain_edges=body.include_domain_edges,

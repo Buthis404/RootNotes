@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fix — Smart Build position stability
+
+Repeating Smart Build no longer scatters the network map.
+
+- New `SmartBuildRequest.preserve_positions: bool = True` (default true)
+- When true, any node that already has `x`/`y` keeps its position through
+  rebuild — covers both prior auto-positioned and manually positioned nodes
+- Three blocks that previously moved nodes on every build now respect the flag:
+  1. The `compute_layout` apply loop in `_run_smart_build`
+  2. Transit/region overlay (`_place_between_regions`, `_place_on_region_edge`)
+  3. Attacker uplink relative to entry-region anchor
+- `manually_positioned=True` nodes remain protected via `keep_manual_positions`
+- To force a full re-layout, either call `POST /topology/rebuild-layout`
+  or pass `preserve_positions: false` to Smart Build
+
+---
+
 ### Smart Build — SB2 BloodHound edges expansion
 
 BloodHound importer (`import_bloodhound.py`) gained three new edge types and three node-tag enrichments. Smart Build preserves them through its `manual_edges` filter (any edge with `source != "auto"`), so they survive rebuild without further pipeline changes.
