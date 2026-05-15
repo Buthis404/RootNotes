@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Smart Build — SB6 Service-graph edges (opt-in)
+
+Two heuristic rules for client→service dependency edges:
+
+1. **Web → DB** — host with role `web` (or open 80/443/8080/8443) draws a `service_dep` edge to every host with role `database` (or open 1433/3306/5432/1521) in the same `/24`
+2. **LDAP-client → DC** — every domain-joined non-DC host draws a `service_dep` edge to a DC of the same domain. Redundant when `include_domain_edges=true` (P4 already draws the reverse `domain_member` edge — dedup blocks it), but useful when domain edges are disabled
+
+Backend:
+- `SmartBuildRequest.include_service_graph: bool = False` (default OFF — inference, not observation)
+- New block in `_run_smart_build` between P4 and P5
+- Edge fields: `type=service_dep`, `source=service_inference`, `confidence=0.5`, `state=inferred`, `verified=false`, `style=dashed`
+
+Frontend:
+- `NetworkView.jsx` edge style for `service_dep`: grey thin dashed (`#6a7180`, `2 4` dasharray), no animation — deliberately quieter than access/lateral so the map stays readable
+
+Tested on synthetic project `p3e291272` (SB6-test): web→db edge correctly produced, LDAP edges blocked by P4 dedup as expected.
+
+---
+
 ### Smart Build — SB4 Edge MITRE / noise / kill-chain tagging
 
 Action-class edges now carry three metadata fields in `extra_json`:

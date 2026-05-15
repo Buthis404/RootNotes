@@ -1318,6 +1318,7 @@ def _run_smart_build(
     include_regions: bool = True,
     include_internet_facing: bool = True,
     include_tier_zones: bool = True,
+    include_service_graph: bool = False,
     confidence_decay_days: float = 14.0,
     dry_run: bool = False,
 ) -> dict:
@@ -1778,6 +1779,86 @@ def _run_smart_build(
                 }):
                     edges_added += 1
 
+    # ── SB6: Service-graph edges (heuristic, opt-in) ─────────────────
+    # Two narrow rules: web→db (same /24), and ldap-client→dc (same domain).
+    # Off by default — these are inference, not observation. Style: dashed grey.
+    if include_service_graph:
+        def _node_role(h: dict) -> str:
+            return _infer_node_role(h)
+
+        def _is_dc_h(h: dict) -> bool:
+            r = (h.get("role") or "").lower()
+            if r in ("domain_controller", "dc"):
+                return True
+            if "dc" in {t.lower() for t in (h.get("tags") or [])}:
+                return True
+            p = h.get("ports") or []
+            return "88/tcp" in p and "389/tcp" in p
+
+        # ── Rule A: web_server → database (same /24) ──
+        web_hosts = [h for h in hosts_meta if _node_role(h) == "web_server"]
+        db_hosts  = [h for h in hosts_meta if _node_role(h) == "database"]
+        for w in web_hosts:
+            w_subnet = _get_subnet(w.get("ip") or "")
+            if not w_subnet:
+                continue
+            w_nid = hid_to_nid.get(w["id"])
+            if not w_nid:
+                continue
+            for d in db_hosts:
+                if d["id"] == w["id"]:
+                    continue
+                if _get_subnet(d.get("ip") or "") != w_subnet:
+                    continue
+                d_nid = hid_to_nid.get(d["id"])
+                if not d_nid or d_nid == w_nid:
+                    continue
+                if _add_edge(w_nid, d_nid, {
+                    "type": "service_dep",
+                    "label": "web→db",
+                    "confidence": 0.5, "source": "service_inference",
+                    "reason": (
+                        f"heuristic: web ports on {w.get('hostname') or w.get('ip','')} "
+                        f"+ DB ports on {d.get('hostname') or d.get('ip','')} in same /24"
+                    ),
+                    "state": "inferred", "verified": False, "is_manual": False,
+                    "style": "dashed",
+                }):
+                    edges_added += 1
+
+        # ── Rule B: any domain-joined host → DC of same domain (ldap dep) ──
+        dc_by_domain_sg: dict = {}
+        for h in hosts_meta:
+            if _is_dc_h(h):
+                dom = (h.get("domain") or "").lower()
+                if dom:
+                    dc_by_domain_sg.setdefault(dom, []).append(h)
+        for h in hosts_meta:
+            if _is_dc_h(h):
+                continue
+            dom = (h.get("domain") or "").lower()
+            if not dom or dom not in dc_by_domain_sg:
+                continue
+            h_nid = hid_to_nid.get(h["id"])
+            if not h_nid:
+                continue
+            for dc_h in dc_by_domain_sg[dom]:
+                dc_nid = hid_to_nid.get(dc_h["id"])
+                if not dc_nid or dc_nid == h_nid:
+                    continue
+                if _add_edge(h_nid, dc_nid, {
+                    "type": "service_dep",
+                    "label": "ldap",
+                    "confidence": 0.5, "source": "service_inference",
+                    "reason": (
+                        f"heuristic: domain-joined host depends on DC "
+                        f"{dc_h.get('hostname') or dc_h.get('ip','')} for {dom} (LDAP/Kerberos)"
+                    ),
+                    "state": "inferred", "verified": False, "is_manual": False,
+                    "style": "dashed",
+                }):
+                    edges_added += 1
+
     # ── P5: Subnet proximity edges (hub-and-spoke) ───────────────────
     if include_subnet_edges:
         manual_gateway_by_subnet = {
@@ -2233,6 +2314,7 @@ class SmartBuildRequest(BaseModel):
     include_regions: bool = True
     include_internet_facing: bool = True
     include_tier_zones: bool = True  # SB3 — Tier-0/1/2 classification + regions
+    include_service_graph: bool = False  # SB6 — heuristic service-dep edges (noisy)
     confidence_decay_days: float = 14.0
     dry_run: bool = False
 
@@ -2270,6 +2352,7 @@ def topology_smart_build(
         include_regions=body.include_regions,
         include_internet_facing=body.include_internet_facing,
         include_tier_zones=body.include_tier_zones,
+        include_service_graph=body.include_service_graph,
         confidence_decay_days=body.confidence_decay_days,
         dry_run=body.dry_run,
     )

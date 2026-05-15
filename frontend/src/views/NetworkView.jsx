@@ -1210,6 +1210,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     if (t === 'auth_path' || t === 'trust') return { stroke: '#c07af0', sw: 1.5, dash: '6 3', anim: false };
     if (t === 'uplink') return { stroke: '#f09a3a', sw: 2, dash: '7 3', anim: true };
     if (t === 'same_subnet' || t === 'lan') return { stroke: '#3a4a5a', sw: 1, dash: '5 5', anim: false };
+    if (t === 'service_dep') return { stroke: '#6a7180', sw: 1, dash: '2 4', anim: false };
     if (t === 'routed') return { stroke: '#2a3a50', sw: 1, dash: '3 7', anim: false };
     // Legacy style string
     const byStyle = {
