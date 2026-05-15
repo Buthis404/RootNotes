@@ -110,7 +110,21 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
         "edges_added": 0,
         "da_users": 0, "da_computers": 0,
         "acl_edges": 0,
+        "can_rdp_edges": 0,
+        "allowed_to_delegate_edges": 0,
+        "trust_edges": 0,
+        "bh_dc_tagged": 0,
+        "bh_admin_tagged": 0,
+        "bh_da_member_tagged": 0,
     }
+
+    def _add_host_tag(host: models.Host, tag: str) -> bool:
+        tags = list(host.tags or [])
+        if tag in tags:
+            return False
+        tags.append(tag)
+        host.tags = tags
+        return True
 
     # ── Step 1: build SID → host / cred index from existing data ─────────────
     existing_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
@@ -287,12 +301,12 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
 
     def add_edge(from_hid: str, to_hid: str, edge_type: str, label: str,
                  verified: bool = False, confidence: float = 0.7,
-                 reason: str = "", source: str = "bloodhound") -> None:
+                 reason: str = "", source: str = "bloodhound") -> bool:
         if not from_hid or not to_hid or from_hid == to_hid:
-            return
+            return False
         key = (from_hid, to_hid, edge_type)
         if key in seen_pairs:
-            return
+            return False
         seen_pairs.add(key)
         new_edges.append({
             "id": _edge_id(),
@@ -307,6 +321,7 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
             "reason": reason,
             "is_manual": False,
         })
+        return True
 
     # 6a. LocalAdmins from computers.json → smb_admin edges
     for comp in computers_raw:
@@ -411,6 +426,96 @@ def _process(pid: str, file_map: dict, db: Session) -> dict:
             add_edge(default_src, comp_hid, "lateral", "DA session",
                      verified=False, confidence=0.55,
                      reason=f"BloodHound: DA user session on this host")
+
+    # 6f. CanRDP edges from computers.json (also exposed via Aces with RightName=CanRDP)
+    for comp in computers_raw:
+        sid = comp.get("Properties", {}).get("objectid", "") or comp.get("ObjectIdentifier", "")
+        to_hid = sid_to_host_id.get(sid)
+        if not to_hid:
+            continue
+        # Top-level CanRDP key (newer SharpHound dumps)
+        for principal in comp.get("CanRDP", []) or []:
+            principal_sid = principal.get("ObjectIdentifier") or principal.get("SID") or ""
+            from_hid = sid_to_host_id.get(principal_sid)
+            if not from_hid:
+                cid = sid_to_cred_id.get(principal_sid)
+                if cid:
+                    cred = db.query(models.Cred).filter(models.Cred.id == cid).first()
+                    if cred and to_hid not in (cred.host_ids or []):
+                        cred.host_ids = list(cred.host_ids or []) + [to_hid]
+                continue
+            if add_edge(from_hid, to_hid, "can_rdp", "CanRDP",
+                        verified=False, confidence=0.8,
+                        reason="BloodHound: CanRDP"):
+                stats["can_rdp_edges"] += 1
+
+    # 6g. AllowedToDelegate — constrained delegation principals → this computer
+    for comp in computers_raw:
+        sid = comp.get("Properties", {}).get("objectid", "") or comp.get("ObjectIdentifier", "")
+        to_hid = sid_to_host_id.get(sid)
+        if not to_hid:
+            continue
+        for principal in comp.get("AllowedToDelegate", []) or []:
+            principal_sid = principal.get("ObjectIdentifier") or principal.get("SID") or ""
+            from_hid = sid_to_host_id.get(principal_sid)
+            if not from_hid:
+                continue
+            if add_edge(from_hid, to_hid, "allowed_to_delegate", "AllowedToDelegate",
+                        verified=False, confidence=0.85,
+                        reason="BloodHound: AllowedToDelegate (constrained delegation)"):
+                stats["allowed_to_delegate_edges"] += 1
+
+    # 6h. Domain trust edges between DCs of different domains
+    domains_raw = _get_items(file_map.get("domains", {}))
+    # domain (lower) → list of DC host_ids in that domain
+    domain_to_dc_hids: dict[str, list[str]] = defaultdict(list)
+    all_hosts_for_trust = db.query(models.Host).filter(models.Host.pid == pid).all()
+    dc_role_or_tag = lambda h: h.role == "domain_controller" or "dc" in {(t or "").lower() for t in (h.tags or [])}
+    for h in all_hosts_for_trust:
+        if dc_role_or_tag(h) and h.domain:
+            domain_to_dc_hids[h.domain.lower()].append(h.id)
+
+    _TRUST_TYPE_MAP = {0: "ParentChild", 1: "CrossLink", 2: "Forest", 3: "External", 4: "Unknown"}
+    _TRUST_DIR_MAP = {0: "Disabled", 1: "Inbound", 2: "Outbound", 3: "Bidirectional"}
+    for dom in domains_raw:
+        props = dom.get("Properties", {})
+        src_domain = (props.get("name") or props.get("domain") or "").lower()
+        if not src_domain:
+            continue
+        for trust in dom.get("Trusts", []) or []:
+            target_domain = (trust.get("TargetDomainName") or "").lower()
+            if not target_domain or target_domain == src_domain:
+                continue
+            t_type_raw = trust.get("TrustType")
+            t_dir_raw = trust.get("TrustDirection")
+            t_type = _TRUST_TYPE_MAP.get(t_type_raw, str(t_type_raw)) if isinstance(t_type_raw, int) else (t_type_raw or "Unknown")
+            t_dir = _TRUST_DIR_MAP.get(t_dir_raw, str(t_dir_raw)) if isinstance(t_dir_raw, int) else (t_dir_raw or "Bidirectional")
+            for src_hid in domain_to_dc_hids.get(src_domain, []):
+                for tgt_hid in domain_to_dc_hids.get(target_domain, []):
+                    label = f"trust:{t_type}/{t_dir}"
+                    if add_edge(src_hid, tgt_hid, "trust", label,
+                                verified=True, confidence=0.95,
+                                reason=f"BloodHound: {t_type} trust {src_domain} → {target_domain} ({t_dir})"):
+                        stats["trust_edges"] += 1
+
+    # ── Step 6.5: enrich host tags with BH-derived classifications ──────────
+    # bh:dc      — domain controllers (host.role=domain_controller or 'dc' in tags)
+    # bh:admin   — hosts that have outgoing AdminTo / ACL edges (admin power principals)
+    # bh:da-member — hosts whose SID is a member of DA-equivalent groups
+    bh_admin_source_hids: set[str] = {
+        e["from_host_id"] for e in new_edges
+        if e["type"] in {"smb_admin"} or e["type"] in {ev[0] for ev in _ACL_EDGE_MAP.values()}
+    }
+    bh_da_member_hids: set[str] = {
+        sid_to_host_id[s] for s in da_sids if sid_to_host_id.get(s)
+    }
+    for h in all_hosts_for_trust:
+        if h.id in dc_host_ids and _add_host_tag(h, "bh:dc"):
+            stats["bh_dc_tagged"] += 1
+        if h.id in bh_admin_source_hids and _add_host_tag(h, "bh:admin"):
+            stats["bh_admin_tagged"] += 1
+        if h.id in bh_da_member_hids and _add_host_tag(h, "bh:da-member"):
+            stats["bh_da_member_tagged"] += 1
 
     # ── Step 7: store edges in network ───────────────────────────────────────
     network = db.query(models.Network).filter(models.Network.pid == pid).order_by(models.Network.id).first()

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Smart Build — SB2 BloodHound edges expansion
+
+BloodHound importer (`import_bloodhound.py`) gained three new edge types and three node-tag enrichments. Smart Build preserves them through its `manual_edges` filter (any edge with `source != "auto"`), so they survive rebuild without further pipeline changes.
+
+#### New edge types
+- `can_rdp` — `CanRDP` principals (computers in the top-level CanRDP key), `confidence=0.8`, `state="inferred"`
+- `allowed_to_delegate` — constrained-delegation principals → target computer, `confidence=0.85`, `state="inferred"`
+- `trust` — domain-trust edges between DCs of different domains, parsed from `*_domains.json` `Trusts[].TrustType` / `TrustDirection`, `confidence=0.95`, `verified=true`; label encodes type (`ParentChild` / `CrossLink` / `Forest` / `External`) and direction (`Inbound` / `Outbound` / `Bidirectional`)
+
+#### Node-tag enrichment (step 6.5)
+- `bh:dc` — domain controllers (host.role=domain_controller or `dc` in tags)
+- `bh:admin` — hosts that are source of any `smb_admin` or ACL edge (admin power principals)
+- `bh:da-member` — hosts whose SID is a member of DA-equivalent groups
+
+Tags are written to `host.tags` and propagate to `node.tags` on the next Smart Build / Auto-Build (which copies host tags into node tags).
+
+#### Stats fields added
+`can_rdp_edges`, `allowed_to_delegate_edges`, `trust_edges`, `bh_dc_tagged`, `bh_admin_tagged`, `bh_da_member_tagged`.
+
+#### Internals
+- `add_edge` helper now returns `bool` for dedup-aware counting
+- New `_add_host_tag` helper for idempotent tag insertion
+
+---
+
 ### Smart Build — L1 stable edge IDs
 
 - New `stable_edge_id(from_nid, to_nid, source, kind)` helper in `core/utils.py` — SHA1-derived deterministic edge id (format `edg<12hex>`)
