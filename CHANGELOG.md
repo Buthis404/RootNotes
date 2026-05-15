@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Smart Build — Auto-role inference
+
+Smart Build now infers and writes `host.role` for hosts where the operator left it empty or `unknown`. Operator-set roles are never overwritten.
+
+Priority order in `_auto_assign_host_role`:
+1. `is_attacker` → `attacker`
+2. Tag hints: `dc`, `router`/`firewall`/`gateway`, `database`/`db`/`mssql`, `mail`/`exchange`, `web`/`webapp`/`iis`
+3. Port signatures: 88+389 → DC, 1433/3306/5432/1521/27017 → database, 25/465/587/993/995 → mail
+4. Hostname prefixes: `DC*` → DC; `EXCHANGE*`/`MAIL*`/`MX*` → mail; `MSSQL*`/`SQL*` → database; `SHPOINT*`/`WEB*`/`WWW*`/`IIS*` → web; `VPN*`/`GW*`/`FW*`/`ROUTER*`/`PROXY*` → router
+5. Weak port signals: 80/443/8080/8443 → web; 445 + domain → workstation; SSH-only → server
+6. Domain-joined fallback → workstation
+
+Backend:
+- New `_auto_assign_host_role(host)` helper in `topology.py`
+- `SmartBuildRequest.auto_assign_roles: bool = True` (default on)
+- `_run_smart_build` runs the loop right after loading `all_hosts`; sets `host.role` in DB before any downstream logic (DC detection, tier classification, service-graph) consumes it
+- Result contains `roles_assigned: int`
+
+Tested on Bootcamp project (p105ca8e7): 31 of 33 unknown hosts received a meaningful role — DC/DC-2 → domain_controller, MSSQL → database, EXCHANGE → mail, SHPOINT → web, all SMB-only domain workstations (SDOTSON, BACKUP, …) → workstation. Existing `network_device` roles on GW_EXTERNAL / VPN-GW preserved.
+
+---
+
 ### Smart Build — SB6 Service-graph edges (opt-in)
 
 Two heuristic rules for client→service dependency edges:

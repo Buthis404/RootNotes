@@ -1156,6 +1156,70 @@ def _is_rfc1918(ip: str) -> bool:
         return True
 
 
+def _auto_assign_host_role(host: "models.Host") -> str | None:
+    """Infer a host.role from metadata when the operator left it empty/unknown.
+
+    Returns a role string from the HostUpdate validator set, or None when no
+    reliable signal exists. Caller must only invoke this when host.role is
+    empty or 'unknown' — never overwrite an explicit operator choice.
+
+    Priority (highest first):
+      1. is_attacker → attacker
+      2. tag hints (dc/router/database/mail/web)
+      3. port signatures (88+389 DC, 1433/3306/5432 DB, 25/465/587 mail)
+      4. hostname patterns (DC*, EXCHANGE*, MSSQL*, SHPOINT*, VPN*, GW*, …)
+      5. weaker port signals (80/443 web, 445+domain workstation, ssh-only server)
+      6. domain-joined fallback → workstation
+    """
+    if host.is_attacker:
+        return "attacker"
+    hostname = (host.hostname or "").upper()
+    domain = (host.domain or "").lower()
+    ports = set(host.ports or [])
+    tags = {(t or "").lower() for t in (host.tags or [])}
+
+    if "dc" in tags or "domain-controller" in tags:
+        return "domain_controller"
+    if tags & {"router", "firewall", "gateway"}:
+        return "router"
+    if tags & {"database", "db", "mssql", "mysql", "postgres"}:
+        return "database"
+    if tags & {"mail", "exchange", "smtp"}:
+        return "mail"
+    if tags & {"web", "webapp", "iis"}:
+        return "web"
+
+    if "88/tcp" in ports and "389/tcp" in ports:
+        return "domain_controller"
+    if ports & {"1433/tcp", "3306/tcp", "5432/tcp", "1521/tcp", "27017/tcp"}:
+        return "database"
+    if ports & {"25/tcp", "465/tcp", "587/tcp", "993/tcp", "995/tcp"}:
+        return "mail"
+
+    _HN_PATTERNS = (
+        (("DC",), "domain_controller"),
+        (("EXCHANGE", "MAIL", "MX", "SMTP"), "mail"),
+        (("MSSQL", "SQL", "MYSQL", "POSTGRES", "ORACLE"), "database"),
+        (("SHPOINT", "SHAREPOINT", "WEB", "WWW", "HTTPD", "NGINX", "APACHE", "IIS"), "web"),
+        (("VPN", "GW", "GATEWAY", "FW", "FIREWALL", "ROUTER", "EDGE", "PROXY"), "router"),
+    )
+    for prefixes, role in _HN_PATTERNS:
+        if any(hostname == p or hostname.startswith(p + "-") or hostname.startswith(p + ".")
+               or (len(hostname) > len(p) and hostname.startswith(p) and hostname[len(p)].isdigit())
+               for p in prefixes):
+            return role
+
+    if ports & {"80/tcp", "443/tcp", "8080/tcp", "8443/tcp"}:
+        return "web"
+    if "445/tcp" in ports and domain:
+        return "workstation"
+    if "22/tcp" in ports and len(ports) <= 2:
+        return "server"
+    if domain:
+        return "workstation"
+    return None
+
+
 def _edge_action_tags(source: str, edge_type: str = "", activity_type: str = "") -> dict:
     """SB4: derive MITRE / noise / kill-chain for action-class edges.
 
@@ -1319,6 +1383,7 @@ def _run_smart_build(
     include_internet_facing: bool = True,
     include_tier_zones: bool = True,
     include_service_graph: bool = False,
+    auto_assign_roles: bool = True,
     confidence_decay_days: float = 14.0,
     dry_run: bool = False,
 ) -> dict:
@@ -1340,6 +1405,22 @@ def _run_smart_build(
     all_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
     if not all_hosts:
         return {"ok": True, "nodes_total": 0, "nodes_added": 0, "edges_added": 0, "regions_added": 0}
+
+    # Auto-assign host.role from metadata when operator left it empty/unknown.
+    # Only touches role IN ('', 'unknown') — explicit operator choice is never
+    # overwritten. Done up-front so all downstream logic (DC detection, tier
+    # classification, service-graph heuristics) sees the enriched roles.
+    roles_assigned = 0
+    if auto_assign_roles:
+        for h in all_hosts:
+            if (h.role or "").lower() not in ("", "unknown"):
+                continue
+            inferred = _auto_assign_host_role(h)
+            if inferred and inferred != (h.role or ""):
+                h.role = inferred
+                roles_assigned += 1
+        if roles_assigned:
+            db.flush()
 
     network = db.query(models.Network).filter(models.Network.pid == pid).first()
     if not network:
@@ -2282,6 +2363,7 @@ def _run_smart_build(
         "edges_by_source": dict(edges_by_source),
         "regions_added": regions_added,
         "tier_counts": tier_counts,
+        "roles_assigned": roles_assigned,
         "last_smart_build": build_ts,
         "dry_run": dry_run,
     }
@@ -2315,6 +2397,7 @@ class SmartBuildRequest(BaseModel):
     include_internet_facing: bool = True
     include_tier_zones: bool = True  # SB3 — Tier-0/1/2 classification + regions
     include_service_graph: bool = False  # SB6 — heuristic service-dep edges (noisy)
+    auto_assign_roles: bool = True  # auto-infer host.role when unknown/empty
     confidence_decay_days: float = 14.0
     dry_run: bool = False
 
@@ -2353,6 +2436,7 @@ def topology_smart_build(
         include_internet_facing=body.include_internet_facing,
         include_tier_zones=body.include_tier_zones,
         include_service_graph=body.include_service_graph,
+        auto_assign_roles=body.auto_assign_roles,
         confidence_decay_days=body.confidence_decay_days,
         dry_run=body.dry_run,
     )
