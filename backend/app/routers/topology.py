@@ -1156,6 +1156,63 @@ def _is_rfc1918(ip: str) -> bool:
         return True
 
 
+def _edge_action_tags(source: str, edge_type: str = "", activity_type: str = "") -> dict:
+    """SB4: derive MITRE / noise / kill-chain for action-class edges.
+
+    Returns {} for inferred relationships (auto, internet_facing, bloodhound,
+    domain_member, scope_via) — they describe topology, not attacker actions.
+    """
+    src = (source or "").lower()
+    if src == "cred_validation":
+        # Valid Accounts (T1078) used to authenticate to a host.
+        # Noise: medium — kerb/smb traffic visible to defenders.
+        return {
+            "mitre_techniques": ["T1078"],
+            "noise_level": "med",
+            "kill_chain_stage": "lateral_movement",
+        }
+    if src == "bulk_exec":
+        # Command and Scripting Interpreter (T1059) — bulk remote exec is loud.
+        return {
+            "mitre_techniques": ["T1059"],
+            "noise_level": "high",
+            "kill_chain_stage": "execution",
+        }
+    if src == "host_activity":
+        at = (activity_type or "").lower()
+        if at == "c2":
+            return {
+                "mitre_techniques": ["T1071"],
+                "noise_level": "low",
+                "kill_chain_stage": "command_and_control",
+            }
+        if at == "lateral":
+            return {
+                "mitre_techniques": ["T1021"],
+                "noise_level": "med",
+                "kill_chain_stage": "lateral_movement",
+            }
+        if at == "postex":
+            return {
+                "mitre_techniques": ["T1059"],
+                "noise_level": "high",
+                "kill_chain_stage": "execution",
+            }
+        return {
+            "mitre_techniques": ["T1059"],
+            "noise_level": "med",
+            "kill_chain_stage": "execution",
+        }
+    if src == "pivot_observation":
+        # Proxy (T1090) — tunnel / SOCKS routing.
+        return {
+            "mitre_techniques": ["T1090"],
+            "noise_level": "low",
+            "kill_chain_stage": "command_and_control",
+        }
+    return {}
+
+
 def _decay_confidence(c0: float, ts_iso: str, tau_days: float) -> tuple[float, bool]:
     """Exponential confidence decay. Returns (decayed, is_stale)."""
     if not tau_days or tau_days <= 0 or not ts_iso:
@@ -1417,6 +1474,18 @@ def _run_smart_build(
         or e.get("manual_override")
         or e.get("verified")
     ]
+    # SB4: backfill MITRE / noise / kill-chain tags on edges that survived
+    # the auto filter (primarily host_activity / pivot_observation written
+    # before SB4). Edges created in this rebuild are tagged at their
+    # respective _add_edge sites and skip this loop via the early-out.
+    for _e in manual_edges:
+        if _e.get("mitre_techniques"):
+            continue
+        _src = (_e.get("source") or "").lower()
+        if _src in ("cred_validation", "bulk_exec", "host_activity", "pivot_observation"):
+            _tags = _edge_action_tags(_src, _e.get("type") or "")
+            if _tags:
+                _e.update(_tags)
     suppressed = set(existing_meta.get(AUTO_LINK_SUPPRESSIONS_KEY) or [])
     manual_keys = (
         {(e.get("from"), e.get("to")) for e in manual_edges} |
@@ -1501,6 +1570,7 @@ def _run_smart_build(
                 "reason": f"Credential validated: {cred_label} [{', '.join(roles)}]",
                 "state": "observed", "verified": True, "is_manual": False,
                 "access_roles": roles,
+                **_edge_action_tags("cred_validation", primary),
             }):
                 edges_added += 1
                 p1_access_pairs.add((from_nid, target_nid, primary))
@@ -1535,6 +1605,7 @@ def _run_smart_build(
                 "state": "stale" if stale else "observed",
                 "verified": True, "is_manual": False,
                 "ts": getattr(job, "finished_at", "") or "",
+                **_edge_action_tags("bulk_exec", role),
             }):
                 edges_added += 1
 
@@ -1641,6 +1712,9 @@ def _run_smart_build(
 
             is_c2 = act.activity_type == "c2"
             decayed, stale = _decay_confidence(0.9, act.ts or "", confidence_decay_days)
+            # SB4: even when source is "auto" (c2 case), classify the edge by
+            # activity_type — host_activity action tagging still applies.
+            action_tags = _edge_action_tags("host_activity", etype, act.activity_type)
             if _add_edge(from_nid, target_nid, {
                 "type": etype, "label": etype.replace("_", " "),
                 "confidence": round(decayed, 3),
@@ -1653,6 +1727,7 @@ def _run_smart_build(
                 "verified": False if (is_c2 or stale) else True,
                 "is_manual": False,
                 "ts": act.ts or "",
+                **action_tags,
             }):
                 edges_added += 1
 

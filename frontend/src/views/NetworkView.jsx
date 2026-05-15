@@ -355,6 +355,24 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                       <span style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.state || (edge.is_manual ? 'manual' : 'inferred')}</span>
                       <span style={{ fontSize: 9, color: edge.verified ? '#39d353' : '#808590', background: (edge.verified ? '#39d35318' : '#80859018'), border: `1px solid ${edge.verified ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.verified ? 'verified' : 'unverified'}</span>
                       {edge.confidence != null && <span style={{ fontSize: 9, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{Math.round(Number(edge.confidence) * 100)}%</span>}
+                      {Array.isArray(edge.mitre_techniques) && edge.mitre_techniques.length > 0 && (
+                        <span title="MITRE ATT&CK techniques" style={{ fontSize: 9, color: '#9a7af0', background: '#9a7af018', border: '1px solid #9a7af033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                          {edge.mitre_techniques.join(', ')}
+                        </span>
+                      )}
+                      {edge.noise_level && (() => {
+                        const nc = edge.noise_level === 'high' ? '#e8574a' : edge.noise_level === 'med' ? '#f09a3a' : '#39d353';
+                        return (
+                          <span title="OPSEC noise level" style={{ fontSize: 9, color: nc, background: nc + '18', border: `1px solid ${nc}33`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                            noise:{edge.noise_level}
+                          </span>
+                        );
+                      })()}
+                      {edge.kill_chain_stage && (
+                        <span title="Kill-chain stage" style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                          {edge.kill_chain_stage.replace(/_/g, ' ')}
+                        </span>
+                      )}
                     </div>
                     <input value={edge.label || ''} onChange={e => updateEdge(edge.id, { label: e.target.value })} placeholder="VPN / SMB / trust" style={{ width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 6px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
                     <div style={{ display: 'flex', gap: 6 }}>
