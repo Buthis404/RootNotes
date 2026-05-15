@@ -1382,8 +1382,20 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                         </g>
                       );
                     })() : null;
-                    if (!roleElems && !zoneElem) return null;
-                    return <>{roleElems}{zoneElem}</>;
+                    // SB3: Tier-0/1/2 chip — top-right corner; Tier 2 is silent
+                    const TIER_COLORS = { 0: '#e8574a', 1: '#f09a3a' };
+                    const tierVal = (node.tier === 0 || node.tier === 1) ? node.tier : null;
+                    const tierElem = tierVal !== null ? (() => {
+                      const tc = TIER_COLORS[tierVal];
+                      return (
+                        <g transform="translate(33,-2)">
+                          <circle cx="0" cy="0" r="6" fill={tc + '33'} stroke={tc} strokeWidth="1"/>
+                          <text x="0" y="2" textAnchor="middle" fontSize="6.5" fill={tc} fontFamily="JetBrains Mono" fontWeight="700">{`T${tierVal}`}</text>
+                        </g>
+                      );
+                    })() : null;
+                    if (!roleElems && !zoneElem && !tierElem) return null;
+                    return <>{roleElems}{zoneElem}{tierElem}</>;
                   })()}
                 </g>;
               })}
