@@ -509,129 +509,183 @@ async def _adaptix_sync(cfg: dict) -> dict:
     return {"hosts": result_hosts, "creds": result_creds}
 
 
+def _msf_base_url(cfg: dict) -> str:
+    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
+    return base
+
+
+def _msf_creds(cfg: dict) -> tuple[str, str]:
+    username = cfg.get("username") or "msf"
+    password = cfg.get("password") or cfg.get("token") or ""
+    return username, password
+
+
+def _msf_bytes_to_str(value):
+    """
+    MSFRPC msgpack-packs strings as bin (not fixstr), so `raw=False` still
+    surfaces them as bytes. Recursively decode the whole tree so callers
+    can use ordinary dict["key"] / .get("key") access.
+    """
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {_msf_bytes_to_str(k): _msf_bytes_to_str(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_msf_bytes_to_str(item) for item in value]
+    return value
+
+
+async def _msf_rpc(client: "httpx.AsyncClient", base: str, method: str, *args) -> dict | list:
+    """
+    Make one MSFRPC msgpack call. `msfrpcd -P <pwd> -S -f` speaks msgpack
+    at POST /api/, NOT JSON — the JSON web service is a separate program
+    (`msf-ws`) that few people run. This helper hides the framing.
+
+    Errors:
+      - Network — bubble as httpx.* exceptions
+      - MSF-side {"error": True, "error_message": "..."} — raised as RuntimeError
+    """
+    import msgpack
+    body = msgpack.packb([method, *args], use_bin_type=True)
+    r = await client.post(
+        f"{base}/api/",
+        content=body,
+        headers={"Content-Type": "binary/message-pack"},
+    )
+    r.raise_for_status()
+    data = _msf_bytes_to_str(msgpack.unpackb(r.content, raw=False))
+    if isinstance(data, dict) and data.get("error"):
+        msg = data.get("error_message") or data.get("error_string") or str(data)
+        raise RuntimeError(f"MSFRPC: {msg}")
+    return data
+
+
+async def _msf_login(client: "httpx.AsyncClient", base: str, username: str, password: str) -> str:
+    login = await _msf_rpc(client, base, "auth.login", username, password)
+    if not isinstance(login, dict) or login.get("result") != "success":
+        raise RuntimeError(f"MSFRPC auth.login unexpected response: {login!r}")
+    token = login.get("token") or ""
+    if not token:
+        raise RuntimeError("MSFRPC auth.login returned no token")
+    return token
+
+
+def _msf_classify_session(s: dict) -> tuple[str, str, str, str, str]:
+    """Common (ip, hostname, username, os, sess_type) extraction from session.list entry."""
+    tunnel_peer = s.get("tunnel_peer") or s.get("tunnel_local") or ""
+    ip = tunnel_peer.split(":", 1)[0].strip() if tunnel_peer else ""
+    if " -> " in ip:
+        ip = ip.split(" -> ", 1)[0].strip().split(":", 1)[0]
+    info = s.get("info") or ""
+    platform = (s.get("platform") or "").lower()
+    sess_type = (s.get("type") or "shell").lower()
+    username_str = ""
+    hostname = ""
+    if " @ " in info:
+        username_str, _, hostname = info.partition(" @ ")
+        username_str = username_str.strip()
+        hostname = hostname.strip()
+    elif info:
+        hostname = info.strip()
+    os_str = (
+        "Windows" if "windows" in platform else
+        "Linux"   if "linux" in platform else
+        "macOS"   if "osx" in platform or "darwin" in platform else
+        (platform.title() or "Unknown")
+    )
+    return ip, hostname, username_str, os_str, sess_type
+
+
 async def _msf_sync(cfg: dict) -> dict:
     """
-    Metasploit MSFRPC (HTTP JSON API).
-    msfrpcd -P <password> -S -f  (port 55553 by default, no SSL with -S)
-    """
-    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
-    username = cfg.get("username") or "msf"
-    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
+    Metasploit MSFRPC sync — sessions → hosts, db.creds → creds.
 
-    hosts_out = []
-    creds_out = []
+    Wire protocol: msgpack RPC at POST /api/. Compatible with default
+    `msfrpcd -P <password> -S -f` on port 55553. No `--json` flag required.
+    """
+    base = _msf_base_url(cfg)
+    username, password = _msf_creds(cfg)
+
+    hosts_out: list[dict] = []
+    creds_out: list[dict] = []
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=15) as client:
-            # Auth
-            auth_r = await client.post(
-                f"{base}/api/1.0/auth/login",
-                json={"username": username, "password": password},
-            )
-            if auth_r.status_code != 200:
-                return {"error": f"MSFRPC auth failed: {auth_r.status_code} {auth_r.text[:200]}"}
-
-            token = auth_r.json().get("token", "")
-            if not token:
-                return {"error": "No token in MSFRPC auth response"}
-
-            headers = {"Authorization": f"Bearer {token}"}
-
-            # Sessions
-            sess_r = await client.get(f"{base}/api/1.0/sessions", headers=headers)
-            if sess_r.status_code != 200:
-                return {"error": f"MSFRPC sessions failed: {sess_r.status_code}"}
-
-            sessions = sess_r.json().get("sessions", {})
-
+        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=20) as client:
+            token = await _msf_login(client, base, username, password)
+            sessions = await _msf_rpc(client, base, "session.list", token)
+            if not isinstance(sessions, dict):
+                sessions = {}
             for sid, s in sessions.items():
-                # tunnel_peer: "10.10.10.5:4444" or "10.10.10.5:49152 -> 10.10.14.1:4444"
-                tunnel_peer = s.get("tunnel_peer") or s.get("tunnel_local") or ""
-                ip = tunnel_peer.split(":")[0].strip() if tunnel_peer else ""
-                # Remove port if it got mixed in
-                if " -> " in ip:
-                    ip = ip.split(" -> ")[0].strip().split(":")[0]
-
-                info = s.get("info") or ""          # "SYSTEM @ DC01" or "root @ kali"
-                platform = s.get("platform") or ""  # "windows/x64", "linux/x64"
-                sess_type = s.get("type") or "shell" # "meterpreter" | "shell"
-
-                # Parse username and hostname from info
-                username_str = ""
-                hostname = ""
-                if " @ " in info:
-                    parts = info.split(" @ ", 1)
-                    username_str = parts[0].strip()
-                    hostname = parts[1].strip()
-                elif info:
-                    hostname = info.strip()
-
-                # Determine OS from platform
-                if "windows" in platform.lower():
-                    os_str = "Windows"
-                elif "linux" in platform.lower():
-                    os_str = "Linux"
-                elif "osx" in platform.lower() or "darwin" in platform.lower():
-                    os_str = "macOS"
-                else:
-                    os_str = platform or "Unknown"
-
-                # Status: meterpreter sessions = owned, shells = pwned
+                if not isinstance(s, dict):
+                    continue
+                sid_str = str(sid)
+                ip, hostname, username_str, os_str, sess_type = _msf_classify_session(s)
+                if not ip:
+                    continue
                 status = "owned" if sess_type == "meterpreter" else "pwned"
-
-                if ip:
-                    hosts_out.append({
-                        "ip": ip,
-                        "hostname": hostname,
-                        "os": os_str,
-                        "status": status,
-                        "tags": [f"msf-session-{sid}", sess_type],
-                        "notes": f"Session {sid} [{sess_type}]: {info}",
-                        "source": "metasploit",
-                    })
-
-                # Create cred if we have username
-                if username_str and ip:
+                hosts_out.append({
+                    "ip": ip,
+                    "hostname": hostname,
+                    "os": os_str,
+                    "status": status,
+                    "tags": [f"msf-session-{sid_str}", sess_type],
+                    "notes": f"Session {sid_str} [{sess_type}]: {s.get('info') or ''}",
+                    "source": "metasploit",
+                    # Live-session signal so HostActivity('c2') gets created
+                    "session_id": sid_str,
+                    "process": s.get("via_payload") or sess_type,
+                    "alive": True,
+                })
+                if username_str:
                     creds_out.append({
                         "username": username_str,
                         "secret": "",
                         "type": "plain",
                         "host": ip,
-                        "service": "shell" if sess_type == "shell" else "meterpreter",
-                        "notes": f"MSF session {sid}",
+                        "service": sess_type,
+                        "notes": f"MSF session {sid_str}",
                         "source": "metasploit",
                     })
 
-            # Also try to get creds from Metasploit DB
+            # Optional: pull creds from MSF DB (db.creds in msgpack RPC).
+            # Schema varies across MSF 5.x / 6.x — best-effort, ignore on failure.
             try:
-                creds_r = await client.get(f"{base}/api/1.0/credentials", headers=headers)
-                if creds_r.status_code == 200:
-                    for c in creds_r.json().get("credentials", []):
-                        pub = c.get("public", {})
-                        priv = c.get("private", {})
-                        uname = pub.get("username") or ""
-                        secret = priv.get("data") or ""
-                        ctype_raw = (priv.get("type") or "password").lower()
-                        ctype = "hash" if ("hash" in ctype_raw or "ntlm" in ctype_raw) else "plain"
-                        origin = c.get("origin", {})
-                        host_addr = origin.get("address") or ""
-                        if uname:
-                            creds_out.append({
-                                "username": uname,
-                                "secret": secret,
-                                "type": ctype,
-                                "host": host_addr,
-                                "service": origin.get("service_name") or "",
-                                "notes": "",
-                                "source": "metasploit",
-                            })
+                creds_resp = await _msf_rpc(client, base, "db.creds", token)
+                creds_list = []
+                if isinstance(creds_resp, dict):
+                    creds_list = creds_resp.get("creds") or []
+                elif isinstance(creds_resp, list):
+                    creds_list = creds_resp
+                for c in creds_list:
+                    if not isinstance(c, dict):
+                        continue
+                    uname = (c.get("user") or c.get("username") or "").strip()
+                    if not uname:
+                        continue
+                    secret = c.get("pass") or c.get("private_data") or c.get("password") or ""
+                    ctype_raw = (c.get("ptype") or c.get("private_type") or "password").lower()
+                    ctype = "hash" if ("hash" in ctype_raw or "ntlm" in ctype_raw) else "plain"
+                    creds_out.append({
+                        "username": uname,
+                        "secret": secret,
+                        "type": ctype,
+                        "host": c.get("host") or "",
+                        "service": c.get("sname") or c.get("service") or "",
+                        "notes": "",
+                        "source": "metasploit",
+                    })
             except Exception:
-                pass  # Creds endpoint optional
+                pass
 
     except httpx.ConnectError as e:
-        return {"error": f"Cannot connect to MSFRPC at {base}: {e}"}
+        return {"hosts": [], "creds": [], "error": f"Cannot connect to MSFRPC at {base}: {e}"}
+    except RuntimeError as e:
+        return {"hosts": [], "creds": [], "error": str(e)}
     except Exception as e:
-        return {"error": f"MSFRPC sync error: {e}"}
+        return {"hosts": [], "creds": [], "error": f"MSFRPC sync error: {e}"}
 
     return {"hosts": hosts_out, "creds": creds_out}
 
@@ -917,46 +971,38 @@ async def _msf_fetch_session_tasks(cfg: dict, session_id: str, limit: int = 30) 
     Less rich than Adaptix's task list, but enough for the UI to render a
     consistent timeline view across both C2 types.
     """
-    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
-    username = cfg.get("username") or "msf"
-    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
+    base = _msf_base_url(cfg)
+    username, password = _msf_creds(cfg)
 
-    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
-        auth_r = await client.post(
-            f"{base}/api/1.0/auth/login",
-            json={"username": username, "password": password},
-        )
-        if auth_r.status_code != 200:
-            return []
-        token = auth_r.json().get("token", "")
-        if not token:
-            return []
-        headers = {"Authorization": f"Bearer {token}"}
-
-        sess_r = await client.get(f"{base}/api/1.0/sessions", headers=headers)
-        if sess_r.status_code != 200:
-            return []
-        sess_info = (sess_r.json().get("sessions", {}) or {}).get(session_id) \
-                    or (sess_r.json().get("sessions", {}) or {}).get(str(session_id))
-        if not sess_info:
-            return []
-        sess_type = (sess_info.get("type") or "shell").lower()
-
-        # Non-destructive read of pending output (MSFRPC clears buffer on read).
-        # We only do this for shell — meterpreter_read can drain real output
-        # an operator might want to see in the UI.
-        pending_output = ""
-        try:
-            read_path = (
-                f"{base}/api/1.0/sessions/{session_id}/meterpreter_read"
-                if sess_type == "meterpreter"
-                else f"{base}/api/1.0/sessions/{session_id}/shell_read"
-            )
-            read_r = await client.get(read_path, headers=headers)
-            if read_r.status_code == 200:
-                pending_output = ((read_r.json() or {}).get("data") or "")[:8000]
-        except Exception:
-            pass
+    sess_info = None
+    sess_type = "shell"
+    pending_output = ""
+    try:
+        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
+            token = await _msf_login(client, base, username, password)
+            sessions = await _msf_rpc(client, base, "session.list", token)
+            if not isinstance(sessions, dict):
+                return []
+            key = _msf_session_id_key(session_id, sessions)
+            if key is None:
+                return []
+            sess_info = sessions[key]
+            sess_type = (sess_info.get("type") or "shell").lower()
+            # Drain pending buffer (read clears it on MSF side — fine for diagnostics)
+            try:
+                read_method = (
+                    "session.meterpreter_read" if sess_type == "meterpreter"
+                    else "session.shell_read"
+                )
+                read_resp = await _msf_rpc(client, base, read_method, token, key)
+                if isinstance(read_resp, dict):
+                    pending_output = (read_resp.get("data") or "")[:8000]
+            except Exception:
+                pass
+    except Exception:
+        return []
+    if sess_info is None:
+        return []
 
     items: list[dict] = []
     items.append({
@@ -1059,92 +1105,90 @@ async def _adaptix_execute(cfg: dict, agent_id: str, commandline: str, wait_for_
         return result
 
 
+def _msf_session_id_key(session_id: str, sessions: dict):
+    """MSF returns session ids as ints over msgpack; UI passes them as strings."""
+    if session_id in sessions:
+        return session_id
+    try:
+        as_int = int(session_id)
+        if as_int in sessions:
+            return as_int
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 async def _msf_execute(
     cfg: dict, session_id: str, commandline: str,
     wait_for_output: bool = True, timeout_seconds: int = 12,
 ) -> dict:
     """
-    Execute a command on a Metasploit session via MSFRPC.
+    Execute a command on a Metasploit session via MSFRPC (msgpack).
 
-    - For shell sessions: `session.shell_write` + `session.shell_read` poll.
-    - For meterpreter sessions: `session.meterpreter_run_single` + `meterpreter_read`.
+    - shell sessions:        session.shell_write + session.shell_read poll
+    - meterpreter sessions:  session.meterpreter_run_single + meterpreter_read
 
-    `session_id` is the numeric MSF session id (e.g. "1"). cfg is the integration
-    config — `base_url`/`url` + `username` + `token`/`password` (matches `_msf_sync`).
+    `session_id` is the numeric MSF session id (e.g. "1"). cfg fields:
+    `base_url`/`url`, `username`, `password` (or legacy `token`).
     """
-    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
-    username = cfg.get("username") or "msf"
-    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
+    base = _msf_base_url(cfg)
+    username, password = _msf_creds(cfg)
 
-    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=max(30, timeout_seconds + 5)) as client:
-        # 1. Auth
-        auth_r = await client.post(
-            f"{base}/api/1.0/auth/login",
-            json={"username": username, "password": password},
-        )
-        if auth_r.status_code != 200:
-            return {"accepted": False, "error": f"MSFRPC auth failed: {auth_r.status_code}",
-                    "commandline": commandline, "session_id": session_id}
-        token = auth_r.json().get("token", "")
-        if not token:
-            return {"accepted": False, "error": "No token in MSFRPC auth response",
-                    "commandline": commandline, "session_id": session_id}
-        headers = {"Authorization": f"Bearer {token}"}
+    result = {"accepted": False, "session_id": session_id, "commandline": commandline}
+    try:
+        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False),
+                                     timeout=max(30, timeout_seconds + 5)) as client:
+            token = await _msf_login(client, base, username, password)
 
-        # 2. Detect session type — shell vs meterpreter
-        sess_list = await client.get(f"{base}/api/1.0/sessions", headers=headers)
-        if sess_list.status_code != 200:
-            return {"accepted": False,
-                    "error": f"MSFRPC sessions list failed: {sess_list.status_code}",
-                    "commandline": commandline, "session_id": session_id}
-        sess_data = sess_list.json().get("sessions", {})
-        sess_info = sess_data.get(session_id) or sess_data.get(str(session_id))
-        if not sess_info:
-            return {"accepted": False, "error": f"MSF session {session_id} not found",
-                    "commandline": commandline, "session_id": session_id}
-        sess_type = (sess_info.get("type") or "shell").lower()
+            # Detect session type
+            sessions = await _msf_rpc(client, base, "session.list", token)
+            if not isinstance(sessions, dict):
+                sessions = {}
+            key = _msf_session_id_key(session_id, sessions)
+            if key is None:
+                return {**result, "error": f"MSF session {session_id} not found"}
+            sess_info = sessions[key]
+            sess_type = (sess_info.get("type") or "shell").lower()
+            result["session_type"] = sess_type
+            result["accepted"] = True
 
-        # 3. Dispatch by session type
-        result = {"accepted": True, "session_id": session_id, "session_type": sess_type,
-                  "commandline": commandline}
-        if sess_type == "meterpreter":
-            write_r = await client.post(
-                f"{base}/api/1.0/sessions/{session_id}/meterpreter_run_single",
-                headers=headers, json={"command": commandline},
+            # Write
+            if sess_type == "meterpreter":
+                await _msf_rpc(client, base, "session.meterpreter_run_single", token, key, commandline)
+            else:
+                await _msf_rpc(client, base, "session.shell_write", token, key, commandline + "\n")
+
+            if not wait_for_output:
+                return result
+
+            # Poll until output drains
+            read_method = (
+                "session.meterpreter_read" if sess_type == "meterpreter"
+                else "session.shell_read"
             )
-        else:
-            write_r = await client.post(
-                f"{base}/api/1.0/sessions/{session_id}/shell_write",
-                headers=headers, json={"data": commandline + "\n"},
-            )
-        if write_r.status_code not in (200, 201, 204):
-            return {**result, "accepted": False,
-                    "error": f"MSFRPC write failed: {write_r.status_code} {write_r.text[:200]}"}
-        if not wait_for_output:
+            accumulated = ""
+            started = utcnow()
+            while (utcnow() - started).total_seconds() < max(3, timeout_seconds):
+                await asyncio.sleep(0.8)
+                try:
+                    chunk_resp = await _msf_rpc(client, base, read_method, token, key)
+                except Exception:
+                    continue
+                if not isinstance(chunk_resp, dict):
+                    continue
+                chunk = chunk_resp.get("data") or ""
+                if chunk:
+                    accumulated += chunk
+                elif accumulated:
+                    break
+            result["output"] = accumulated
             return result
-
-        # 4. Poll read endpoint until output appears or timeout
-        read_path = (
-            f"{base}/api/1.0/sessions/{session_id}/meterpreter_read"
-            if sess_type == "meterpreter"
-            else f"{base}/api/1.0/sessions/{session_id}/shell_read"
-        )
-        accumulated = ""
-        started = utcnow()
-        while (utcnow() - started).total_seconds() < max(3, timeout_seconds):
-            await asyncio.sleep(0.8)
-            read_r = await client.get(read_path, headers=headers)
-            if read_r.status_code != 200:
-                continue
-            chunk = (read_r.json() or {}).get("data") or ""
-            if chunk:
-                accumulated += chunk
-                # MSF shell read returns incremental output — keep polling
-                # for a couple of cycles after first chunk to drain.
-            elif accumulated:
-                break
-        result["output"] = accumulated
-        return result
+    except httpx.ConnectError as e:
+        return {**result, "error": f"Cannot connect to MSFRPC at {base}: {e}"}
+    except RuntimeError as e:
+        return {**result, "error": str(e)}
+    except Exception as e:
+        return {**result, "error": f"MSFRPC execute error: {e}"}
 
 
 async def _cs_live_agents(cfg: dict) -> list[dict]:
@@ -1212,54 +1256,23 @@ async def _msf_live_agents(cfg: dict) -> list[dict]:
     MSF session to run `c2:exec` against, the same way they pick Adaptix
     beacons today.
     """
-    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
-    username = cfg.get("username") or "msf"
-    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
+    base = _msf_base_url(cfg)
+    username, password = _msf_creds(cfg)
 
-    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
-        auth_r = await client.post(
-            f"{base}/api/1.0/auth/login",
-            json={"username": username, "password": password},
-        )
-        if auth_r.status_code != 200:
-            return []
-        token = auth_r.json().get("token", "")
-        if not token:
-            return []
-        sess_r = await client.get(
-            f"{base}/api/1.0/sessions",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        if sess_r.status_code != 200:
-            return []
-        sessions = sess_r.json().get("sessions", {})
+    try:
+        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
+            token = await _msf_login(client, base, username, password)
+            sessions = await _msf_rpc(client, base, "session.list", token)
+            if not isinstance(sessions, dict):
+                return []
+    except Exception:
+        return []
 
     result = []
     for sid, s in sessions.items():
-        info = s.get("info") or ""
-        sess_type = (s.get("type") or "shell").lower()
-        platform = (s.get("platform") or "").lower()
-        tunnel_peer = s.get("tunnel_peer") or s.get("tunnel_local") or ""
-        ip = tunnel_peer.split(":")[0].strip() if tunnel_peer else ""
-        if " -> " in ip:
-            ip = ip.split(" -> ")[0].strip().split(":")[0]
-
-        username_str = ""
-        hostname = ""
-        if " @ " in info:
-            username_str, _, hostname = info.partition(" @ ")
-            username_str = username_str.strip()
-            hostname = hostname.strip()
-        elif info:
-            hostname = info.strip()
-
-        os_str = (
-            "Windows" if "windows" in platform else
-            "Linux"   if "linux"   in platform else
-            "macOS"   if "osx" in platform or "darwin" in platform else
-            (platform.title() or "Unknown")
-        )
-
+        if not isinstance(s, dict):
+            continue
+        ip, hostname, username_str, os_str, sess_type = _msf_classify_session(s)
         # MSF sessions don't have a clean "dead" state in the list — if
         # /sessions returns it, treat as alive. Stale ones are pruned by MSF.
         result.append({
@@ -1313,11 +1326,15 @@ async def test_connection(
 
     try:
         data = await connector(cfg)
+        if data.get("error"):
+            raise HTTPException(400, f"C2 test failed: {data['error']}")
         return {
             "ok": True,
-            "hosts_found": len(data["hosts"]),
-            "creds_found": len(data["creds"]),
+            "hosts_found": len(data.get("hosts") or []),
+            "creds_found": len(data.get("creds") or []),
         }
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
         raise HTTPException(400, f"C2 API error {e.response.status_code}: {e.response.text[:300]}")
     except httpx.ConnectError as e:
@@ -1355,7 +1372,14 @@ async def _do_project_sync(cfg: dict, pid: str, db: Session, iid: str | None = N
 
 async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | None = None) -> dict:
     connector = _CONNECTORS.get(cfg["type"])
+    if connector is None:
+        raise HTTPException(400, f"Unsupported C2 type: {cfg.get('type')}")
     data = await connector(cfg)
+    # Connectors that hit a remote API may report failure in-band as
+    # `{"error": "...", "hosts": [], "creds": []}` (especially MSF). Surface
+    # the message instead of silently treating zero hosts as a successful sync.
+    if data.get("error"):
+        raise HTTPException(400, f"C2 sync failed: {data['error']}")
     ts = ts_now()
     created_hosts, updated_hosts, created_creds = 0, 0, 0
     source = cfg["type"]
@@ -1363,7 +1387,7 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
     session_host_raw: list[tuple] = []  # (hobj, raw_h) for hosts with live sessions
 
     # ── Upsert hosts ─────────────────────────────────────────────────
-    for h in data["hosts"]:
+    for h in data.get("hosts", []):
         ip = h.get("ip", "").strip()
         hostname = h.get("hostname", "").strip()
         if not ip and not hostname:
@@ -1463,7 +1487,7 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 created_creds += 1
 
     # ── Upsert harvested creds ────────────────────────────────────────
-    for c in data["creds"]:
+    for c in data.get("creds", []):
         uname = (c.get("username") or "").strip()
         if not uname:
             continue
@@ -1564,10 +1588,10 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
     return {
         "ok": True,
         "source": source,
-        "hosts_found": len(data["hosts"]),
+        "hosts_found": len(data.get("hosts") or []),
         "hosts_created": created_hosts,
         "hosts_updated": updated_hosts,
-        "creds_found": len(data["creds"]),
+        "creds_found": len(data.get("creds") or []),
         "creds_created": created_creds,
     }
 
