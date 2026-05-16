@@ -446,7 +446,7 @@ function WebhookPanel({ pid, accent }) {
 const C2_TYPES = [
   { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API under /endpoint path. Username + password (or token). URL: https://host:port' },
   { id: 'mythic',        label: 'Mythic',         color: '#ffa726', hint: 'GraphQL API. Username + password OR apitoken (Settings → API Tokens). URL: https://host:7443' },
-  { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'REST API (multiplayer mode). Token: sliver-client generate-token' },
+  { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'gRPC multiplayer. Paste the operator config JSON from sliver-server: `operator --name X --lhost ... --save .`' },
 ];
 
 const EMPTY_FORM = { name: '', type: 'adaptix', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0, has_token: false, has_password: false };
@@ -809,14 +809,20 @@ function C2Panel({ pid, accent }) {
             <div style={{ fontSize: 10, color: '#404550', marginTop: 4 }}>{typeInfo(form.type).hint}</div>
           </FieldRow>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          {form.type === 'sliver' ? (
             <FieldRow label="Name">
-              <Input value={form.name} onChange={v => setF('name', v)} placeholder="My CS TeamServer" />
+              <Input value={form.name} onChange={v => setF('name', v)} placeholder="My Sliver" />
             </FieldRow>
-            <FieldRow label="URL">
-              <Input value={form.url} onChange={v => setF('url', v)} placeholder="https://1.2.3.4:50050" monospace />
-            </FieldRow>
-          </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <FieldRow label="Name">
+                <Input value={form.name} onChange={v => setF('name', v)} placeholder="My TeamServer" />
+              </FieldRow>
+              <FieldRow label="URL">
+                <Input value={form.url} onChange={v => setF('url', v)} placeholder="https://1.2.3.4:50050" monospace />
+              </FieldRow>
+            </div>
+          )}
 
           {form.type === 'adaptix' ? (
             <>
@@ -845,8 +851,19 @@ function C2Panel({ pid, accent }) {
             </div>
           ) : null}
 
-          <FieldRow label={form.type === 'mythic' ? 'API Token (preferred — set in Mythic UI → Settings)' : 'API Token'}>
-            <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : 'token...')} monospace />
+          <FieldRow label={
+            form.type === 'mythic' ? 'API Token (preferred — set in Mythic UI → Settings)' :
+            form.type === 'sliver' ? 'Operator Config (paste the entire JSON from sliver-server operator --save)' :
+            'API Token'
+          }>
+            <Input
+              value={form.token}
+              onChange={v => setF('token', v)}
+              placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : (form.type === 'sliver' ? '{"operator":"...","ca_certificate":"-----BEGIN CERTIFICATE-----..."}' : 'token...'))}
+              monospace
+              multiline={form.type === 'sliver'}
+              rows={form.type === 'sliver' ? 8 : 3}
+            />
           </FieldRow>
           {editing && ((form.type === 'adaptix' && form.has_password) || (form.type === 'mythic' && (form.has_password || form.has_token)) || (form.type !== 'adaptix' && form.type !== 'mythic' && form.has_token)) && (
             <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>

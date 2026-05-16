@@ -17,3 +17,4 @@ pyzipper==0.3.6
 weasyprint==62.3
 pydyf==0.11.0
 redis[hiredis]==5.2.1
+sliver-py==0.0.19
