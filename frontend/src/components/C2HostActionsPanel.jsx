@@ -6,7 +6,7 @@ const RESERVED_AUTOFILL_KEYS = new Set(['user', 'username', 'pass', 'password', 
 
 // C2 integration types that support live execution from this panel.
 // Matches backend SUPPORTED_EXEC_C2_TYPES — keep in sync.
-const SUPPORTED_EXEC_C2 = ['adaptix', 'metasploit'];
+const SUPPORTED_EXEC_C2 = ['adaptix'];
 
 function getOperationTemplates(host) {
   const os = String(host?.os || '').toLowerCase();

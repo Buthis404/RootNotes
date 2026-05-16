@@ -199,7 +199,7 @@ def create_integration(
     _: models.User = Depends(require_admin),
 ):
     _require_c2()
-    if body.type not in ("cobalt_strike", "sliver", "adaptix", "metasploit"):
+    if body.type not in ("cobalt_strike", "sliver", "adaptix"):
         raise HTTPException(400, f"Unknown C2 type: {body.type}")
     integrations = _load_integrations(db)
     cfg = body.model_dump()
@@ -509,192 +509,10 @@ async def _adaptix_sync(cfg: dict) -> dict:
     return {"hosts": result_hosts, "creds": result_creds}
 
 
-def _msf_base_url(cfg: dict) -> str:
-    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
-    return base
-
-
-def _msf_creds(cfg: dict) -> tuple[str, str]:
-    username = cfg.get("username") or "msf"
-    password = cfg.get("password") or cfg.get("token") or ""
-    return username, password
-
-
-def _msf_bytes_to_str(value):
-    """
-    MSFRPC msgpack-packs strings as bin (not fixstr), so `raw=False` still
-    surfaces them as bytes. Recursively decode the whole tree so callers
-    can use ordinary dict["key"] / .get("key") access.
-    """
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8")
-        except UnicodeDecodeError:
-            return value.decode("utf-8", errors="replace")
-    if isinstance(value, dict):
-        return {_msf_bytes_to_str(k): _msf_bytes_to_str(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_msf_bytes_to_str(item) for item in value]
-    return value
-
-
-async def _msf_rpc(client: "httpx.AsyncClient", base: str, method: str, *args) -> dict | list:
-    """
-    Make one MSFRPC msgpack call. `msfrpcd -P <pwd> -S -f` speaks msgpack
-    at POST /api/, NOT JSON — the JSON web service is a separate program
-    (`msf-ws`) that few people run. This helper hides the framing.
-
-    Errors:
-      - Network — bubble as httpx.* exceptions
-      - MSF-side {"error": True, "error_message": "..."} — raised as RuntimeError
-    """
-    import msgpack
-    body = msgpack.packb([method, *args], use_bin_type=True)
-    r = await client.post(
-        f"{base}/api/",
-        content=body,
-        headers={"Content-Type": "binary/message-pack"},
-    )
-    r.raise_for_status()
-    data = _msf_bytes_to_str(msgpack.unpackb(r.content, raw=False))
-    if isinstance(data, dict) and data.get("error"):
-        msg = data.get("error_message") or data.get("error_string") or str(data)
-        raise RuntimeError(f"MSFRPC: {msg}")
-    return data
-
-
-async def _msf_login(client: "httpx.AsyncClient", base: str, username: str, password: str) -> str:
-    login = await _msf_rpc(client, base, "auth.login", username, password)
-    if not isinstance(login, dict) or login.get("result") != "success":
-        raise RuntimeError(f"MSFRPC auth.login unexpected response: {login!r}")
-    token = login.get("token") or ""
-    if not token:
-        raise RuntimeError("MSFRPC auth.login returned no token")
-    return token
-
-
-def _msf_classify_session(s: dict) -> tuple[str, str, str, str, str]:
-    """Common (ip, hostname, username, os, sess_type) extraction from session.list entry."""
-    tunnel_peer = s.get("tunnel_peer") or s.get("tunnel_local") or ""
-    ip = tunnel_peer.split(":", 1)[0].strip() if tunnel_peer else ""
-    if " -> " in ip:
-        ip = ip.split(" -> ", 1)[0].strip().split(":", 1)[0]
-    info = s.get("info") or ""
-    platform = (s.get("platform") or "").lower()
-    sess_type = (s.get("type") or "shell").lower()
-    username_str = ""
-    hostname = ""
-    if " @ " in info:
-        username_str, _, hostname = info.partition(" @ ")
-        username_str = username_str.strip()
-        hostname = hostname.strip()
-    elif info:
-        hostname = info.strip()
-    os_str = (
-        "Windows" if "windows" in platform else
-        "Linux"   if "linux" in platform else
-        "macOS"   if "osx" in platform or "darwin" in platform else
-        (platform.title() or "Unknown")
-    )
-    return ip, hostname, username_str, os_str, sess_type
-
-
-async def _msf_sync(cfg: dict) -> dict:
-    """
-    Metasploit MSFRPC sync — sessions → hosts, db.creds → creds.
-
-    Wire protocol: msgpack RPC at POST /api/. Compatible with default
-    `msfrpcd -P <password> -S -f` on port 55553. No `--json` flag required.
-    """
-    base = _msf_base_url(cfg)
-    username, password = _msf_creds(cfg)
-
-    hosts_out: list[dict] = []
-    creds_out: list[dict] = []
-
-    try:
-        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=20) as client:
-            token = await _msf_login(client, base, username, password)
-            sessions = await _msf_rpc(client, base, "session.list", token)
-            if not isinstance(sessions, dict):
-                sessions = {}
-            for sid, s in sessions.items():
-                if not isinstance(s, dict):
-                    continue
-                sid_str = str(sid)
-                ip, hostname, username_str, os_str, sess_type = _msf_classify_session(s)
-                if not ip:
-                    continue
-                status = "owned" if sess_type == "meterpreter" else "pwned"
-                hosts_out.append({
-                    "ip": ip,
-                    "hostname": hostname,
-                    "os": os_str,
-                    "status": status,
-                    "tags": [f"msf-session-{sid_str}", sess_type],
-                    "notes": f"Session {sid_str} [{sess_type}]: {s.get('info') or ''}",
-                    "source": "metasploit",
-                    # Live-session signal so HostActivity('c2') gets created
-                    "session_id": sid_str,
-                    "process": s.get("via_payload") or sess_type,
-                    "alive": True,
-                })
-                if username_str:
-                    creds_out.append({
-                        "username": username_str,
-                        "secret": "",
-                        "type": "plain",
-                        "host": ip,
-                        "service": sess_type,
-                        "notes": f"MSF session {sid_str}",
-                        "source": "metasploit",
-                    })
-
-            # Optional: pull creds from MSF DB (db.creds in msgpack RPC).
-            # Schema varies across MSF 5.x / 6.x — best-effort, ignore on failure.
-            try:
-                creds_resp = await _msf_rpc(client, base, "db.creds", token)
-                creds_list = []
-                if isinstance(creds_resp, dict):
-                    creds_list = creds_resp.get("creds") or []
-                elif isinstance(creds_resp, list):
-                    creds_list = creds_resp
-                for c in creds_list:
-                    if not isinstance(c, dict):
-                        continue
-                    uname = (c.get("user") or c.get("username") or "").strip()
-                    if not uname:
-                        continue
-                    secret = c.get("pass") or c.get("private_data") or c.get("password") or ""
-                    ctype_raw = (c.get("ptype") or c.get("private_type") or "password").lower()
-                    ctype = "hash" if ("hash" in ctype_raw or "ntlm" in ctype_raw) else "plain"
-                    creds_out.append({
-                        "username": uname,
-                        "secret": secret,
-                        "type": ctype,
-                        "host": c.get("host") or "",
-                        "service": c.get("sname") or c.get("service") or "",
-                        "notes": "",
-                        "source": "metasploit",
-                    })
-            except Exception:
-                pass
-
-    except httpx.ConnectError as e:
-        return {"hosts": [], "creds": [], "error": f"Cannot connect to MSFRPC at {base}: {e}"}
-    except RuntimeError as e:
-        return {"hosts": [], "creds": [], "error": str(e)}
-    except Exception as e:
-        return {"hosts": [], "creds": [], "error": f"MSFRPC sync error: {e}"}
-
-    return {"hosts": hosts_out, "creds": creds_out}
-
-
 _CONNECTORS = {
     "cobalt_strike": _cs_sync,
     "sliver": _sliver_sync,
     "adaptix": _adaptix_sync,
-    "metasploit": _msf_sync,
 }
 
 
@@ -959,84 +777,6 @@ async def _adaptix_fetch_agent_tasks(cfg: dict, agent_id: str, limit: int = 30) 
         } for item in tasks]
 
 
-async def _msf_fetch_session_tasks(cfg: dict, session_id: str, limit: int = 30) -> list[dict]:
-    """
-    Return recent activity for an MSF session in the same shape Adaptix uses
-    (task_id / cmdline / completed / text / start_time / finish_time / user).
-
-    MSFRPC doesn't expose a per-session command log, so we return:
-      - session metadata as a 'meta' row
-      - any pending shell/meterpreter output as one row labelled 'pending output'
-
-    Less rich than Adaptix's task list, but enough for the UI to render a
-    consistent timeline view across both C2 types.
-    """
-    base = _msf_base_url(cfg)
-    username, password = _msf_creds(cfg)
-
-    sess_info = None
-    sess_type = "shell"
-    pending_output = ""
-    try:
-        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
-            token = await _msf_login(client, base, username, password)
-            sessions = await _msf_rpc(client, base, "session.list", token)
-            if not isinstance(sessions, dict):
-                return []
-            key = _msf_session_id_key(session_id, sessions)
-            if key is None:
-                return []
-            sess_info = sessions[key]
-            sess_type = (sess_info.get("type") or "shell").lower()
-            # Drain pending buffer (read clears it on MSF side — fine for diagnostics)
-            try:
-                read_method = (
-                    "session.meterpreter_read" if sess_type == "meterpreter"
-                    else "session.shell_read"
-                )
-                read_resp = await _msf_rpc(client, base, read_method, token, key)
-                if isinstance(read_resp, dict):
-                    pending_output = (read_resp.get("data") or "")[:8000]
-            except Exception:
-                pass
-    except Exception:
-        return []
-    if sess_info is None:
-        return []
-
-    items: list[dict] = []
-    items.append({
-        "task_id": f"msf-session-{session_id}",
-        "cmdline": "",
-        "completed": True,
-        "text": "",
-        "message": (sess_info.get("info") or "").strip(),
-        "msg_type": "meta",
-        "start_time": sess_info.get("session_host") or "",
-        "finish_time": "",
-        "computer": (sess_info.get("info") or "").split(" @ ", 1)[-1].strip()
-                    if " @ " in (sess_info.get("info") or "") else "",
-        "user": (sess_info.get("info") or "").split(" @ ", 1)[0].strip()
-                if " @ " in (sess_info.get("info") or "") else "",
-        "raw": {**sess_info, "session_type": sess_type},
-    })
-    if pending_output.strip():
-        items.append({
-            "task_id": f"msf-session-{session_id}-buffer",
-            "cmdline": "",
-            "completed": True,
-            "text": pending_output,
-            "message": "pending output (drained from session ring buffer)",
-            "msg_type": "buffer",
-            "start_time": "",
-            "finish_time": "",
-            "computer": "",
-            "user": "",
-            "raw": {},
-        })
-    return items[:max(1, limit)]
-
-
 def _cred_matches_host(cred: dict, host: models.Host) -> bool:
     host_ips = set(host.ips or []) | ({host.ip} if host.ip else set())
     if cred.get("host") and cred.get("host") in host_ips:
@@ -1105,92 +845,6 @@ async def _adaptix_execute(cfg: dict, agent_id: str, commandline: str, wait_for_
         return result
 
 
-def _msf_session_id_key(session_id: str, sessions: dict):
-    """MSF returns session ids as ints over msgpack; UI passes them as strings."""
-    if session_id in sessions:
-        return session_id
-    try:
-        as_int = int(session_id)
-        if as_int in sessions:
-            return as_int
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-async def _msf_execute(
-    cfg: dict, session_id: str, commandline: str,
-    wait_for_output: bool = True, timeout_seconds: int = 12,
-) -> dict:
-    """
-    Execute a command on a Metasploit session via MSFRPC (msgpack).
-
-    - shell sessions:        session.shell_write + session.shell_read poll
-    - meterpreter sessions:  session.meterpreter_run_single + meterpreter_read
-
-    `session_id` is the numeric MSF session id (e.g. "1"). cfg fields:
-    `base_url`/`url`, `username`, `password` (or legacy `token`).
-    """
-    base = _msf_base_url(cfg)
-    username, password = _msf_creds(cfg)
-
-    result = {"accepted": False, "session_id": session_id, "commandline": commandline}
-    try:
-        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False),
-                                     timeout=max(30, timeout_seconds + 5)) as client:
-            token = await _msf_login(client, base, username, password)
-
-            # Detect session type
-            sessions = await _msf_rpc(client, base, "session.list", token)
-            if not isinstance(sessions, dict):
-                sessions = {}
-            key = _msf_session_id_key(session_id, sessions)
-            if key is None:
-                return {**result, "error": f"MSF session {session_id} not found"}
-            sess_info = sessions[key]
-            sess_type = (sess_info.get("type") or "shell").lower()
-            result["session_type"] = sess_type
-            result["accepted"] = True
-
-            # Write
-            if sess_type == "meterpreter":
-                await _msf_rpc(client, base, "session.meterpreter_run_single", token, key, commandline)
-            else:
-                await _msf_rpc(client, base, "session.shell_write", token, key, commandline + "\n")
-
-            if not wait_for_output:
-                return result
-
-            # Poll until output drains
-            read_method = (
-                "session.meterpreter_read" if sess_type == "meterpreter"
-                else "session.shell_read"
-            )
-            accumulated = ""
-            started = utcnow()
-            while (utcnow() - started).total_seconds() < max(3, timeout_seconds):
-                await asyncio.sleep(0.8)
-                try:
-                    chunk_resp = await _msf_rpc(client, base, read_method, token, key)
-                except Exception:
-                    continue
-                if not isinstance(chunk_resp, dict):
-                    continue
-                chunk = chunk_resp.get("data") or ""
-                if chunk:
-                    accumulated += chunk
-                elif accumulated:
-                    break
-            result["output"] = accumulated
-            return result
-    except httpx.ConnectError as e:
-        return {**result, "error": f"Cannot connect to MSFRPC at {base}: {e}"}
-    except RuntimeError as e:
-        return {**result, "error": str(e)}
-    except Exception as e:
-        return {**result, "error": f"MSFRPC execute error: {e}"}
-
-
 async def _cs_live_agents(cfg: dict) -> list[dict]:
     url = cfg["url"].rstrip("/")
     headers = {"Authorization": f"Bearer {cfg.get('token', '')}"}
@@ -1248,60 +902,10 @@ async def _sliver_live_agents(cfg: dict) -> list[dict]:
     return result
 
 
-async def _msf_live_agents(cfg: dict) -> list[dict]:
-    """
-    List active Metasploit sessions in the same shape as Adaptix live agents.
-
-    Used by the C2HostActionsPanel agent picker so an operator can pick an
-    MSF session to run `c2:exec` against, the same way they pick Adaptix
-    beacons today.
-    """
-    base = _msf_base_url(cfg)
-    username, password = _msf_creds(cfg)
-
-    try:
-        async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
-            token = await _msf_login(client, base, username, password)
-            sessions = await _msf_rpc(client, base, "session.list", token)
-            if not isinstance(sessions, dict):
-                return []
-    except Exception:
-        return []
-
-    result = []
-    for sid, s in sessions.items():
-        if not isinstance(s, dict):
-            continue
-        ip, hostname, username_str, os_str, sess_type = _msf_classify_session(s)
-        # MSF sessions don't have a clean "dead" state in the list — if
-        # /sessions returns it, treat as alive. Stale ones are pruned by MSF.
-        result.append({
-            "ip": ip,
-            "hostname": hostname,
-            "username": username_str,
-            "domain": "",
-            "os": os_str,
-            "arch": (s.get("arch") or "").lower(),
-            "process": "",  # MSF doesn't expose process for shell sessions
-            "pid": s.get("session_host") or "",
-            # Use the numeric session id as the "agent_id" so the picker can
-            # pass it back to /execute. session_type tagged so UI can show it.
-            "agent_id": str(sid),
-            "beacon_id": str(sid),
-            "session_type": sess_type,
-            "listener": s.get("via_payload") or "",
-            "alive": True,
-            "mark": "alive",
-            "last_seen": s.get("last_checkin") or "",
-        })
-    return result
-
-
 _LIVE_CONNECTORS: dict[str, Any] = {
     "adaptix":       _adaptix_live_agents,
     "cobalt_strike": _cs_live_agents,
     "sliver":        _sliver_live_agents,
-    "metasploit":    _msf_live_agents,
 }
 
 
@@ -1684,8 +1288,6 @@ async def get_agent_tasks(
     try:
         if c2_type == "adaptix":
             return await _adaptix_fetch_agent_tasks(cfg, agent_id, max(1, min(limit, 100)))
-        if c2_type == "metasploit":
-            return await _msf_fetch_session_tasks(cfg, agent_id, max(1, min(limit, 100)))
         raise HTTPException(400, f"Agent task history not supported for C2 type {c2_type!r}")
     except HTTPException:
         raise
@@ -1742,8 +1344,8 @@ async def get_host_actions(
                     "mark": agent.get("mark") or "",
                     "last_seen": agent.get("last_seen") or "",
                 })
-            # Cred fetch + BOF catalog are Adaptix-specific (MSF has no BOFs,
-            # and MSF creds already arrive via _msf_sync as rootnotes Cred rows)
+            # Cred fetch + BOF catalog are Adaptix-specific. Other C2 types
+            # (if added later) should provide creds through their own sync.
             if c2_type == "adaptix":
                 try:
                     creds = await _adaptix_fetch_creds(cfg)
@@ -1790,9 +1392,8 @@ async def resolve_c2_cred(
     Lookup the cred selected for a C2 execution.
 
     `credential_source` ∈ {"rootnotes", "c2"}. For "c2" we ask the integration
-    for its own cred list — Adaptix has a dedicated endpoint, MSF doesn't have
-    a clean per-cred lookup so we read from rootnotes (`_msf_sync` already
-    imports MSF creds as rootnotes Cred rows).
+    for its own cred list — currently only Adaptix exposes this. Other C2
+    types fall through to the rootnotes Cred table.
     """
     if not credential_id:
         return None
@@ -1814,7 +1415,7 @@ async def resolve_c2_cred(
     }
 
 
-SUPPORTED_EXEC_C2_TYPES = ("adaptix", "metasploit")
+SUPPORTED_EXEC_C2_TYPES = ("adaptix",)
 
 
 async def perform_c2_command(
@@ -1833,9 +1434,9 @@ async def perform_c2_command(
 ) -> tuple[dict, models.HostActivity, str]:
     """
     Core C2 command execution — shared by the HTTP endpoint and the queued
-    playbook step. Dispatches by `cfg["type"]`:
-      - adaptix     → `_adaptix_execute` (agent_id = a_id from Adaptix)
-      - metasploit  → `_msf_execute`     (agent_id = MSF session number)
+    playbook step. Currently Adaptix-only; `SUPPORTED_EXEC_C2_TYPES` is the
+    extension point — adding a new framework means adding to that tuple
+    plus a branch below.
 
     Renders the command (cred substitution), calls the connector, records a
     HostActivity, broadcasts the event. Returns (raw_result_dict, activity_row,
@@ -1849,12 +1450,8 @@ async def perform_c2_command(
             f"Supported: {', '.join(SUPPORTED_EXEC_C2_TYPES)}"
         )
     rendered_command = _render_command_with_cred(commandline, cred, host)
-    if c2_type == "adaptix":
-        result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
-        summary = f"Executed via Adaptix on agent {agent_id}"
-    else:  # metasploit
-        result = await _msf_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
-        summary = f"Executed via Metasploit session {agent_id} ({result.get('session_type', 'shell')})"
+    result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
+    summary = f"Executed via Adaptix on agent {agent_id}"
     output = result.get("output") or result.get("message") or result.get("error") or ""
     activity = models.HostActivity(
         id=new_id("ha"),

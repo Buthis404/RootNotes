@@ -447,7 +447,6 @@ const C2_TYPES = [
   { id: 'cobalt_strike', label: 'Cobalt Strike', color: '#cc2233', hint: 'Team Server REST API (4.7+). Token: CS Preferences → REST API' },
   { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'REST API (multiplayer mode). Token: sliver-client generate-token' },
   { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API under /endpoint path. Username + password (or token). URL: https://host:port' },
-  { id: 'metasploit',    label: 'Metasploit',     color: '#f09a3a', hint: 'MSFRPC (msfrpcd -P <password> -S -f, port 55553). Username + password. URL: http://host:55553' },
 ];
 
 const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0, has_token: false, has_password: false };
@@ -501,7 +500,7 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
   }, [sessions]);
 
   const acc = accent || '#5b8af5';
-  const typeColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', sliver: '#8bc34a', metasploit: '#f09a3a' };
+  const typeColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', sliver: '#8bc34a' };
 
   return (
     <div style={{ marginTop: 20, borderTop: '1px solid #1e2230', paddingTop: 16 }}>
@@ -819,45 +818,26 @@ function C2Panel({ pid, accent }) {
             </FieldRow>
           </div>
 
-          {form.type === 'adaptix' || form.type === 'metasploit' ? (
+          {form.type === 'adaptix' ? (
             <>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <FieldRow label="Username">
-                  <Input
-                    value={form.username}
-                    onChange={v => setF('username', v)}
-                    placeholder={form.type === 'metasploit' ? 'msf' : 'operator1'}
-                  />
+                  <Input value={form.username} onChange={v => setF('username', v)} placeholder="operator1" />
                 </FieldRow>
                 <FieldRow label="Password">
-                  <Input
-                    value={form.password}
-                    onChange={v => setF('password', v)}
-                    placeholder={editing && form.has_password
-                      ? 'Stored - enter new to replace'
-                      : (form.type === 'metasploit'
-                          ? 'msfrpcd -P <password>'
-                          : 'teamserver password')}
-                  />
+                  <Input value={form.password} onChange={v => setF('password', v)} placeholder={editing && form.has_password ? 'Stored - enter new to replace' : 'teamserver password'} />
                 </FieldRow>
               </div>
-              {form.type === 'adaptix' && (
-                <FieldRow label="Endpoint path">
-                  <Input value={form.endpoint || '/endpoint'} onChange={v => setF('endpoint', v)} placeholder="/endpoint" monospace />
-                </FieldRow>
-              )}
+              <FieldRow label="Endpoint path">
+                <Input value={form.endpoint || '/endpoint'} onChange={v => setF('endpoint', v)} placeholder="/endpoint" monospace />
+              </FieldRow>
             </>
           ) : null}
 
-          {form.type !== 'metasploit' && (
-            <FieldRow label={form.type === 'cobalt_strike' ? 'REST API Token (Bearer)' : 'API Token'}>
-              <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : 'token...')} monospace />
-            </FieldRow>
-          )}
-          {editing && (
-            ((form.type === 'adaptix' || form.type === 'metasploit') && form.has_password)
-            || (form.type !== 'adaptix' && form.type !== 'metasploit' && form.has_token)
-          ) && (
+          <FieldRow label={form.type === 'cobalt_strike' ? 'REST API Token (Bearer)' : 'API Token'}>
+            <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : 'token...')} monospace />
+          </FieldRow>
+          {editing && ((form.type === 'adaptix' && form.has_password) || (form.type !== 'adaptix' && form.has_token)) && (
             <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
               Stored integration secrets are write-only. Leave blank to keep current values.
             </div>
