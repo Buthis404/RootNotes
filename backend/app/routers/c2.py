@@ -1,11 +1,12 @@
 """
-C2 framework integrations: Sliver, Adaptix.
+C2 framework integrations: Sliver, Adaptix, Mythic.
 
 Each integration is stored as an encrypted config in global_settings.
 Sync pulls sessions/agents/creds from the C2 and auto-populates
 hosts, creds, and optionally findings.
 """
 import asyncio
+import json
 import re
 import secrets
 from datetime import datetime
@@ -143,7 +144,7 @@ def _safe_integration(cfg: dict) -> dict:
 
 class C2IntegrationCreate(BaseModel):
     name: str
-    type: str                        # sliver | adaptix
+    type: str                        # sliver | adaptix | mythic
     url: str
     token: str = ""
     username: str = ""
@@ -199,7 +200,7 @@ def create_integration(
     _: models.User = Depends(require_admin),
 ):
     _require_c2()
-    if body.type not in ("sliver", "adaptix"):
+    if body.type not in ("sliver", "adaptix", "mythic"):
         raise HTTPException(400, f"Unknown C2 type: {body.type}")
     integrations = _load_integrations(db)
     cfg = body.model_dump()
@@ -453,9 +454,157 @@ async def _adaptix_sync(cfg: dict) -> dict:
     return {"hosts": result_hosts, "creds": result_creds}
 
 
+# ── Mythic ────────────────────────────────────────────────────────────
+#
+# Mythic exposes a Hasura GraphQL endpoint at /graphql/v1/graphql.
+# Auth: POST /auth → JWT, or static `apitoken` header (set in Mythic UI).
+# Default port: 7443 (HTTPS). cfg["url"] should be https://host:7443.
+
+async def _mythic_auth_headers(cfg: dict, client: httpx.AsyncClient) -> dict[str, str]:
+    """Return headers carrying either an apitoken or a fresh JWT."""
+    token = (cfg.get("token") or "").strip()
+    if token:
+        return {"apitoken": token}
+    username = cfg.get("username") or "mythic_admin"
+    password = cfg.get("password", "")
+    url = cfg["url"].rstrip("/")
+    r = await client.post(
+        f"{url}/auth",
+        json={"username": username, "password": password, "scripting_version": "0.1"},
+    )
+    r.raise_for_status()
+    data = r.json()
+    jwt = data.get("access_token") or data.get("token") or ""
+    if not jwt:
+        raise HTTPException(400, "Mythic login: no access_token in response")
+    return {"Authorization": f"Bearer {jwt}"}
+
+
+async def _mythic_graphql(cfg: dict, client: httpx.AsyncClient, query: str, headers: dict) -> dict:
+    url = cfg["url"].rstrip("/")
+    r = await client.post(
+        f"{url}/graphql/",
+        json={"query": query},
+        headers=headers,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get("errors"):
+        raise HTTPException(400, f"Mythic GraphQL error: {data['errors']}")
+    return data.get("data", {})
+
+
+_MYTHIC_CALLBACK_FIELDS = """
+id
+agent_callback_id
+host
+user
+domain
+ip
+external_ip
+os
+architecture
+pid
+process_name
+active
+integrity_level
+description
+last_checkin
+init_callback
+"""
+
+_MYTHIC_CRED_FIELDS = """
+id
+account
+realm
+credential_text
+type
+comment
+"""
+
+
+async def _mythic_sync(cfg: dict) -> dict:
+    """
+    Mythic 3.x callbacks → hosts, credentials → creds.
+    """
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
+        headers = await _mythic_auth_headers(cfg, client)
+        query = (
+            "query RootNotesSync {"
+            f"  callback {{ {_MYTHIC_CALLBACK_FIELDS} }}"
+            f"  credential {{ {_MYTHIC_CRED_FIELDS} }}"
+            "}"
+        )
+        data = await _mythic_graphql(cfg, client, query, headers)
+
+    callbacks = data.get("callback") or []
+    creds_raw = data.get("credential") or []
+
+    result_hosts = []
+    for cb in callbacks:
+        if not cb:
+            continue
+        ip = (cb.get("ip") or "").strip()
+        # Mythic sometimes stores ip as JSON-array string like "[\"10.0.0.5\"]"
+        if ip.startswith("[") and ip.endswith("]"):
+            try:
+                arr = json.loads(ip)
+                if isinstance(arr, list) and arr:
+                    ip = str(arr[0]).strip()
+            except Exception:
+                pass
+        if not ip:
+            ip = (cb.get("external_ip") or "").strip()
+        alive = bool(cb.get("active", True))
+        note_parts = []
+        if cb.get("description"):
+            note_parts.append(cb["description"])
+        if cb.get("integrity_level") is not None:
+            note_parts.append(f"Integrity: {cb['integrity_level']}")
+        if cb.get("process_name"):
+            note_parts.append(f"Process: {cb['process_name']} (PID {cb.get('pid', '?')})")
+        if cb.get("last_checkin"):
+            note_parts.append(f"Last check-in: {cb['last_checkin']}")
+        result_hosts.append({
+            "ip": ip,
+            "hostname": (cb.get("host") or "").strip(),
+            "os": (cb.get("os") or "").strip(),
+            "domain": (cb.get("domain") or "").strip(),
+            "username": (cb.get("user") or "").strip(),
+            "arch": (cb.get("architecture") or "").strip(),
+            "process": (cb.get("process_name") or "").strip(),
+            "pid": cb.get("pid"),
+            "alive": alive,
+            "beacon_id": str(cb.get("agent_callback_id") or cb.get("id") or "") if alive else "",
+            "note": "\n".join(note_parts),
+            "source": "mythic",
+        })
+
+    result_creds = []
+    for c in creds_raw:
+        if not c:
+            continue
+        account = (c.get("account") or "").strip()
+        if not account:
+            continue
+        ctype_raw = (c.get("type") or "plaintext").lower()
+        ctype = "hash" if ("hash" in ctype_raw or "ntlm" in ctype_raw or "kerberos" in ctype_raw) else "plain"
+        result_creds.append({
+            "username": account,
+            "secret": c.get("credential_text") or "",
+            "type": ctype,
+            "realm": (c.get("realm") or "").strip(),
+            "host": "",
+            "source": "mythic",
+        })
+
+    return {"hosts": result_hosts, "creds": result_creds}
+
+
 _CONNECTORS = {
     "sliver": _sliver_sync,
     "adaptix": _adaptix_sync,
+    "mythic": _mythic_sync,
 }
 
 
@@ -817,9 +966,50 @@ async def _sliver_live_agents(cfg: dict) -> list[dict]:
     return result
 
 
+async def _mythic_live_agents(cfg: dict) -> list[dict]:
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
+        headers = await _mythic_auth_headers(cfg, client)
+        query = (
+            "query RootNotesLiveAgents {"
+            f"  callback {{ {_MYTHIC_CALLBACK_FIELDS} }}"
+            "}"
+        )
+        data = await _mythic_graphql(cfg, client, query, headers)
+    callbacks = data.get("callback") or []
+    result = []
+    for cb in callbacks:
+        if not cb:
+            continue
+        ip = (cb.get("ip") or "").strip()
+        if ip.startswith("[") and ip.endswith("]"):
+            try:
+                arr = json.loads(ip)
+                if isinstance(arr, list) and arr:
+                    ip = str(arr[0]).strip()
+            except Exception:
+                pass
+        alive = bool(cb.get("active", True))
+        result.append({
+            "ip": ip or (cb.get("external_ip") or "").strip(),
+            "hostname": (cb.get("host") or "").strip(),
+            "username": (cb.get("user") or "").strip(),
+            "domain": (cb.get("domain") or "").strip(),
+            "os": (cb.get("os") or "").strip(),
+            "arch": (cb.get("architecture") or "").strip(),
+            "process": (cb.get("process_name") or "").strip(),
+            "beacon_id": str(cb.get("agent_callback_id") or cb.get("id") or ""),
+            "listener": "",
+            "alive": alive,
+            "mark": "alive" if alive else "dead",
+            "last_seen": cb.get("last_checkin") or "",
+        })
+    return result
+
+
 _LIVE_CONNECTORS: dict[str, Any] = {
     "adaptix":       _adaptix_live_agents,
     "sliver":        _sliver_live_agents,
+    "mythic":        _mythic_live_agents,
 }
 
 
