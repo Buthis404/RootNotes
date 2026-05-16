@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Smart Build — Attacker traffic routing + region read-after-write fix
+
+Two-part change so the network map shows the actual traffic path from the
+attacker into target scopes (e.g. `Attacker → GW_EXTERNAL → VPN-GW → SDOTSON`
+in the Bootcamp project).
+
+**Fix: region read-after-write inside Smart Build**
+
+After `replace_regions(...)` (which does `delete(synchronize_session=False)`
++ `add()`), the very next `get_regions(network.id, db)` call returned `[]`
+because SA hadn't flushed the in-flight session. As a consequence:
+- `region_by_cidr` was empty
+- `entry_region` / `anchor_region` were `None`
+- The attacker uplink edge (`Attacker → entry-gateway`) was silently
+  skipped on every build
+
+Added an explicit `db.flush()` right after `replace_regions(...)` so the
+following `get_regions` sees the freshly upserted rows.
+
+**Auto-infer scope.via_host_id when no host matches the gateway**
+
+For non-entry scopes that don't have `via_host_id` set and whose
+`gateway_ip` doesn't match any host (single-homed or otherwise), Smart
+Build now picks a junction host (`role` ∈ `router / firewall /
+network_device / pivot / jump_host`, or `tags` ∩ `{router, firewall,
+gateway, vpn, pivot}`, or hostname `VPN-*` / `GW-*` / `FW-*` / `ROUTER-*` /
+`EDGE-*` / `PROXY-*`) outside the scope to serve as a pivot. Preference
+is given to junction hosts in the entry scope.
+
+`auto_via_host_assigned` counter returned in the result. In Bootcamp this
+is 0 because VPN-GW is **multi-homed** (`ips=[10.124.1.253, 10.154.17.1]`)
+— the existing multi-IP gateway match already covers it. The new logic
+kicks in when the operator declared a `gateway_ip` for a scope but never
+created a host for it.
+
+Effect on Bootcamp (`p105ca8e7`):
+
+| Edge | Source | Notes |
+|------|--------|-------|
+| Attacker → GW_EXTERNAL | uplink (auto) | entry-gateway from `is_entry` scope |
+| GW_EXTERNAL ⇄ VPN-GW | same_subnet | DMZ neighbours |
+| VPN-GW ⇄ SDOTSON / DC / DC-2 / EXCHANGE / … | same_subnet | VPN-GW multi-homed in Internal |
+| DC → SDOTSON | domain_member | from P4 |
+| VPN-GW → SDOTSON | c2_session | from observed HostActivity |
+
+---
+
 ### Smart Build — Auto-role inference
 
 Smart Build now infers and writes `host.role` for hosts where the operator left it empty or `unknown`. Operator-set roles are never overwritten.

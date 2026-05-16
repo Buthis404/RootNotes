@@ -1461,6 +1461,63 @@ def _run_smart_build(
     except Exception:
         pass
 
+    # Auto-infer via_host_id for non-entry scopes that don't have one set and
+    # whose gateway_ip doesn't match any host. Picks the first junction-named
+    # host (VPN-*, GW-*, FW-*, ROUTER-*, EDGE-*) with router/network_device/
+    # firewall role to serve as a pivot. Without this Smart Build can't chain
+    # traffic from the attacker into target scopes that the operator didn't
+    # explicitly wire up.
+    junction_candidates: list = []
+    for h in all_hosts:
+        hostname_up = (h.hostname or "").upper()
+        role_low = (h.role or "").lower()
+        tags_low = {(t or "").lower() for t in (h.tags or [])}
+        is_junction = (
+            role_low in ("router", "firewall", "network_device", "pivot", "jump_host")
+            or bool(tags_low & {"router", "firewall", "gateway", "vpn", "pivot"})
+            or any(hostname_up.startswith(p) or hostname_up.startswith(p + "-") or hostname_up.startswith(p + "_")
+                   for p in ("VPN", "GW", "FW", "ROUTER", "EDGE", "PROXY"))
+        )
+        if is_junction and not h.is_attacker:
+            junction_candidates.append(h)
+    auto_via_count = 0
+    for sr in scope_region_defs:
+        if sr.get("is_entry") or sr.get("via_host_id"):
+            continue
+        gw_ip = (sr.get("gateway_ip") or "").strip()
+        gw_matches = any(
+            (gw_ip and ((h.ip or "") == gw_ip or gw_ip in {str(ip).strip() for ip in (h.ips or [])}))
+            for h in all_hosts
+        )
+        if gw_matches:
+            continue
+        net_obj = sr["net_obj"]
+        entry_cidrs = []
+        for item in scope_region_defs:
+            if not item.get("is_entry"):
+                continue
+            try:
+                entry_cidrs.append(ipaddress.ip_network(item["cidr"], strict=False))
+            except ValueError:
+                pass
+
+        def _h_in_entry(h, _entry_cidrs=entry_cidrs):
+            try:
+                addr = ipaddress.ip_address(h.ip or "")
+            except ValueError:
+                return False
+            return any(addr in n for n in _entry_cidrs)
+
+        candidates_outside = [
+            h for h in junction_candidates
+            if h.ip and not _ip_in_network(h.ip, net_obj)
+        ]
+        candidates_outside.sort(key=lambda h: (0 if _h_in_entry(h) else 1))
+        if candidates_outside:
+            sr["via_host_id"] = candidates_outside[0].id
+            sr["auto_via_host"] = True
+            auto_via_count += 1
+
     def _annotate_subnet(ip: str) -> str:
         try:
             addr = ipaddress.ip_address(ip)
@@ -2237,6 +2294,12 @@ def _run_smart_build(
             regions_added += 1
 
         replace_regions(network.id, network.pid, existing_regions, db)
+        # Flush so the get_regions() call below sees the freshly upserted rows
+        # — replace_regions does delete(synchronize_session=False) + add() and
+        # without an explicit flush SA's session can return [] for the next
+        # query on the same network, breaking entry_region / anchor_region
+        # detection and the attacker uplink edge.
+        db.flush()
 
     try:
         scope_gateway_host_ids: dict[str, str] = {}
@@ -2364,6 +2427,7 @@ def _run_smart_build(
         "regions_added": regions_added,
         "tier_counts": tier_counts,
         "roles_assigned": roles_assigned,
+        "auto_via_host_assigned": auto_via_count,
         "last_smart_build": build_ts,
         "dry_run": dry_run,
     }
