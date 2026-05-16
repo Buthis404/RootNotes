@@ -519,9 +519,13 @@ async def _run_c2_exec_job(db, job: models.Job, cancel_token: CancellationToken)
         finish_job(db, job, status="failed",
                    error_output=f"C2 integration {integration_id} not visible in project")
         return
-    if cfg.get("type") != "adaptix":
-        finish_job(db, job, status="failed",
-                   error_output=f"Only Adaptix execution is supported (got: {cfg.get('type')})")
+    from ..routers.c2 import SUPPORTED_EXEC_C2_TYPES
+    if cfg.get("type") not in SUPPORTED_EXEC_C2_TYPES:
+        finish_job(
+            db, job, status="failed",
+            error_output=f"Execution supported only for: {', '.join(SUPPORTED_EXEC_C2_TYPES)} "
+                         f"(integration is {cfg.get('type')!r})",
+        )
         return
 
     try:
