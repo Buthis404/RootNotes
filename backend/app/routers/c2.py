@@ -1491,6 +1491,79 @@ async def get_host_actions(
     }
 
 
+async def resolve_c2_cred(
+    db: Session, pid: str, credential_id: str, credential_source: str, cfg: dict
+) -> dict | None:
+    """Lookup the cred selected for a C2 execution, in either rootnotes or c2 source."""
+    if not credential_id:
+        return None
+    if credential_source == "c2":
+        creds = await _adaptix_fetch_creds(cfg)
+        return next(
+            (_normalize_c2_cred(item, cfg["id"]) for item in creds
+             if str(item.get("c_creds_id") or item.get("id") or "") == credential_id),
+            None,
+        )
+    cred = db.query(models.Cred).filter(models.Cred.id == credential_id, models.Cred.pid == pid).first()
+    if not cred:
+        return None
+    return {
+        "id": cred.id, "source": "rootnotes",
+        "username": cred.username, "secret": decrypt_str(cred.secret),
+        "domain": cred.domain, "host": cred.host, "type": cred.type,
+    }
+
+
+async def perform_c2_command(
+    db: Session,
+    pid: str,
+    host: models.Host,
+    cfg: dict,
+    agent_id: str,
+    commandline: str,
+    mode: str,
+    cred: dict | None,
+    wait_for_output: bool,
+    timeout_seconds: int,
+    title: str,
+    actor_username: str = "",
+) -> tuple[dict, models.HostActivity, str]:
+    """
+    Core C2 command execution — shared by the synchronous HTTP endpoint and
+    the queued playbook step. Renders the command, calls the Adaptix
+    connector, records a HostActivity, broadcasts the event.
+
+    Returns (raw_result_dict, activity_row, rendered_command).
+    Raises on connector failure — caller decides how to surface the error
+    (HTTP 400 vs. job finish_job(status='failed')).
+    """
+    rendered_command = _render_command_with_cred(commandline, cred, host)
+    result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
+    output = result.get("output") or result.get("message") or ""
+    activity = models.HostActivity(
+        id=new_id("ha"),
+        pid=pid,
+        host_id=host.id,
+        title=title,
+        activity_type="postex" if mode == "command" else "exploit",
+        command=rendered_command,
+        summary=f"Executed via Adaptix on agent {agent_id}",
+        output=output,
+        status="done",
+        ts=ts_now(),
+    )
+    db.add(activity)
+    db.commit()
+    bcast(pid, "host_activity", "create", schemas.HostActivity.model_validate(activity).model_dump())
+    log_event(
+        db, pid, actor_username, "host_activity", "create",
+        f"{title} on {host.ip or host.hostname}",
+        {"host_id": host.id, "integration_id": cfg.get("id")},
+    )
+    db.commit()
+    return result, activity, rendered_command
+
+
 @router.post("/execute/{pid}")
 async def execute_host_action(
     pid: str,
@@ -1514,30 +1587,15 @@ async def execute_host_action(
     if not body.commandline.strip():
         raise HTTPException(400, "commandline is required")
 
-    selected_cred = None
-    if body.credential_id:
-        if body.credential_source == "c2":
-            creds = await _adaptix_fetch_creds(cfg)
-            selected_cred = next((_normalize_c2_cred(item, cfg["id"]) for item in creds if str(item.get("c_creds_id") or item.get("id") or "") == body.credential_id), None)
-        else:
-            cred = db.query(models.Cred).filter(models.Cred.id == body.credential_id, models.Cred.pid == pid).first()
-            if cred:
-                selected_cred = {
-                    "id": cred.id,
-                    "source": "rootnotes",
-                    "username": cred.username,
-                    "secret": decrypt_str(cred.secret),
-                    "domain": cred.domain,
-                    "host": cred.host,
-                    "type": cred.type,
-                }
+    selected_cred = await resolve_c2_cred(
+        db, pid, body.credential_id, body.credential_source, cfg,
+    )
 
-    rendered_command = _render_command_with_cred(body.commandline.strip(), selected_cred, host)
     title = (body.title or ("Adaptix BOF" if body.mode == "bof" else "Adaptix command")).strip()
     job = start_job(
         db, pid, "c2_exec", title,
         target=host.ip or host.hostname or host.id,
-        command=rendered_command,
+        command=body.commandline.strip(),
         created_by=user.username or "",
         connector_key="adaptix",
         operation="bof_execute" if body.mode == "bof" else "command_execute",
@@ -1546,26 +1604,12 @@ async def execute_host_action(
         request_json=body.model_dump(),
     )
     try:
-        result = await _adaptix_execute(cfg, body.agent_id.strip(), rendered_command, body.wait_for_output, body.timeout_seconds)
-        output = result.get("output") or result.get("message") or ""
-        finish_job(db, job, status="done", output=output, result=result)
-        activity = models.HostActivity(
-            id=new_id("ha"),
-            pid=pid,
-            host_id=host.id,
-            title=title,
-            activity_type="postex" if body.mode == "command" else "exploit",
-            command=rendered_command,
-            summary=f"Executed via Adaptix on agent {body.agent_id}",
-            output=output,
-            status="done",
-            ts=ts_now(),
+        result, activity, rendered_command = await perform_c2_command(
+            db, pid, host, cfg, body.agent_id.strip(), body.commandline.strip(),
+            body.mode, selected_cred, body.wait_for_output, body.timeout_seconds,
+            title, actor_username=user.username or "",
         )
-        db.add(activity)
-        db.commit()
-        bcast(pid, "host_activity", "create", schemas.HostActivity.model_validate(activity).model_dump())
-        log_event(db, pid, user.username or "", "host_activity", "create", f"{title} on {host.ip or host.hostname}", {"host_id": host.id, "integration_id": cfg.get("id")})
-        db.commit()
+        finish_job(db, job, status="done", output=result.get("output") or "", result=result)
         return {"ok": True, "job_id": job.id, "activity_id": activity.id, "result": result, "rendered_command": rendered_command}
     except Exception as e:
         finish_job(db, job, status="failed", error_output=str(e))
