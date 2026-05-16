@@ -1,5 +1,38 @@
 # RootNotes — Changelog
 
+## v0.3.0 — 2026-05-16
+
+### C2 integrations
+- **Mythic** added with Adaptix parity: GraphQL sync (callbacks +
+  credentials), live agents, execute via `createTask` mutation,
+  beacon/session task history. Auth via apitoken header or
+  username/password → JWT. Live-validated against Mythic 3.4.0.
+- **Sliver** rewritten on native gRPC via `sliver-py` (the previous
+  HTTP connector was fictitious — Sliver has no public REST API in
+  OSS). Single "Operator Config (JSON)" field, sessions + beacons,
+  execute, beacon task history.
+- **Cobalt Strike** removed (was a fictitious REST API stub).
+- **Metasploit** added in v0.2.x then removed (operational complexity
+  too high for current engagement profile).
+
+### Topology / Smart Build
+- Pivot through junction devices (VPN-GW etc.) with via_host_id
+  auto-Scope; multi-hop session routing; key-host filter to reduce
+  visual noise; P6.5 auto-pivot block.
+
+### Access / permissions
+- Unified `_evaluate()` shared across `check_pid_access`,
+  `check_object_access`, `user_has_permission`. `permissions.py`
+  reduced to a pure data layer.
+
+### Network view
+- Route semantics on edges: transport + kind chips, transport colour
+  legend, verify/unverify-edge from the context menu.
+
+### Frontend reliability
+- `lazyWithReload` auto-recovers when the user has a stale chunk hash
+  after a frontend rebuild — no more red-screen on dynamic import.
+
 ## Unreleased
 
 ### Smart Build — Attacker traffic routing + region read-after-write fix
