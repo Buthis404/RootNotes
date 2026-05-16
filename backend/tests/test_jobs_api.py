@@ -13,11 +13,23 @@ from app.core.job_tracker import queue_job, finish_job
 # ---------------------------------------------------------------------------
 
 def _setup_and_login(client: TestClient) -> dict:
-    """Return auth headers for an admin user, creating one if needed."""
+    """Return auth headers for an admin user, creating one if needed.
+
+    Login (B1-1) sets an httpOnly cookie instead of returning a token in
+    the body. The auth middleware accepts either the cookie OR an
+    Authorization Bearer header, so we extract the token from the cookie
+    and surface it as a header for tests that pass `headers=auth`.
+    """
     client.post("/api/auth/setup", json={"username": "admin", "password": "testpass"})
     resp = client.post("/api/auth/login", json={"username": "admin", "password": "testpass"})
     assert resp.status_code == 200, resp.text
-    token = resp.json()["access_token"]
+    from app.core.config import COOKIE_NAME
+    token = resp.cookies.get(COOKIE_NAME, "")
+    assert token, f"No '{COOKIE_NAME}' cookie set on login response. Cookies: {dict(resp.cookies)}"
+    # Drop the persistent cookie jar — tests pass auth explicitly via the
+    # returned Authorization header so that requests without `headers=auth`
+    # are genuinely unauthenticated (e.g. test_unauthenticated_returns_401).
+    client.cookies.clear()
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -126,9 +138,14 @@ class TestListJobs:
         assert resp.status_code == 200
         assert len(resp.json()) <= 2
 
-    def test_unknown_project_forbidden(self, client: TestClient, auth: dict):
+    def test_unknown_project_returns_empty_for_admin(self, client: TestClient, auth: dict):
+        """Global admin bypasses project membership checks (access.py::_evaluate),
+        so a nonexistent project just yields an empty job list rather than 404.
+        For a non-admin user the membership check would 404 — covered in
+        test_access.py::TestMembershipRequired."""
         resp = client.get("/api/projects/nonexistent/jobs", headers=auth)
-        assert resp.status_code in (403, 404)
+        assert resp.status_code == 200
+        assert resp.json() == []
 
     def test_unauthenticated_returns_401(self, client: TestClient, pid: str):
         resp = client.get(f"/api/projects/{pid}/jobs")

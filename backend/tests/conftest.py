@@ -20,6 +20,11 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
 from app.main import app
 
+# Disable rate limiting during tests — B4-1 caps /api/auth/login to 5/minute,
+# which breaks any suite that authenticates more than 5 times per run.
+from app.core.limiter import limiter
+limiter.enabled = False
+
 DEFAULT_TEST_URL = "postgresql://rtnotes:rtnotes_secret@db:5432/rtnotes_test"
 SQLALCHEMY_TEST_URL = os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_URL)
 
@@ -42,10 +47,21 @@ def setup_db():
 
 @pytest.fixture()
 def db():
-    """Session per test, rolled back on teardown."""
+    """
+    Session per test, rolled back on teardown.
+
+    `join_transaction_mode="create_savepoint"` turns every `session.commit()`
+    into a SAVEPOINT release within the outer connection-level transaction.
+    Without this, route handlers that call `db.commit()` would consume the
+    outer transaction and the final `rollback()` would no-op — letting state
+    bleed between tests.
+    """
     connection = engine.connect()
     transaction = connection.begin()
-    session = TestingSessionLocal(bind=connection)
+    session = TestingSessionLocal(
+        bind=connection,
+        join_transaction_mode="create_savepoint",
+    )
     try:
         yield session
     finally:

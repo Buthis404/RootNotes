@@ -4,13 +4,21 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.core.utils import new_id
+from app.core.network_data import upsert_node, upsert_edge
 
 
 def _setup_and_login(client: TestClient) -> dict:
+    """Auth helper — extracts token from httpOnly cookie (B1-1) and exposes
+    it as a Bearer header so tests can still pass `headers=auth` explicitly.
+    Drops the cookie jar so unauthenticated requests are genuinely so."""
+    from app.core.config import COOKIE_NAME
     client.post("/api/auth/setup", json={"username": "admin", "password": "testpass"})
     resp = client.post("/api/auth/login", json={"username": "admin", "password": "testpass"})
     assert resp.status_code == 200, resp.text
-    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+    token = resp.cookies.get(COOKIE_NAME, "")
+    assert token, f"No '{COOKIE_NAME}' cookie on login response"
+    client.cookies.clear()
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _create_project(client: TestClient, headers: dict) -> str:
@@ -40,27 +48,28 @@ def test_attack_graph_includes_verified_access_edges(client: TestClient, db: Ses
     )
     network = models.Network(
         id=new_id("net"), pid=pid, name="Default Network", background="#07080b",
-        nodes_json=[
-            {"id": "n_att", "host_id": attacker.id, "label": "attacker", "ip": attacker.ip, "zone_type": "external"},
-            {"id": "n_tgt", "host_id": target.id, "label": "dc01", "ip": target.ip, "zone_type": "internal"},
-        ],
-        edges_json=[
-            {
-                "id": "edg1",
-                "from": "n_att",
-                "to": "n_tgt",
-                "type": "local_admin",
-                "label": "local admin",
-                "confidence": 1.0,
-                "source": "cred_validation",
-                "reason": "Credential validated via SMB",
-                "state": "observed",
-                "verified": True,
-            }
-        ],
         meta_json={},
     )
     db.add_all([attacker, target, cred, network])
+    db.commit()
+
+    # Nodes/edges now live in dedicated tables (B6 split), not JSON columns.
+    # `zone_type` isn't a dedicated column on NetworkNode — `upsert_node`
+    # routes unknown keys into `extra_json` and `_node_to_dict` merges them back.
+    upsert_node(network.id, pid, {
+        "id": "n_att", "host_id": attacker.id, "label": "attacker",
+        "ip": attacker.ip, "zone_type": "external",
+    }, db)
+    upsert_node(network.id, pid, {
+        "id": "n_tgt", "host_id": target.id, "label": "dc01",
+        "ip": target.ip, "zone_type": "internal",
+    }, db)
+    upsert_edge(network.id, pid, {
+        "id": "edg1", "from": "n_att", "to": "n_tgt",
+        "type": "local_admin", "label": "local admin", "confidence": 1.0,
+        "source": "cred_validation", "reason": "Credential validated via SMB",
+        "state": "observed", "verified": True, "is_manual": False,
+    }, db)
     db.commit()
 
     resp = client.get(f"/api/projects/{pid}/attack-graph", headers=headers)

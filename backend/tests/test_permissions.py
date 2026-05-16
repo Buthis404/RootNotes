@@ -42,8 +42,11 @@ class TestEditorPermissions:
     def test_editor_can_create_hosts(self):
         assert has_permission("editor", "hosts.create")
 
-    def test_editor_cannot_read_secret(self):
-        assert not has_permission("editor", "credentials.read_secret")
+    def test_editor_can_read_secret(self):
+        """Editor can write creds (incl. update), so reading the plaintext
+        is implied — restricting read while allowing write would leak the
+        write surface (re-saving with the same value)."""
+        assert has_permission("editor", "credentials.read_secret")
 
     def test_editor_cannot_manage_members(self):
         assert not has_permission("editor", "project.manage_members")
@@ -56,8 +59,10 @@ class TestOperatorPermissions:
     def test_operator_cannot_delete_hosts(self):
         assert not has_permission("operator", "hosts.delete")
 
-    def test_operator_cannot_read_secret(self):
-        assert not has_permission("operator", "credentials.read_secret")
+    def test_operator_can_read_secret(self):
+        """Operator can update creds, so read_secret is part of that surface
+        (same reasoning as editor)."""
+        assert has_permission("operator", "credentials.read_secret")
 
 
 class TestViewerPermissions:
