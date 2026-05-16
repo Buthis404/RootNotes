@@ -25,8 +25,9 @@ class TestNormalizeDomain:
     def test_only_dots_returns_empty(self):
         assert normalize_domain("...") == ""
 
-    def test_single_dot(self):
-        assert normalize_domain(".") == "."
+    def test_single_dot_treated_as_empty(self):
+        """A bare '.' carries no semantic domain info — collapse to ''."""
+        assert normalize_domain(".") == ""
 
     def test_normal_fqdn(self):
         assert normalize_domain("sub.corp.local") == "sub.corp.local"
