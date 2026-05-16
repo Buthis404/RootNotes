@@ -4,6 +4,10 @@ import Icon from './Icon.jsx';
 
 const RESERVED_AUTOFILL_KEYS = new Set(['user', 'username', 'pass', 'password', 'secret', 'domain', 'realm', 'target', 'host']);
 
+// C2 integration types that support live execution from this panel.
+// Matches backend SUPPORTED_EXEC_C2_TYPES — keep in sync.
+const SUPPORTED_EXEC_C2 = ['adaptix', 'metasploit'];
+
 function getOperationTemplates(host) {
   const os = String(host?.os || '').toLowerCase();
   const isWindows = os.includes('win');
@@ -110,7 +114,7 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
       .then((next) => {
         if (cancelled) return;
         setData(next);
-        const firstSession = next.sessions?.find(s => s.integration_type === 'adaptix' && s.alive) || next.sessions?.[0];
+        const firstSession = next.sessions?.find(s => SUPPORTED_EXEC_C2.includes(s.integration_type) && s.alive) || next.sessions?.[0];
         setForm(prev => ({
           ...prev,
           integrationId: firstSession?.integration_id || '',
@@ -124,7 +128,7 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
 
   const sessions = data?.sessions || [];
   const creds = data?.creds || [];
-  const sessionOptions = sessions.filter(s => s.integration_type === 'adaptix');
+  const sessionOptions = sessions.filter(s => SUPPORTED_EXEC_C2.includes(s.integration_type));
   const operationTemplates = useMemo(() => getOperationTemplates(host), [host]);
   const selectedCredential = useMemo(() => creds.find(c => c.id === form.credentialId && c.source === form.credentialSource) || null, [creds, form.credentialId, form.credentialSource]);
   const credentialPacks = useMemo(() => getCredentialOperationPacks(host, selectedCredential), [host, selectedCredential]);

@@ -447,6 +447,7 @@ const C2_TYPES = [
   { id: 'cobalt_strike', label: 'Cobalt Strike', color: '#cc2233', hint: 'Team Server REST API (4.7+). Token: CS Preferences → REST API' },
   { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'REST API (multiplayer mode). Token: sliver-client generate-token' },
   { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API under /endpoint path. Username + password (or token). URL: https://host:port' },
+  { id: 'metasploit',    label: 'Metasploit',     color: '#f09a3a', hint: 'MSFRPC (msfrpcd -P <password> -S -f, port 55553). Username + password. URL: http://host:55553' },
 ];
 
 const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0, has_token: false, has_password: false };
@@ -500,7 +501,7 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
   }, [sessions]);
 
   const acc = accent || '#5b8af5';
-  const typeColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', sliver: '#8bc34a' };
+  const typeColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', sliver: '#8bc34a', metasploit: '#f09a3a' };
 
   return (
     <div style={{ marginTop: 20, borderTop: '1px solid #1e2230', paddingTop: 16 }}>

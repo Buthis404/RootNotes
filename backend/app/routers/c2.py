@@ -905,6 +905,92 @@ async def _adaptix_fetch_agent_tasks(cfg: dict, agent_id: str, limit: int = 30) 
         } for item in tasks]
 
 
+async def _msf_fetch_session_tasks(cfg: dict, session_id: str, limit: int = 30) -> list[dict]:
+    """
+    Return recent activity for an MSF session in the same shape Adaptix uses
+    (task_id / cmdline / completed / text / start_time / finish_time / user).
+
+    MSFRPC doesn't expose a per-session command log, so we return:
+      - session metadata as a 'meta' row
+      - any pending shell/meterpreter output as one row labelled 'pending output'
+
+    Less rich than Adaptix's task list, but enough for the UI to render a
+    consistent timeline view across both C2 types.
+    """
+    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
+    username = cfg.get("username") or "msf"
+    password = cfg.get("token") or cfg.get("password") or ""
+
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
+        auth_r = await client.post(
+            f"{base}/api/1.0/auth/login",
+            json={"username": username, "password": password},
+        )
+        if auth_r.status_code != 200:
+            return []
+        token = auth_r.json().get("token", "")
+        if not token:
+            return []
+        headers = {"Authorization": f"Bearer {token}"}
+
+        sess_r = await client.get(f"{base}/api/1.0/sessions", headers=headers)
+        if sess_r.status_code != 200:
+            return []
+        sess_info = (sess_r.json().get("sessions", {}) or {}).get(session_id) \
+                    or (sess_r.json().get("sessions", {}) or {}).get(str(session_id))
+        if not sess_info:
+            return []
+        sess_type = (sess_info.get("type") or "shell").lower()
+
+        # Non-destructive read of pending output (MSFRPC clears buffer on read).
+        # We only do this for shell — meterpreter_read can drain real output
+        # an operator might want to see in the UI.
+        pending_output = ""
+        try:
+            read_path = (
+                f"{base}/api/1.0/sessions/{session_id}/meterpreter_read"
+                if sess_type == "meterpreter"
+                else f"{base}/api/1.0/sessions/{session_id}/shell_read"
+            )
+            read_r = await client.get(read_path, headers=headers)
+            if read_r.status_code == 200:
+                pending_output = ((read_r.json() or {}).get("data") or "")[:8000]
+        except Exception:
+            pass
+
+    items: list[dict] = []
+    items.append({
+        "task_id": f"msf-session-{session_id}",
+        "cmdline": "",
+        "completed": True,
+        "text": "",
+        "message": (sess_info.get("info") or "").strip(),
+        "msg_type": "meta",
+        "start_time": sess_info.get("session_host") or "",
+        "finish_time": "",
+        "computer": (sess_info.get("info") or "").split(" @ ", 1)[-1].strip()
+                    if " @ " in (sess_info.get("info") or "") else "",
+        "user": (sess_info.get("info") or "").split(" @ ", 1)[0].strip()
+                if " @ " in (sess_info.get("info") or "") else "",
+        "raw": {**sess_info, "session_type": sess_type},
+    })
+    if pending_output.strip():
+        items.append({
+            "task_id": f"msf-session-{session_id}-buffer",
+            "cmdline": "",
+            "completed": True,
+            "text": pending_output,
+            "message": "pending output (drained from session ring buffer)",
+            "msg_type": "buffer",
+            "start_time": "",
+            "finish_time": "",
+            "computer": "",
+            "user": "",
+            "raw": {},
+        })
+    return items[:max(1, limit)]
+
+
 def _cred_matches_host(cred: dict, host: models.Host) -> bool:
     host_ips = set(host.ips or []) | ({host.ip} if host.ip else set())
     if cred.get("host") and cred.get("host") in host_ips:
@@ -973,6 +1059,94 @@ async def _adaptix_execute(cfg: dict, agent_id: str, commandline: str, wait_for_
         return result
 
 
+async def _msf_execute(
+    cfg: dict, session_id: str, commandline: str,
+    wait_for_output: bool = True, timeout_seconds: int = 12,
+) -> dict:
+    """
+    Execute a command on a Metasploit session via MSFRPC.
+
+    - For shell sessions: `session.shell_write` + `session.shell_read` poll.
+    - For meterpreter sessions: `session.meterpreter_run_single` + `meterpreter_read`.
+
+    `session_id` is the numeric MSF session id (e.g. "1"). cfg is the integration
+    config — `base_url`/`url` + `username` + `token`/`password` (matches `_msf_sync`).
+    """
+    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
+    username = cfg.get("username") or "msf"
+    password = cfg.get("token") or cfg.get("password") or ""
+
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=max(30, timeout_seconds + 5)) as client:
+        # 1. Auth
+        auth_r = await client.post(
+            f"{base}/api/1.0/auth/login",
+            json={"username": username, "password": password},
+        )
+        if auth_r.status_code != 200:
+            return {"accepted": False, "error": f"MSFRPC auth failed: {auth_r.status_code}",
+                    "commandline": commandline, "session_id": session_id}
+        token = auth_r.json().get("token", "")
+        if not token:
+            return {"accepted": False, "error": "No token in MSFRPC auth response",
+                    "commandline": commandline, "session_id": session_id}
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 2. Detect session type — shell vs meterpreter
+        sess_list = await client.get(f"{base}/api/1.0/sessions", headers=headers)
+        if sess_list.status_code != 200:
+            return {"accepted": False,
+                    "error": f"MSFRPC sessions list failed: {sess_list.status_code}",
+                    "commandline": commandline, "session_id": session_id}
+        sess_data = sess_list.json().get("sessions", {})
+        sess_info = sess_data.get(session_id) or sess_data.get(str(session_id))
+        if not sess_info:
+            return {"accepted": False, "error": f"MSF session {session_id} not found",
+                    "commandline": commandline, "session_id": session_id}
+        sess_type = (sess_info.get("type") or "shell").lower()
+
+        # 3. Dispatch by session type
+        result = {"accepted": True, "session_id": session_id, "session_type": sess_type,
+                  "commandline": commandline}
+        if sess_type == "meterpreter":
+            write_r = await client.post(
+                f"{base}/api/1.0/sessions/{session_id}/meterpreter_run_single",
+                headers=headers, json={"command": commandline},
+            )
+        else:
+            write_r = await client.post(
+                f"{base}/api/1.0/sessions/{session_id}/shell_write",
+                headers=headers, json={"data": commandline + "\n"},
+            )
+        if write_r.status_code not in (200, 201, 204):
+            return {**result, "accepted": False,
+                    "error": f"MSFRPC write failed: {write_r.status_code} {write_r.text[:200]}"}
+        if not wait_for_output:
+            return result
+
+        # 4. Poll read endpoint until output appears or timeout
+        read_path = (
+            f"{base}/api/1.0/sessions/{session_id}/meterpreter_read"
+            if sess_type == "meterpreter"
+            else f"{base}/api/1.0/sessions/{session_id}/shell_read"
+        )
+        accumulated = ""
+        started = utcnow()
+        while (utcnow() - started).total_seconds() < max(3, timeout_seconds):
+            await asyncio.sleep(0.8)
+            read_r = await client.get(read_path, headers=headers)
+            if read_r.status_code != 200:
+                continue
+            chunk = (read_r.json() or {}).get("data") or ""
+            if chunk:
+                accumulated += chunk
+                # MSF shell read returns incremental output — keep polling
+                # for a couple of cycles after first chunk to drain.
+            elif accumulated:
+                break
+        result["output"] = accumulated
+        return result
+
+
 async def _cs_live_agents(cfg: dict) -> list[dict]:
     url = cfg["url"].rstrip("/")
     headers = {"Authorization": f"Bearer {cfg.get('token', '')}"}
@@ -1030,10 +1204,91 @@ async def _sliver_live_agents(cfg: dict) -> list[dict]:
     return result
 
 
+async def _msf_live_agents(cfg: dict) -> list[dict]:
+    """
+    List active Metasploit sessions in the same shape as Adaptix live agents.
+
+    Used by the C2HostActionsPanel agent picker so an operator can pick an
+    MSF session to run `c2:exec` against, the same way they pick Adaptix
+    beacons today.
+    """
+    base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
+    username = cfg.get("username") or "msf"
+    password = cfg.get("token") or cfg.get("password") or ""
+
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
+        auth_r = await client.post(
+            f"{base}/api/1.0/auth/login",
+            json={"username": username, "password": password},
+        )
+        if auth_r.status_code != 200:
+            return []
+        token = auth_r.json().get("token", "")
+        if not token:
+            return []
+        sess_r = await client.get(
+            f"{base}/api/1.0/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if sess_r.status_code != 200:
+            return []
+        sessions = sess_r.json().get("sessions", {})
+
+    result = []
+    for sid, s in sessions.items():
+        info = s.get("info") or ""
+        sess_type = (s.get("type") or "shell").lower()
+        platform = (s.get("platform") or "").lower()
+        tunnel_peer = s.get("tunnel_peer") or s.get("tunnel_local") or ""
+        ip = tunnel_peer.split(":")[0].strip() if tunnel_peer else ""
+        if " -> " in ip:
+            ip = ip.split(" -> ")[0].strip().split(":")[0]
+
+        username_str = ""
+        hostname = ""
+        if " @ " in info:
+            username_str, _, hostname = info.partition(" @ ")
+            username_str = username_str.strip()
+            hostname = hostname.strip()
+        elif info:
+            hostname = info.strip()
+
+        os_str = (
+            "Windows" if "windows" in platform else
+            "Linux"   if "linux"   in platform else
+            "macOS"   if "osx" in platform or "darwin" in platform else
+            (platform.title() or "Unknown")
+        )
+
+        # MSF sessions don't have a clean "dead" state in the list — if
+        # /sessions returns it, treat as alive. Stale ones are pruned by MSF.
+        result.append({
+            "ip": ip,
+            "hostname": hostname,
+            "username": username_str,
+            "domain": "",
+            "os": os_str,
+            "arch": (s.get("arch") or "").lower(),
+            "process": "",  # MSF doesn't expose process for shell sessions
+            "pid": s.get("session_host") or "",
+            # Use the numeric session id as the "agent_id" so the picker can
+            # pass it back to /execute. session_type tagged so UI can show it.
+            "agent_id": str(sid),
+            "beacon_id": str(sid),
+            "session_type": sess_type,
+            "listener": s.get("via_payload") or "",
+            "alive": True,
+            "mark": "alive",
+            "last_seen": s.get("last_checkin") or "",
+        })
+    return result
+
+
 _LIVE_CONNECTORS: dict[str, Any] = {
     "adaptix":       _adaptix_live_agents,
     "cobalt_strike": _cs_live_agents,
     "sliver":        _sliver_live_agents,
+    "metasploit":    _msf_live_agents,
 }
 
 
@@ -1401,10 +1656,15 @@ async def get_agent_tasks(
     cfg = next((i for i in _visible_integrations_for_pid(_load_integrations(db), pid) if i.get("id") == integration_id), None)
     if not cfg:
         raise HTTPException(404, "Integration not found")
-    if cfg.get("type") != "adaptix":
-        raise HTTPException(400, "Only Adaptix agent tasks are supported right now")
+    c2_type = (cfg.get("type") or "").lower()
     try:
-        return await _adaptix_fetch_agent_tasks(cfg, agent_id, max(1, min(limit, 100)))
+        if c2_type == "adaptix":
+            return await _adaptix_fetch_agent_tasks(cfg, agent_id, max(1, min(limit, 100)))
+        if c2_type == "metasploit":
+            return await _msf_fetch_session_tasks(cfg, agent_id, max(1, min(limit, 100)))
+        raise HTTPException(400, f"Agent task history not supported for C2 type {c2_type!r}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, f"Failed to fetch agent tasks: {e}")
 
@@ -1429,10 +1689,14 @@ async def get_host_actions(
     bof_catalog = {}
     host_ips = set(host.ips or []) | ({host.ip} if host.ip else set())
     for cfg in integrations:
-        if cfg.get("type") != "adaptix":
+        c2_type = (cfg.get("type") or "").lower()
+        if c2_type not in SUPPORTED_EXEC_C2_TYPES:
+            continue
+        live_fn = _LIVE_CONNECTORS.get(c2_type)
+        if not live_fn:
             continue
         try:
-            agents = await _adaptix_live_agents(cfg)
+            agents = await live_fn(cfg)
             matched = [a for a in agents if a.get("ip") in host_ips]
             for agent in matched:
                 sessions.append({
@@ -1449,21 +1713,25 @@ async def get_host_actions(
                     "arch": agent.get("arch") or "",
                     "process": agent.get("process") or "",
                     "listener": agent.get("listener") or "",
+                    "session_type": agent.get("session_type") or "",
                     "alive": agent.get("alive", True),
                     "mark": agent.get("mark") or "",
                     "last_seen": agent.get("last_seen") or "",
                 })
-            try:
-                creds = await _adaptix_fetch_creds(cfg)
-                c2_creds.extend([_normalize_c2_cred(item, cfg["id"]) for item in creds])
-            except Exception as e:
-                logger.warning("Adaptix creds fetch failed for %s: %s", cfg.get("id"), e)
-            try:
-                bof_catalog[cfg["id"]] = await _adaptix_fetch_bof_catalog(cfg)
-            except Exception:
-                bof_catalog[cfg["id"]] = []
+            # Cred fetch + BOF catalog are Adaptix-specific (MSF has no BOFs,
+            # and MSF creds already arrive via _msf_sync as rootnotes Cred rows)
+            if c2_type == "adaptix":
+                try:
+                    creds = await _adaptix_fetch_creds(cfg)
+                    c2_creds.extend([_normalize_c2_cred(item, cfg["id"]) for item in creds])
+                except Exception as e:
+                    logger.warning("Adaptix creds fetch failed for %s: %s", cfg.get("id"), e)
+                try:
+                    bof_catalog[cfg["id"]] = await _adaptix_fetch_bof_catalog(cfg)
+                except Exception:
+                    bof_catalog[cfg["id"]] = []
         except Exception as e:
-            logger.warning("Adaptix host actions failed for %s/%s: %s", cfg.get("id"), host_id, e)
+            logger.warning("%s host actions failed for %s/%s: %s", c2_type, cfg.get("id"), host_id, e)
 
     project_creds = db.query(models.Cred).filter(models.Cred.pid == pid).all()
     rootnotes_creds = []
@@ -1494,16 +1762,24 @@ async def get_host_actions(
 async def resolve_c2_cred(
     db: Session, pid: str, credential_id: str, credential_source: str, cfg: dict
 ) -> dict | None:
-    """Lookup the cred selected for a C2 execution, in either rootnotes or c2 source."""
+    """
+    Lookup the cred selected for a C2 execution.
+
+    `credential_source` ∈ {"rootnotes", "c2"}. For "c2" we ask the integration
+    for its own cred list — Adaptix has a dedicated endpoint, MSF doesn't have
+    a clean per-cred lookup so we read from rootnotes (`_msf_sync` already
+    imports MSF creds as rootnotes Cred rows).
+    """
     if not credential_id:
         return None
-    if credential_source == "c2":
+    if credential_source == "c2" and (cfg.get("type") or "").lower() == "adaptix":
         creds = await _adaptix_fetch_creds(cfg)
         return next(
             (_normalize_c2_cred(item, cfg["id"]) for item in creds
              if str(item.get("c_creds_id") or item.get("id") or "") == credential_id),
             None,
         )
+    # Fallback / MSF / rootnotes-sourced: regular project cred lookup
     cred = db.query(models.Cred).filter(models.Cred.id == credential_id, models.Cred.pid == pid).first()
     if not cred:
         return None
@@ -1512,6 +1788,9 @@ async def resolve_c2_cred(
         "username": cred.username, "secret": decrypt_str(cred.secret),
         "domain": cred.domain, "host": cred.host, "type": cred.type,
     }
+
+
+SUPPORTED_EXEC_C2_TYPES = ("adaptix", "metasploit")
 
 
 async def perform_c2_command(
@@ -1529,17 +1808,30 @@ async def perform_c2_command(
     actor_username: str = "",
 ) -> tuple[dict, models.HostActivity, str]:
     """
-    Core C2 command execution — shared by the synchronous HTTP endpoint and
-    the queued playbook step. Renders the command, calls the Adaptix
-    connector, records a HostActivity, broadcasts the event.
+    Core C2 command execution — shared by the HTTP endpoint and the queued
+    playbook step. Dispatches by `cfg["type"]`:
+      - adaptix     → `_adaptix_execute` (agent_id = a_id from Adaptix)
+      - metasploit  → `_msf_execute`     (agent_id = MSF session number)
 
-    Returns (raw_result_dict, activity_row, rendered_command).
-    Raises on connector failure — caller decides how to surface the error
-    (HTTP 400 vs. job finish_job(status='failed')).
+    Renders the command (cred substitution), calls the connector, records a
+    HostActivity, broadcasts the event. Returns (raw_result_dict, activity_row,
+    rendered_command). Raises on connector failure — caller decides how to
+    surface the error (HTTP 400 vs. job finish_job(status='failed')).
     """
+    c2_type = (cfg.get("type") or "").lower()
+    if c2_type not in SUPPORTED_EXEC_C2_TYPES:
+        raise ValueError(
+            f"Execution is not supported for C2 type {c2_type!r}. "
+            f"Supported: {', '.join(SUPPORTED_EXEC_C2_TYPES)}"
+        )
     rendered_command = _render_command_with_cred(commandline, cred, host)
-    result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
-    output = result.get("output") or result.get("message") or ""
+    if c2_type == "adaptix":
+        result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
+        summary = f"Executed via Adaptix on agent {agent_id}"
+    else:  # metasploit
+        result = await _msf_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
+        summary = f"Executed via Metasploit session {agent_id} ({result.get('session_type', 'shell')})"
+    output = result.get("output") or result.get("message") or result.get("error") or ""
     activity = models.HostActivity(
         id=new_id("ha"),
         pid=pid,
@@ -1547,7 +1839,7 @@ async def perform_c2_command(
         title=title,
         activity_type="postex" if mode == "command" else "exploit",
         command=rendered_command,
-        summary=f"Executed via Adaptix on agent {agent_id}",
+        summary=summary,
         output=output,
         status="done",
         ts=ts_now(),
@@ -1558,7 +1850,7 @@ async def perform_c2_command(
     log_event(
         db, pid, actor_username, "host_activity", "create",
         f"{title} on {host.ip or host.hostname}",
-        {"host_id": host.id, "integration_id": cfg.get("id")},
+        {"host_id": host.id, "integration_id": cfg.get("id"), "c2_type": c2_type},
     )
     db.commit()
     return result, activity, rendered_command
@@ -1580,8 +1872,8 @@ async def execute_host_action(
     cfg = next((i for i in _visible_integrations_for_pid(_load_integrations(db), pid) if i.get("id") == body.integration_id), None)
     if not cfg:
         raise HTTPException(404, "Integration not found")
-    if cfg.get("type") != "adaptix":
-        raise HTTPException(400, "Only Adaptix execution is supported right now")
+    if cfg.get("type") not in SUPPORTED_EXEC_C2_TYPES:
+        raise HTTPException(400, f"Execution supported only for: {', '.join(SUPPORTED_EXEC_C2_TYPES)}")
     if not body.agent_id.strip():
         raise HTTPException(400, "agent_id is required")
     if not body.commandline.strip():
