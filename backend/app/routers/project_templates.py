@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..core.deps import get_current_user
 from ..core.permissions import add_project_owner
-from ..core.utils import new_id, ts_now
+from ..core.utils import new_id, ts_now, utcnow
 from ..database import get_db
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
@@ -186,8 +186,8 @@ def apply_template(
     if not tpl:
         raise HTTPException(404, "Template not found")
 
-    now = datetime.utcnow()
-    ts = now.isoformat()[:16]
+    ts = ts_now()
+    now = utcnow()
 
     # Create project
     project = models.Project(

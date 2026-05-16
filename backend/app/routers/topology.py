@@ -25,7 +25,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
-from ..core.utils import new_id, normalize_domain, ts_now
+from ..core.utils import new_id, normalize_domain, stable_edge_id, ts_now, utcnow
 from ..core.layout import compute_layout
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
@@ -813,7 +813,7 @@ def topology_apply(pid: str, body: ApplyRequest, request: Request, db: Session =
                     continue
                 existing_edge_keys.add(key)
                 existing_edges.append({
-                    "id": new_id("edg"),
+                    "id": stable_edge_id(src_node, dst_node, link.source or "auto", link.link_type or ""),
                     "from": src_node,
                     "to": dst_node,
                     "type": link.link_type,
@@ -1078,7 +1078,8 @@ def _run_auto_build(pid: str, db: Session, keep_manual_positions: bool = True, c
         seen_auto_keys.add(key)
         seen_auto_keys.add((dst_nid, src_nid))
         new_auto_edges.append({
-            "id": new_id("edg"), "from": src_nid, "to": dst_nid,
+            "id": stable_edge_id(src_nid, dst_nid, link.source or "auto", link.link_type or ""),
+            "from": src_nid, "to": dst_nid,
             "type": link.link_type, "confidence": link.confidence, "source": link.source,
             "reason": link.reason, "state": "inferred", "verified": False,
         })
@@ -1136,6 +1137,32 @@ _JUNCTION_ROLES = {"network_device", "router", "firewall", "vpn", "gateway"}
 _JUNCTION_TAGS  = {"router", "gateway", "vpn", "firewall", "fw", "pivot"}
 _JUNCTION_KW    = ("vpn", "gw", "gateway", "router", "fw", "firewall", "pivot", "tunnel")
 
+# "Key" hosts deserve their own hub-and-spoke edges in the map.
+# Plain workstations / unknown hosts inherit the region grouping instead,
+# keeping the map readable when subnets contain dozens of unscanned nodes.
+_KEY_HOST_ROLES = (
+    _JUNCTION_ROLES
+    | {"domain_controller", "dc", "file_server", "web_server", "database",
+       "mail_server", "mail", "server", "jump_host", "attacker"}
+)
+_KEY_HOST_TAGS = (
+    _JUNCTION_TAGS
+    | {"server", "dc", "domain_controller", "attacker"}
+)
+
+
+def _is_key_host(h: dict) -> bool:
+    """A host is 'key' if it adds analytical value beyond mere subnet presence."""
+    if h.get("is_attacker"):
+        return True
+    role = (h.get("role") or "").lower()
+    if role in _KEY_HOST_ROLES:
+        return True
+    tags = {t.lower() for t in (h.get("tags") or [])}
+    if tags & _KEY_HOST_TAGS:
+        return True
+    return False
+
 
 _RFC1918_NETS = [
     ipaddress.ip_network("10.0.0.0/8"),
@@ -1155,6 +1182,127 @@ def _is_rfc1918(ip: str) -> bool:
         return True
 
 
+def _auto_assign_host_role(host: "models.Host") -> str | None:
+    """Infer a host.role from metadata when the operator left it empty/unknown.
+
+    Returns a role string from the HostUpdate validator set, or None when no
+    reliable signal exists. Caller must only invoke this when host.role is
+    empty or 'unknown' — never overwrite an explicit operator choice.
+
+    Priority (highest first):
+      1. is_attacker → attacker
+      2. tag hints (dc/router/database/mail/web)
+      3. port signatures (88+389 DC, 1433/3306/5432 DB, 25/465/587 mail)
+      4. hostname patterns (DC*, EXCHANGE*, MSSQL*, SHPOINT*, VPN*, GW*, …)
+      5. weaker port signals (80/443 web, 445+domain workstation, ssh-only server)
+      6. domain-joined fallback → workstation
+    """
+    if host.is_attacker:
+        return "attacker"
+    hostname = (host.hostname or "").upper()
+    domain = (host.domain or "").lower()
+    ports = set(host.ports or [])
+    tags = {(t or "").lower() for t in (host.tags or [])}
+
+    if "dc" in tags or "domain-controller" in tags:
+        return "domain_controller"
+    if tags & {"router", "firewall", "gateway"}:
+        return "router"
+    if tags & {"database", "db", "mssql", "mysql", "postgres"}:
+        return "database"
+    if tags & {"mail", "exchange", "smtp"}:
+        return "mail"
+    if tags & {"web", "webapp", "iis"}:
+        return "web"
+
+    if "88/tcp" in ports and "389/tcp" in ports:
+        return "domain_controller"
+    if ports & {"1433/tcp", "3306/tcp", "5432/tcp", "1521/tcp", "27017/tcp"}:
+        return "database"
+    if ports & {"25/tcp", "465/tcp", "587/tcp", "993/tcp", "995/tcp"}:
+        return "mail"
+
+    _HN_PATTERNS = (
+        (("DC",), "domain_controller"),
+        (("EXCHANGE", "MAIL", "MX", "SMTP"), "mail"),
+        (("MSSQL", "SQL", "MYSQL", "POSTGRES", "ORACLE"), "database"),
+        (("SHPOINT", "SHAREPOINT", "WEB", "WWW", "HTTPD", "NGINX", "APACHE", "IIS"), "web"),
+        (("VPN", "GW", "GATEWAY", "FW", "FIREWALL", "ROUTER", "EDGE", "PROXY"), "router"),
+    )
+    for prefixes, role in _HN_PATTERNS:
+        if any(hostname == p or hostname.startswith(p + "-") or hostname.startswith(p + ".")
+               or (len(hostname) > len(p) and hostname.startswith(p) and hostname[len(p)].isdigit())
+               for p in prefixes):
+            return role
+
+    if ports & {"80/tcp", "443/tcp", "8080/tcp", "8443/tcp"}:
+        return "web"
+    if "445/tcp" in ports and domain:
+        return "workstation"
+    if "22/tcp" in ports and len(ports) <= 2:
+        return "server"
+    if domain:
+        return "workstation"
+    return None
+
+
+def _edge_action_tags(source: str, edge_type: str = "", activity_type: str = "") -> dict:
+    """SB4: derive MITRE / noise / kill-chain for action-class edges.
+
+    Returns {} for inferred relationships (auto, internet_facing, bloodhound,
+    domain_member, scope_via) — they describe topology, not attacker actions.
+    """
+    src = (source or "").lower()
+    if src == "cred_validation":
+        # Valid Accounts (T1078) used to authenticate to a host.
+        # Noise: medium — kerb/smb traffic visible to defenders.
+        return {
+            "mitre_techniques": ["T1078"],
+            "noise_level": "med",
+            "kill_chain_stage": "lateral_movement",
+        }
+    if src == "bulk_exec":
+        # Command and Scripting Interpreter (T1059) — bulk remote exec is loud.
+        return {
+            "mitre_techniques": ["T1059"],
+            "noise_level": "high",
+            "kill_chain_stage": "execution",
+        }
+    if src == "host_activity":
+        at = (activity_type or "").lower()
+        if at == "c2":
+            return {
+                "mitre_techniques": ["T1071"],
+                "noise_level": "low",
+                "kill_chain_stage": "command_and_control",
+            }
+        if at == "lateral":
+            return {
+                "mitre_techniques": ["T1021"],
+                "noise_level": "med",
+                "kill_chain_stage": "lateral_movement",
+            }
+        if at == "postex":
+            return {
+                "mitre_techniques": ["T1059"],
+                "noise_level": "high",
+                "kill_chain_stage": "execution",
+            }
+        return {
+            "mitre_techniques": ["T1059"],
+            "noise_level": "med",
+            "kill_chain_stage": "execution",
+        }
+    if src == "pivot_observation":
+        # Proxy (T1090) — tunnel / SOCKS routing.
+        return {
+            "mitre_techniques": ["T1090"],
+            "noise_level": "low",
+            "kill_chain_stage": "command_and_control",
+        }
+    return {}
+
+
 def _decay_confidence(c0: float, ts_iso: str, tau_days: float) -> tuple[float, bool]:
     """Exponential confidence decay. Returns (decayed, is_stale)."""
     if not tau_days or tau_days <= 0 or not ts_iso:
@@ -1163,7 +1311,7 @@ def _decay_confidence(c0: float, ts_iso: str, tau_days: float) -> tuple[float, b
         ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
         if ts.tzinfo is not None:
             ts = ts.replace(tzinfo=None)
-        delta_days = max(0.0, (datetime.utcnow() - ts).total_seconds() / 86400.0)
+        delta_days = max(0.0, (utcnow() - ts).total_seconds() / 86400.0)
     except (ValueError, TypeError):
         return c0, False
     import math
@@ -1252,12 +1400,16 @@ def _run_smart_build(
     pid: str,
     db: Session,
     keep_manual_positions: bool = True,
+    preserve_positions: bool = True,
     create_missing_networks: bool = True,
     include_access_edges: bool = True,
     include_domain_edges: bool = True,
     include_subnet_edges: bool = True,
     include_regions: bool = True,
     include_internet_facing: bool = True,
+    include_tier_zones: bool = True,
+    include_service_graph: bool = False,
+    auto_assign_roles: bool = True,
     confidence_decay_days: float = 14.0,
     dry_run: bool = False,
 ) -> dict:
@@ -1279,6 +1431,22 @@ def _run_smart_build(
     all_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
     if not all_hosts:
         return {"ok": True, "nodes_total": 0, "nodes_added": 0, "edges_added": 0, "regions_added": 0}
+
+    # Auto-assign host.role from metadata when operator left it empty/unknown.
+    # Only touches role IN ('', 'unknown') — explicit operator choice is never
+    # overwritten. Done up-front so all downstream logic (DC detection, tier
+    # classification, service-graph heuristics) sees the enriched roles.
+    roles_assigned = 0
+    if auto_assign_roles:
+        for h in all_hosts:
+            if (h.role or "").lower() not in ("", "unknown"):
+                continue
+            inferred = _auto_assign_host_role(h)
+            if inferred and inferred != (h.role or ""):
+                h.role = inferred
+                roles_assigned += 1
+        if roles_assigned:
+            db.flush()
 
     network = db.query(models.Network).filter(models.Network.pid == pid).first()
     if not network:
@@ -1319,6 +1487,63 @@ def _run_smart_build(
     except Exception:
         pass
 
+    # Auto-infer via_host_id for non-entry scopes that don't have one set and
+    # whose gateway_ip doesn't match any host. Picks the first junction-named
+    # host (VPN-*, GW-*, FW-*, ROUTER-*, EDGE-*) with router/network_device/
+    # firewall role to serve as a pivot. Without this Smart Build can't chain
+    # traffic from the attacker into target scopes that the operator didn't
+    # explicitly wire up.
+    junction_candidates: list = []
+    for h in all_hosts:
+        hostname_up = (h.hostname or "").upper()
+        role_low = (h.role or "").lower()
+        tags_low = {(t or "").lower() for t in (h.tags or [])}
+        is_junction = (
+            role_low in ("router", "firewall", "network_device", "pivot", "jump_host")
+            or bool(tags_low & {"router", "firewall", "gateway", "vpn", "pivot"})
+            or any(hostname_up.startswith(p) or hostname_up.startswith(p + "-") or hostname_up.startswith(p + "_")
+                   for p in ("VPN", "GW", "FW", "ROUTER", "EDGE", "PROXY"))
+        )
+        if is_junction and not h.is_attacker:
+            junction_candidates.append(h)
+    auto_via_count = 0
+    for sr in scope_region_defs:
+        if sr.get("is_entry") or sr.get("via_host_id"):
+            continue
+        gw_ip = (sr.get("gateway_ip") or "").strip()
+        gw_matches = any(
+            (gw_ip and ((h.ip or "") == gw_ip or gw_ip in {str(ip).strip() for ip in (h.ips or [])}))
+            for h in all_hosts
+        )
+        if gw_matches:
+            continue
+        net_obj = sr["net_obj"]
+        entry_cidrs = []
+        for item in scope_region_defs:
+            if not item.get("is_entry"):
+                continue
+            try:
+                entry_cidrs.append(ipaddress.ip_network(item["cidr"], strict=False))
+            except ValueError:
+                pass
+
+        def _h_in_entry(h, _entry_cidrs=entry_cidrs):
+            try:
+                addr = ipaddress.ip_address(h.ip or "")
+            except ValueError:
+                return False
+            return any(addr in n for n in _entry_cidrs)
+
+        candidates_outside = [
+            h for h in junction_candidates
+            if h.ip and not _ip_in_network(h.ip, net_obj)
+        ]
+        candidates_outside.sort(key=lambda h: (0 if _h_in_entry(h) else 1))
+        if candidates_outside:
+            sr["via_host_id"] = candidates_outside[0].id
+            sr["auto_via_host"] = True
+            auto_via_count += 1
+
     def _annotate_subnet(ip: str) -> str:
         try:
             addr = ipaddress.ip_address(ip)
@@ -1354,7 +1579,12 @@ def _run_smart_build(
         h_ip = p.get("ip", "")
         en = node_by_hid.get(h_id) or node_by_ip.get(h_ip)
         if en:
-            if not (en.get("manually_positioned") and keep_manual_positions):
+            is_pinned = en.get("manually_positioned") and keep_manual_positions
+            # preserve_positions: any existing node with x/y already set keeps
+            # its position across rebuilds. Without this, every Smart Build
+            # re-runs compute_layout and the map "scatters".
+            has_pos = en.get("x") is not None and en.get("y") is not None
+            if not is_pinned and not (preserve_positions and has_pos):
                 en["x"] = p["x"]
                 en["y"] = p["y"]
                 en["auto_positioned"] = True
@@ -1409,6 +1639,18 @@ def _run_smart_build(
         or e.get("manual_override")
         or e.get("verified")
     ]
+    # SB4: backfill MITRE / noise / kill-chain tags on edges that survived
+    # the auto filter (primarily host_activity / pivot_observation written
+    # before SB4). Edges created in this rebuild are tagged at their
+    # respective _add_edge sites and skip this loop via the early-out.
+    for _e in manual_edges:
+        if _e.get("mitre_techniques"):
+            continue
+        _src = (_e.get("source") or "").lower()
+        if _src in ("cred_validation", "bulk_exec", "host_activity", "pivot_observation"):
+            _tags = _edge_action_tags(_src, _e.get("type") or "")
+            if _tags:
+                _e.update(_tags)
     suppressed = set(existing_meta.get(AUTO_LINK_SUPPRESSIONS_KEY) or [])
     manual_keys = (
         {(e.get("from"), e.get("to")) for e in manual_edges} |
@@ -1438,7 +1680,13 @@ def _run_smart_build(
         edges_by_source[src_key] = edges_by_source.get(src_key, 0) + 1
         if edge_data.get("state") == "stale":
             edges_stale += 1
-        new_auto_edges.append({"id": new_id("edg"), "from": from_nid, "to": to_nid, **edge_data})
+        # Stable edge id — deterministic from (from, to, source, kind).
+        # Prefer access_role over type, since the same (from,to,source) pair
+        # can carry several access roles (ssh/winrm/local_admin) as separate edges.
+        roles = edge_data.get("access_roles") or []
+        kind = str(roles[0]) if roles else str(edge_data.get("type") or "")
+        edge_id = stable_edge_id(from_nid, to_nid, str(edge_data.get("source") or "auto"), kind)
+        new_auto_edges.append({"id": edge_id, "from": from_nid, "to": to_nid, **edge_data})
         return True
 
     # L2: pairs written by P1 cred_validation — used to dedup P3 host_activity.
@@ -1487,6 +1735,7 @@ def _run_smart_build(
                 "reason": f"Credential validated: {cred_label} [{', '.join(roles)}]",
                 "state": "observed", "verified": True, "is_manual": False,
                 "access_roles": roles,
+                **_edge_action_tags("cred_validation", primary),
             }):
                 edges_added += 1
                 p1_access_pairs.add((from_nid, target_nid, primary))
@@ -1521,6 +1770,7 @@ def _run_smart_build(
                 "state": "stale" if stale else "observed",
                 "verified": True, "is_manual": False,
                 "ts": getattr(job, "finished_at", "") or "",
+                **_edge_action_tags("bulk_exec", role),
             }):
                 edges_added += 1
 
@@ -1627,6 +1877,9 @@ def _run_smart_build(
 
             is_c2 = act.activity_type == "c2"
             decayed, stale = _decay_confidence(0.9, act.ts or "", confidence_decay_days)
+            # SB4: even when source is "auto" (c2 case), classify the edge by
+            # activity_type — host_activity action tagging still applies.
+            action_tags = _edge_action_tags("host_activity", etype, act.activity_type)
             if _add_edge(from_nid, target_nid, {
                 "type": etype, "label": etype.replace("_", " "),
                 "confidence": round(decayed, 3),
@@ -1639,6 +1892,7 @@ def _run_smart_build(
                 "verified": False if (is_c2 or stale) else True,
                 "is_manual": False,
                 "ts": act.ts or "",
+                **action_tags,
             }):
                 edges_added += 1
 
@@ -1689,6 +1943,116 @@ def _run_smart_build(
                 }):
                     edges_added += 1
 
+    # ── SB6: Service-graph edges (heuristic, opt-in) ─────────────────
+    # Two narrow rules: web→db (same /24), and ldap-client→dc (same domain).
+    # Off by default — these are inference, not observation. Style: dashed grey.
+    if include_service_graph:
+        def _node_role(h: dict) -> str:
+            return _infer_node_role(h)
+
+        def _is_dc_h(h: dict) -> bool:
+            r = (h.get("role") or "").lower()
+            if r in ("domain_controller", "dc"):
+                return True
+            if "dc" in {t.lower() for t in (h.get("tags") or [])}:
+                return True
+            p = h.get("ports") or []
+            return "88/tcp" in p and "389/tcp" in p
+
+        # ── Rule A: web_server → database (same /24) ──
+        web_hosts = [h for h in hosts_meta if _node_role(h) == "web_server"]
+        db_hosts  = [h for h in hosts_meta if _node_role(h) == "database"]
+        for w in web_hosts:
+            w_subnet = _get_subnet(w.get("ip") or "")
+            if not w_subnet:
+                continue
+            w_nid = hid_to_nid.get(w["id"])
+            if not w_nid:
+                continue
+            for d in db_hosts:
+                if d["id"] == w["id"]:
+                    continue
+                if _get_subnet(d.get("ip") or "") != w_subnet:
+                    continue
+                d_nid = hid_to_nid.get(d["id"])
+                if not d_nid or d_nid == w_nid:
+                    continue
+                if _add_edge(w_nid, d_nid, {
+                    "type": "service_dep",
+                    "label": "web→db",
+                    "confidence": 0.5, "source": "service_inference",
+                    "reason": (
+                        f"heuristic: web ports on {w.get('hostname') or w.get('ip','')} "
+                        f"+ DB ports on {d.get('hostname') or d.get('ip','')} in same /24"
+                    ),
+                    "state": "inferred", "verified": False, "is_manual": False,
+                    "style": "dashed",
+                }):
+                    edges_added += 1
+
+        # ── Rule B: any domain-joined host → DC of same domain (ldap dep) ──
+        dc_by_domain_sg: dict = {}
+        for h in hosts_meta:
+            if _is_dc_h(h):
+                dom = (h.get("domain") or "").lower()
+                if dom:
+                    dc_by_domain_sg.setdefault(dom, []).append(h)
+        for h in hosts_meta:
+            if _is_dc_h(h):
+                continue
+            dom = (h.get("domain") or "").lower()
+            if not dom or dom not in dc_by_domain_sg:
+                continue
+            h_nid = hid_to_nid.get(h["id"])
+            if not h_nid:
+                continue
+            for dc_h in dc_by_domain_sg[dom]:
+                dc_nid = hid_to_nid.get(dc_h["id"])
+                if not dc_nid or dc_nid == h_nid:
+                    continue
+                if _add_edge(h_nid, dc_nid, {
+                    "type": "service_dep",
+                    "label": "ldap",
+                    "confidence": 0.5, "source": "service_inference",
+                    "reason": (
+                        f"heuristic: domain-joined host depends on DC "
+                        f"{dc_h.get('hostname') or dc_h.get('ip','')} for {dom} (LDAP/Kerberos)"
+                    ),
+                    "state": "inferred", "verified": False, "is_manual": False,
+                    "style": "dashed",
+                }):
+                    edges_added += 1
+
+    # ── Key-host set: shared by P5 + P6.5 to keep the map readable ────
+    # A host is "key" if it adds analytical value beyond raw subnet presence
+    # (DCs, servers, network devices, attackers, C2 hosts, hosts with access).
+    # Plain workstations / unscanned hosts stay inside their region without
+    # explicit hub-and-spoke edges.
+    key_hids: set[str] = {h["id"] for h in hosts_meta if _is_key_host(h)}
+    for ha in db.query(models.HostActivity).filter(
+        models.HostActivity.pid == pid,
+        models.HostActivity.activity_type == "c2",
+        models.HostActivity.status == "done",
+    ).all():
+        if ha.host_id:
+            key_hids.add(ha.host_id)
+    for note in db.query(models.CredHostNote).filter(
+        models.CredHostNote.pid == pid,
+    ).all():
+        if note.access and note.host_id:
+            key_hids.add(note.host_id)
+    for sr in scope_region_defs:
+        gw_ip = (sr.get("gateway_ip") or "").strip()
+        if not gw_ip:
+            continue
+        for h in hosts_meta:
+            if _host_matches_gateway_ip(h, gw_ip):
+                key_hids.add(h["id"])
+
+    nid_to_hid = {
+        n.get("id"): n.get("host_id") for n in existing_nodes if n.get("host_id")
+    }
+
     # ── P5: Subnet proximity edges (hub-and-spoke) ───────────────────
     if include_subnet_edges:
         manual_gateway_by_subnet = {
@@ -1703,6 +2067,13 @@ def _run_smart_build(
             src_nid = ip_to_nid.get(link.source_ip)
             dst_nid = ip_to_nid.get(link.target_ip)
             if not src_nid or not dst_nid:
+                continue
+            # Drop edges where the spoke is a plain workstation/unknown host.
+            # The hub is implicitly key (scope gateway); we require the other
+            # end to also be key.
+            src_hid = nid_to_hid.get(src_nid)
+            dst_hid = nid_to_hid.get(dst_nid)
+            if src_hid not in key_hids or dst_hid not in key_hids:
                 continue
             if _add_edge(src_nid, dst_nid, {
                 "type": link.link_type, "label": link.label or "",
@@ -1760,6 +2131,9 @@ def _run_smart_build(
             if h["id"] == pivot_h["id"]:
                 continue
             if not h.get("ip") or not _ip_in_network(h["ip"], sr["net_obj"]):
+                continue
+            # Same noise filter as P5: only draw pivot edges to key hosts
+            if h["id"] not in key_hids:
                 continue
             dst_nid = hid_to_nid.get(h["id"])
             if not dst_nid:
@@ -1830,6 +2204,79 @@ def _run_smart_build(
                     "state": "inferred", "verified": False, "is_manual": False,
                 }):
                     edges_added += 1
+
+    # ── SB3: Tier-0/1/2 classification ───────────────────────────────
+    # Tier 0 — DCs, DA-equivalent hosts, krbtgt holders
+    # Tier 1 — admin-power servers reachable from Tier 0 (admin edges, LSASS dumps, bh:admin)
+    # Tier 2 — workstations / everything else
+    tier_counts = {"tier_0": 0, "tier_1": 0, "tier_2": 0}
+    if include_tier_zones:
+        _TIER0_TAGS = {"da", "ea", "krbtgt", "domain-admin", "enterprise-admin",
+                       "bh:dc", "bh:da-member", "dc"}
+        _TIER1_TAGS = {"bh:admin", "admin", "local-admin"}
+        _TIER1_EDGE_TYPES = {
+            "smb_admin", "admin_to", "local_admin", "dcsync",
+            "generic_all", "write_dacl", "generic_write", "write_owner",
+            "ext_rights", "allowed_to_delegate",
+        }
+        _TIER1_T1003_TECHNIQUE = "T1003"  # OS Credential Dumping (LSASS / SAM / NTDS)
+
+        # Collect hosts targeted by admin-power edges from any source
+        tier1_target_hids: set[str] = set()
+        all_edges_for_tier = manual_edges + new_auto_edges
+        # Build host_id → node_id reverse if needed; edges have from/to (node ids)
+        nid_to_hid = {n.get("id"): n.get("host_id") for n in existing_nodes if n.get("id")}
+        for e in all_edges_for_tier:
+            etype = (e.get("type") or "").lower()
+            if etype not in _TIER1_EDGE_TYPES:
+                continue
+            to_nid = e.get("to")
+            # Some edges (from BH importer) carry to_host_id directly
+            to_hid = nid_to_hid.get(to_nid) or e.get("to_host_id")
+            if to_hid:
+                tier1_target_hids.add(to_hid)
+
+        # HostActivity T1003 — LSASS dumps elevate the host to Tier 1
+        try:
+            t1003_rows = db.query(models.HostActivity).filter(
+                models.HostActivity.pid == pid,
+                models.HostActivity.technique.ilike(f"{_TIER1_T1003_TECHNIQUE}%"),
+            ).all()
+            for act in t1003_rows:
+                if act.host_id:
+                    tier1_target_hids.add(act.host_id)
+        except Exception:
+            # technique column or table may not exist in older deployments
+            pass
+
+        for h in all_hosts:
+            tags_lower = {(t or "").lower() for t in (h.tags or [])}
+            role_lower = (h.role or "").lower()
+            is_tier0 = (
+                role_lower == "domain_controller"
+                or bool(tags_lower & _TIER0_TAGS)
+            )
+            is_tier1 = (
+                h.id in tier1_target_hids
+                or bool(tags_lower & _TIER1_TAGS)
+            )
+            if is_tier0:
+                tier = 0
+            elif is_tier1:
+                tier = 1
+            else:
+                tier = 2
+            tier_counts[f"tier_{tier}"] += 1
+            tier_tag = f"tier:{tier}"
+            nid = hid_to_nid.get(h.id)
+            n = node_by_id.get(nid)
+            if n is not None:
+                n["tier"] = tier
+                node_tags = list(n.get("tags") or [])
+                # Replace any prior tier:N tag (tier may shift on rebuild)
+                node_tags = [t for t in node_tags if not (isinstance(t, str) and t.startswith("tier:"))]
+                node_tags.append(tier_tag)
+                n["tags"] = node_tags
 
     # ── Regions from scope CIDRs ──────────────────────────────────────
     regions_added = 0
@@ -1913,6 +2360,12 @@ def _run_smart_build(
             regions_added += 1
 
         replace_regions(network.id, network.pid, existing_regions, db)
+        # Flush so the get_regions() call below sees the freshly upserted rows
+        # — replace_regions does delete(synchronize_session=False) + add() and
+        # without an explicit flush SA's session can return [] for the next
+        # query on the same network, breaking entry_region / anchor_region
+        # detection and the attacker uplink edge.
+        db.flush()
 
     try:
         scope_gateway_host_ids: dict[str, str] = {}
@@ -1938,6 +2391,10 @@ def _run_smart_build(
 
         for node in existing_nodes:
             if node.get("manually_positioned"):
+                continue
+            # preserve_positions: node already has a position from a prior
+            # build → leave it alone, transit overlay won't shove it around
+            if preserve_positions and node.get("x") is not None and node.get("y") is not None:
                 continue
             host_id = node.get("host_id") or ""
             related_scopes = transit_scopes_by_host.get(host_id) or gateway_scopes_by_host.get(host_id, [])
@@ -1968,7 +2425,13 @@ def _run_smart_build(
         )
         anchor_region = entry_region or leftmost_region
         if anchor_region:
-            attacker_nodes = [node for node in existing_nodes if node.get("is_attacker") and not node.get("manually_positioned")]
+            # Skip attackers that already have a position when preserve_positions=True
+            attacker_nodes = [
+                node for node in existing_nodes
+                if node.get("is_attacker")
+                and not node.get("manually_positioned")
+                and not (preserve_positions and node.get("x") is not None and node.get("y") is not None)
+            ]
             base_x, base_y = _place_on_region_edge(anchor_region, "left")
             for idx, node in enumerate(attacker_nodes):
                 node["x"] = base_x - 120.0
@@ -2028,6 +2491,9 @@ def _run_smart_build(
         "edges_stale": edges_stale,
         "edges_by_source": dict(edges_by_source),
         "regions_added": regions_added,
+        "tier_counts": tier_counts,
+        "roles_assigned": roles_assigned,
+        "auto_via_host_assigned": auto_via_count,
         "last_smart_build": build_ts,
         "dry_run": dry_run,
     }
@@ -2052,12 +2518,16 @@ def _run_smart_build(
 
 class SmartBuildRequest(BaseModel):
     keep_manual_positions: bool = True
+    preserve_positions: bool = True  # if True, existing nodes keep their x/y
     create_missing_networks: bool = True
     include_access_edges: bool = True
     include_domain_edges: bool = True
     include_subnet_edges: bool = True
     include_regions: bool = True
     include_internet_facing: bool = True
+    include_tier_zones: bool = True  # SB3 — Tier-0/1/2 classification + regions
+    include_service_graph: bool = False  # SB6 — heuristic service-dep edges (noisy)
+    auto_assign_roles: bool = True  # auto-infer host.role when unknown/empty
     confidence_decay_days: float = 14.0
     dry_run: bool = False
 
@@ -2087,12 +2557,16 @@ def topology_smart_build(
     result = _run_smart_build(
         pid, db,
         keep_manual_positions=body.keep_manual_positions,
+        preserve_positions=body.preserve_positions,
         create_missing_networks=body.create_missing_networks,
         include_access_edges=body.include_access_edges,
         include_domain_edges=body.include_domain_edges,
         include_subnet_edges=body.include_subnet_edges,
         include_regions=body.include_regions,
         include_internet_facing=body.include_internet_facing,
+        include_tier_zones=body.include_tier_zones,
+        include_service_graph=body.include_service_graph,
+        auto_assign_roles=body.auto_assign_roles,
         confidence_decay_days=body.confidence_decay_days,
         dry_run=body.dry_run,
     )

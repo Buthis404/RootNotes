@@ -1,39 +1,43 @@
-import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import ToastContainer from './components/Toast.jsx';
 import Icon from './components/Icon.jsx';
 import { TABS, ADMIN_TAB } from './constants.js';
 import { api } from './api.js';
 import { useProjectStore } from './store/useProjectStore.js';
 import { useSync } from './hooks/useSync.js';
+import lazyWithReload from './utils/lazyWithReload.js';
 // Eagerly loaded — needed on first render or very frequently
 import LoginView from './views/LoginView.jsx';
 import ProjectsView from './views/ProjectsView.jsx';
 import OverviewView from './views/OverviewView.jsx';
 import ImportModal from './components/ImportModal.jsx';
 import AIChatPanel from './components/AIChatPanel.jsx';
-// Lazily loaded — only when the user navigates to that tab
-const NotesView       = lazy(() => import('./views/NotesView.jsx'));
-const HostsView       = lazy(() => import('./views/HostsView.jsx'));
-const CredsView       = lazy(() => import('./views/CredsView.jsx'));
-const NetworkView     = lazy(() => import('./views/NetworkView.jsx'));
-const FindingsView    = lazy(() => import('./views/FindingsView.jsx'));
-const ObjectivesView  = lazy(() => import('./views/ObjectivesView.jsx'));
-const AttackPathView  = lazy(() => import('./views/AttackPathView.jsx'));
-const AttackGraphView = lazy(() => import('./views/AttackGraphView.jsx'));
-const LootView        = lazy(() => import('./views/LootView.jsx'));
-const ScopeView       = lazy(() => import('./views/ScopeView.jsx'));
-const ChecklistView   = lazy(() => import('./views/ChecklistView.jsx'));
-const TimelineView    = lazy(() => import('./views/TimelineView.jsx'));
-const CheatsheetView  = lazy(() => import('./views/CheatsheetView.jsx'));
-const ScansView       = lazy(() => import('./views/ScansView.jsx'));
-const JobsView        = lazy(() => import('./views/JobsView.jsx'));
-const PlaybooksView   = lazy(() => import('./views/PlaybooksView.jsx'));
-const DomainsView     = lazy(() => import('./views/DomainsView.jsx'));
-const KBView          = lazy(() => import('./views/KBView.jsx'));
-const ReportView      = lazy(() => import('./views/ReportView.jsx'));
-const AdminView       = lazy(() => import('./views/AdminView.jsx'));
-const SearchModal     = lazy(() => import('./components/SearchModal.jsx'));
-const UserSettingsView = lazy(() => import('./views/UserSettingsView.jsx'));
+// Lazily loaded — only when the user navigates to that tab.
+// `lazyWithReload` auto-reloads the page once if a chunk hash has rotated
+// after a frontend rebuild (otherwise tabs from old sessions throw
+// "error loading dynamically imported module").
+const NotesView       = lazyWithReload(() => import('./views/NotesView.jsx'));
+const HostsView       = lazyWithReload(() => import('./views/HostsView.jsx'));
+const CredsView       = lazyWithReload(() => import('./views/CredsView.jsx'));
+const NetworkView     = lazyWithReload(() => import('./views/NetworkView.jsx'));
+const FindingsView    = lazyWithReload(() => import('./views/FindingsView.jsx'));
+const ObjectivesView  = lazyWithReload(() => import('./views/ObjectivesView.jsx'));
+const AttackPathView  = lazyWithReload(() => import('./views/AttackPathView.jsx'));
+const AttackGraphView = lazyWithReload(() => import('./views/AttackGraphView.jsx'));
+const LootView        = lazyWithReload(() => import('./views/LootView.jsx'));
+const ScopeView       = lazyWithReload(() => import('./views/ScopeView.jsx'));
+const ChecklistView   = lazyWithReload(() => import('./views/ChecklistView.jsx'));
+const TimelineView    = lazyWithReload(() => import('./views/TimelineView.jsx'));
+const CheatsheetView  = lazyWithReload(() => import('./views/CheatsheetView.jsx'));
+const ScansView       = lazyWithReload(() => import('./views/ScansView.jsx'));
+const JobsView        = lazyWithReload(() => import('./views/JobsView.jsx'));
+const PlaybooksView   = lazyWithReload(() => import('./views/PlaybooksView.jsx'));
+const DomainsView     = lazyWithReload(() => import('./views/DomainsView.jsx'));
+const KBView          = lazyWithReload(() => import('./views/KBView.jsx'));
+const ReportView      = lazyWithReload(() => import('./views/ReportView.jsx'));
+const AdminView       = lazyWithReload(() => import('./views/AdminView.jsx'));
+const SearchModal     = lazyWithReload(() => import('./components/SearchModal.jsx'));
+const UserSettingsView = lazyWithReload(() => import('./views/UserSettingsView.jsx'));
 import { hasAutoRoleSignals, inferNodeType, isAttackerHost } from './utils/hostMeta.js';
 import { useProjectPermissions } from './context/ProjectPermissions.jsx';
 import { NavTab, ProjectPicker, TweaksPanel } from './app/AppChrome.jsx';

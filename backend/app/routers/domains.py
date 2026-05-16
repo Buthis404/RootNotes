@@ -9,14 +9,14 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..core.access import check_pid_access
 from ..core.deps import get_current_user
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 @router.get("", response_model=list[schemas.ProjectDomain])

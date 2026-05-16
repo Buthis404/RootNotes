@@ -11,6 +11,7 @@ from .. import models, schemas
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access, get_user_member_pids
 from ..core.limiter import limiter
+from ..core.utils import ts_now
 
 router = APIRouter(tags=["search"])
 
@@ -373,7 +374,7 @@ def create_saved_search(
         name=body.name.strip() or body.query[:40],
         query=body.query,
         pid=body.pid or None,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=ts_now(),
     )
     db.add(row)
     db.commit()

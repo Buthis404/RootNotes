@@ -742,7 +742,7 @@ export default function HostsView({ hosts, creds, hostActivities = [], onAdd, on
                 <div style={{ width: widths.tags, display: 'flex', gap: 3, overflow: 'hidden', alignItems: 'center', flexWrap: 'nowrap', minWidth: 0, borderRight: colBorder, paddingRight: 12, marginRight: 12 }}>
                   {intelBadges.slice(0, 2).map(b => <span key={b.label} style={{ fontSize: Math.max(9, fs - 4), color: b.color, background: `${b.color}18`, border: `1px solid ${b.color}44`, borderRadius: 3, padding: '1px 5px', whiteSpace: 'nowrap' }}>{b.label}</span>)}
                   {host.import_source && (() => {
-                    const srcColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', cs: '#f44336', sliver: '#8bc34a', nmap: '#4caf50', bloodhound: '#c07af0', bh: '#c07af0' };
+                    const srcColors = { adaptix: '#00bcd4', mythic: '#ffa726', sliver: '#8bc34a', nmap: '#4caf50', bloodhound: '#c07af0', bh: '#c07af0' };
                     const c = srcColors[host.import_source] || '#f09a3a';
                     return <span title={`Imported from: ${host.import_source}`} style={{ fontSize: Math.max(9, fs - 4), color: c, background: `${c}18`, border: `1px solid ${c}44`, borderRadius: 3, padding: '1px 5px', whiteSpace: 'nowrap', fontFamily: 'JetBrains Mono' }}>{host.import_source}</span>;
                   })()}

@@ -1,5 +1,198 @@
 # RootNotes — Changelog
 
+## Unreleased
+
+### Smart Build — Attacker traffic routing + region read-after-write fix
+
+Two-part change so the network map shows the actual traffic path from the
+attacker into target scopes (e.g. `Attacker → GW_EXTERNAL → VPN-GW → SDOTSON`
+in the Bootcamp project).
+
+**Fix: region read-after-write inside Smart Build**
+
+After `replace_regions(...)` (which does `delete(synchronize_session=False)`
++ `add()`), the very next `get_regions(network.id, db)` call returned `[]`
+because SA hadn't flushed the in-flight session. As a consequence:
+- `region_by_cidr` was empty
+- `entry_region` / `anchor_region` were `None`
+- The attacker uplink edge (`Attacker → entry-gateway`) was silently
+  skipped on every build
+
+Added an explicit `db.flush()` right after `replace_regions(...)` so the
+following `get_regions` sees the freshly upserted rows.
+
+**Auto-infer scope.via_host_id when no host matches the gateway**
+
+For non-entry scopes that don't have `via_host_id` set and whose
+`gateway_ip` doesn't match any host (single-homed or otherwise), Smart
+Build now picks a junction host (`role` ∈ `router / firewall /
+network_device / pivot / jump_host`, or `tags` ∩ `{router, firewall,
+gateway, vpn, pivot}`, or hostname `VPN-*` / `GW-*` / `FW-*` / `ROUTER-*` /
+`EDGE-*` / `PROXY-*`) outside the scope to serve as a pivot. Preference
+is given to junction hosts in the entry scope.
+
+`auto_via_host_assigned` counter returned in the result. In Bootcamp this
+is 0 because VPN-GW is **multi-homed** (`ips=[10.124.1.253, 10.154.17.1]`)
+— the existing multi-IP gateway match already covers it. The new logic
+kicks in when the operator declared a `gateway_ip` for a scope but never
+created a host for it.
+
+Effect on Bootcamp (`p105ca8e7`):
+
+| Edge | Source | Notes |
+|------|--------|-------|
+| Attacker → GW_EXTERNAL | uplink (auto) | entry-gateway from `is_entry` scope |
+| GW_EXTERNAL ⇄ VPN-GW | same_subnet | DMZ neighbours |
+| VPN-GW ⇄ SDOTSON / DC / DC-2 / EXCHANGE / … | same_subnet | VPN-GW multi-homed in Internal |
+| DC → SDOTSON | domain_member | from P4 |
+| VPN-GW → SDOTSON | c2_session | from observed HostActivity |
+
+---
+
+### Smart Build — Auto-role inference
+
+Smart Build now infers and writes `host.role` for hosts where the operator left it empty or `unknown`. Operator-set roles are never overwritten.
+
+Priority order in `_auto_assign_host_role`:
+1. `is_attacker` → `attacker`
+2. Tag hints: `dc`, `router`/`firewall`/`gateway`, `database`/`db`/`mssql`, `mail`/`exchange`, `web`/`webapp`/`iis`
+3. Port signatures: 88+389 → DC, 1433/3306/5432/1521/27017 → database, 25/465/587/993/995 → mail
+4. Hostname prefixes: `DC*` → DC; `EXCHANGE*`/`MAIL*`/`MX*` → mail; `MSSQL*`/`SQL*` → database; `SHPOINT*`/`WEB*`/`WWW*`/`IIS*` → web; `VPN*`/`GW*`/`FW*`/`ROUTER*`/`PROXY*` → router
+5. Weak port signals: 80/443/8080/8443 → web; 445 + domain → workstation; SSH-only → server
+6. Domain-joined fallback → workstation
+
+Backend:
+- New `_auto_assign_host_role(host)` helper in `topology.py`
+- `SmartBuildRequest.auto_assign_roles: bool = True` (default on)
+- `_run_smart_build` runs the loop right after loading `all_hosts`; sets `host.role` in DB before any downstream logic (DC detection, tier classification, service-graph) consumes it
+- Result contains `roles_assigned: int`
+
+Tested on Bootcamp project (p105ca8e7): 31 of 33 unknown hosts received a meaningful role — DC/DC-2 → domain_controller, MSSQL → database, EXCHANGE → mail, SHPOINT → web, all SMB-only domain workstations (SDOTSON, BACKUP, …) → workstation. Existing `network_device` roles on GW_EXTERNAL / VPN-GW preserved.
+
+---
+
+### Smart Build — SB6 Service-graph edges (opt-in)
+
+Two heuristic rules for client→service dependency edges:
+
+1. **Web → DB** — host with role `web` (or open 80/443/8080/8443) draws a `service_dep` edge to every host with role `database` (or open 1433/3306/5432/1521) in the same `/24`
+2. **LDAP-client → DC** — every domain-joined non-DC host draws a `service_dep` edge to a DC of the same domain. Redundant when `include_domain_edges=true` (P4 already draws the reverse `domain_member` edge — dedup blocks it), but useful when domain edges are disabled
+
+Backend:
+- `SmartBuildRequest.include_service_graph: bool = False` (default OFF — inference, not observation)
+- New block in `_run_smart_build` between P4 and P5
+- Edge fields: `type=service_dep`, `source=service_inference`, `confidence=0.5`, `state=inferred`, `verified=false`, `style=dashed`
+
+Frontend:
+- `NetworkView.jsx` edge style for `service_dep`: grey thin dashed (`#6a7180`, `2 4` dasharray), no animation — deliberately quieter than access/lateral so the map stays readable
+
+Tested on synthetic project `p3e291272` (SB6-test): web→db edge correctly produced, LDAP edges blocked by P4 dedup as expected.
+
+---
+
+### Smart Build — SB4 Edge MITRE / noise / kill-chain tagging
+
+Action-class edges now carry three metadata fields in `extra_json`:
+- `mitre_techniques` — MITRE ATT&CK IDs (e.g. `["T1078"]`)
+- `noise_level` — `low` / `med` / `high` (OPSEC noise)
+- `kill_chain_stage` — `lateral_movement` / `execution` / `command_and_control` / etc.
+
+Classification by source:
+| Source | MITRE | Noise | Stage |
+|--------|-------|-------|-------|
+| `cred_validation` | T1078 | med | lateral_movement |
+| `bulk_exec` | T1059 | high | execution |
+| `host_activity` (c2) | T1071 | low | command_and_control |
+| `host_activity` (lateral) | T1021 | med | lateral_movement |
+| `host_activity` (postex) | T1059 | high | execution |
+| `host_activity` (other) | T1059 | med | execution |
+| `pivot_observation` | T1090 | low | command_and_control |
+
+Inference sources (`auto` subnet/domain_member, `scope_via`, `internet_facing`, `bloodhound`) are NOT tagged — they describe topology, not actions.
+
+Backend:
+- New `_edge_action_tags(source, edge_type, activity_type)` helper in `topology.py`
+- Three `_add_edge` call sites (P1 cred_validation, P2 bulk_exec, P3 host_activity) merge the result into `edge_data`
+- One-time backfill loop after `manual_edges = [...]` enriches pre-SB4 host_activity / pivot edges that survived the auto filter
+
+Frontend:
+- `NetworkView.jsx` side panel: three new chips next to confidence for any edge carrying these fields — purple MITRE list, colour-coded noise (green/amber/red), blue kill-chain stage. Tooltip on hover.
+
+---
+
+### Smart Build — SB3 Tier-0/1/2 host classification
+
+Smart Build now classifies every host into one of three AD tiers and surfaces it both as a node tag and a coloured chip on the network map.
+
+- **Tier 0** — domain controllers, DA/EA-equivalent hosts (role=`domain_controller`, tags `dc` / `da` / `ea` / `bh:dc` / `bh:da-member`)
+- **Tier 1** — admin-power servers: targets of admin-class edges (`smb_admin`, `admin_to`, `local_admin`, `dcsync`, ACL writes `generic_all`/`write_dacl`/`generic_write`/`write_owner`/`ext_rights`, `allowed_to_delegate`); hosts with `HostActivity.technique` starting with `T1003` (LSASS / SAM / NTDS credential dumping); hosts tagged `bh:admin`
+- **Tier 2** — workstations / everything else
+
+Backend changes:
+- `SmartBuildRequest.include_tier_zones: bool = True` (default on)
+- After all edges are built, `_run_smart_build` iterates over `all_hosts` and writes `node.extra_json.tier` (0 / 1 / 2) plus a `tier:N` tag (replacing any prior `tier:*` tag — idempotent across rebuilds)
+- Result now contains `tier_counts: {tier_0, tier_1, tier_2}`
+
+Frontend changes (`NetworkView.jsx`):
+- T0 / T1 coloured chips in the top-right corner of each node (red `#e8574a` / amber `#f09a3a`)
+- T2 nodes are intentionally silent — chip is only drawn for T0/T1 to keep the map readable
+
+---
+
+### Fix — Smart Build position stability
+
+Repeating Smart Build no longer scatters the network map.
+
+- New `SmartBuildRequest.preserve_positions: bool = True` (default true)
+- When true, any node that already has `x`/`y` keeps its position through
+  rebuild — covers both prior auto-positioned and manually positioned nodes
+- Three blocks that previously moved nodes on every build now respect the flag:
+  1. The `compute_layout` apply loop in `_run_smart_build`
+  2. Transit/region overlay (`_place_between_regions`, `_place_on_region_edge`)
+  3. Attacker uplink relative to entry-region anchor
+- `manually_positioned=True` nodes remain protected via `keep_manual_positions`
+- To force a full re-layout, either call `POST /topology/rebuild-layout`
+  or pass `preserve_positions: false` to Smart Build
+
+---
+
+### Smart Build — SB2 BloodHound edges expansion
+
+BloodHound importer (`import_bloodhound.py`) gained three new edge types and three node-tag enrichments. Smart Build preserves them through its `manual_edges` filter (any edge with `source != "auto"`), so they survive rebuild without further pipeline changes.
+
+#### New edge types
+- `can_rdp` — `CanRDP` principals (computers in the top-level CanRDP key), `confidence=0.8`, `state="inferred"`
+- `allowed_to_delegate` — constrained-delegation principals → target computer, `confidence=0.85`, `state="inferred"`
+- `trust` — domain-trust edges between DCs of different domains, parsed from `*_domains.json` `Trusts[].TrustType` / `TrustDirection`, `confidence=0.95`, `verified=true`; label encodes type (`ParentChild` / `CrossLink` / `Forest` / `External`) and direction (`Inbound` / `Outbound` / `Bidirectional`)
+
+#### Node-tag enrichment (step 6.5)
+- `bh:dc` — domain controllers (host.role=domain_controller or `dc` in tags)
+- `bh:admin` — hosts that are source of any `smb_admin` or ACL edge (admin power principals)
+- `bh:da-member` — hosts whose SID is a member of DA-equivalent groups
+
+Tags are written to `host.tags` and propagate to `node.tags` on the next Smart Build / Auto-Build (which copies host tags into node tags).
+
+#### Stats fields added
+`can_rdp_edges`, `allowed_to_delegate_edges`, `trust_edges`, `bh_dc_tagged`, `bh_admin_tagged`, `bh_da_member_tagged`.
+
+#### Internals
+- `add_edge` helper now returns `bool` for dedup-aware counting
+- New `_add_host_tag` helper for idempotent tag insertion
+
+---
+
+### Smart Build — L1 stable edge IDs
+
+- New `stable_edge_id(from_nid, to_nid, source, kind)` helper in `core/utils.py` — SHA1-derived deterministic edge id (format `edg<12hex>`)
+- `_run_smart_build._add_edge` and the legacy `topology/apply` + `topology/auto-build` edge writers switched from random `new_id("edg")` to `stable_edge_id`
+- `kind` priority: first `access_role` if present, otherwise `type` — same `(from, to, source)` pair can carry several access edges (ssh / winrm / local_admin) as separate stable ids
+- Pivot observation edges in `pivots.py` are now keyed by `pivot_observation_id` so the same observation always yields the same edge id across re-syncs
+- Manual edges created from UI (`network_map.py`, `bulk_actions.py`) still use random ids — they are inserted once and never regenerated
+
+Effect: UI state (selection, hover, manual node position annotations) keyed by edge id survives Smart Build / Auto-Build / Pivot Sync rebuilds.
+
+---
+
 ## v0.2.2 — 2026-05-14
 
 ### Smart Build — Access graph deepening

@@ -10,7 +10,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from .. import models
-from .utils import new_id
+from .utils import new_id, ts_now
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ async def tool_list_findings(db: Session, pid: str, severity: str = None, status
 
 async def tool_create_finding(db: Session, pid: str, title: str, severity: str,
                                description: str = "", recommendation: str = "", host_id: str = None):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = ts_now()
     finding = models.Finding(
         id=new_id("f"),
         pid=pid,
@@ -241,7 +241,7 @@ async def tool_run_playbook(db: Session, pid: str, playbook_id: str, target: str
 
 async def tool_create_note(db: Session, pid: str, title: str, content: str,
                             phase: str = "recon", tags=None):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = ts_now()
     note = models.Note(
         id=new_id("n"),
         pid=pid,

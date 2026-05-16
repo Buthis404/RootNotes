@@ -7,6 +7,7 @@ from passlib.context import CryptContext
 
 from .config import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_HOURS
 from .. import models
+from ..core.utils import utcnow
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -26,7 +27,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def make_token(user: models.User) -> str:
-    exp = datetime.utcnow() + timedelta(hours=JWT_EXPIRE_HOURS)
+    exp = utcnow() + timedelta(hours=JWT_EXPIRE_HOURS)
     return jwt.encode(
         {"sub": user.id, "username": user.username, "role": user.role, "exp": exp},
         JWT_SECRET,

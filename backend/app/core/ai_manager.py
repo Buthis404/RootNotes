@@ -81,7 +81,7 @@ def get_next_provider(db: Session) -> Optional[dict]:
 def mark_429(db: Session, provider_id: str) -> None:
     """Record a rate-limit hit for a provider."""
     cfg = _load_config(db)
-    now_str = datetime.now(timezone.utc).isoformat()
+    now_str = ts_now()
     for p in cfg.get("providers", []):
         if p.get("id") == provider_id:
             p["last_429_at"] = now_str

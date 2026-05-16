@@ -7,7 +7,7 @@ const SCAN_TYPES = [
   { id: 'nuclei', label: 'Nuclei',          icon: 'bug',      color: '#e8574a', desc: 'Vuln templates → auto-create findings' },
   { id: 'cme',    label: 'CME / NetExec',   icon: 'hosts',    color: '#c07af0', desc: 'AD enum → auto-fill hosts & creds' },
   { id: 'bulk',   label: 'Bulk Host Import',icon: 'plus',     color: '#f09a3a', desc: 'IP list or CIDR → batch add hosts' },
-  { id: 'c2',     label: 'C2 Integrations', icon: 'bolt',     color: '#cc2233', desc: 'Cobalt Strike / Sliver / Adaptix → auto-sync sessions' },
+  { id: 'c2',     label: 'C2 Integrations', icon: 'bolt',     color: '#cc2233', desc: 'Adaptix / Mythic / Sliver → auto-sync sessions' },
   { id: 'webhook',label: 'C2 Webhook',      icon: 'shield',   color: '#39d353', desc: 'Receive push callbacks from any C2 framework' },
 ];
 
@@ -366,7 +366,7 @@ function WebhookPanel({ pid, accent }) {
     os: "Windows Server 2019",
     username: "CORP\\administrator",
     domain: "CORP.LOCAL",
-    source: "cobalt_strike",
+    source: "adaptix",
   }, null, 2);
 
   return (
@@ -444,12 +444,12 @@ function WebhookPanel({ pid, accent }) {
 
 // ── C2 Integrations Panel ─────────────────────────────────────────────
 const C2_TYPES = [
-  { id: 'cobalt_strike', label: 'Cobalt Strike', color: '#cc2233', hint: 'Team Server REST API (4.7+). Token: CS Preferences → REST API' },
-  { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'REST API (multiplayer mode). Token: sliver-client generate-token' },
   { id: 'adaptix',       label: 'Adaptix',        color: '#c07af0', hint: 'REST API under /endpoint path. Username + password (or token). URL: https://host:port' },
+  { id: 'mythic',        label: 'Mythic',         color: '#ffa726', hint: 'GraphQL API. Username + password OR apitoken (Settings → API Tokens). URL: https://host:7443' },
+  { id: 'sliver',        label: 'Sliver',         color: '#5b8af5', hint: 'gRPC multiplayer. Paste the operator config JSON from sliver-server: `operator --name X --lhost ... --save .`' },
 ];
 
-const EMPTY_FORM = { name: '', type: 'cobalt_strike', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0, has_token: false, has_password: false };
+const EMPTY_FORM = { name: '', type: 'adaptix', url: '', token: '', username: '', password: '', endpoint: '/endpoint', verify_ssl: false, project_ids: [], enabled: true, sync_interval_minutes: 0, has_token: false, has_password: false };
 
 const SESSION_STATUS = {
   true:  { color: '#39d353', label: 'Active' },
@@ -500,7 +500,7 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
   }, [sessions]);
 
   const acc = accent || '#5b8af5';
-  const typeColors = { adaptix: '#00bcd4', cobalt_strike: '#f44336', sliver: '#8bc34a' };
+  const typeColors = { adaptix: '#00bcd4', mythic: '#ffa726', sliver: '#8bc34a' };
 
   return (
     <div style={{ marginTop: 20, borderTop: '1px solid #1e2230', paddingTop: 16 }}>
@@ -809,14 +809,20 @@ function C2Panel({ pid, accent }) {
             <div style={{ fontSize: 10, color: '#404550', marginTop: 4 }}>{typeInfo(form.type).hint}</div>
           </FieldRow>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          {form.type === 'sliver' ? (
             <FieldRow label="Name">
-              <Input value={form.name} onChange={v => setF('name', v)} placeholder="My CS TeamServer" />
+              <Input value={form.name} onChange={v => setF('name', v)} placeholder="My Sliver" />
             </FieldRow>
-            <FieldRow label="URL">
-              <Input value={form.url} onChange={v => setF('url', v)} placeholder="https://1.2.3.4:50050" monospace />
-            </FieldRow>
-          </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <FieldRow label="Name">
+                <Input value={form.name} onChange={v => setF('name', v)} placeholder="My TeamServer" />
+              </FieldRow>
+              <FieldRow label="URL">
+                <Input value={form.url} onChange={v => setF('url', v)} placeholder="https://1.2.3.4:50050" monospace />
+              </FieldRow>
+            </div>
+          )}
 
           {form.type === 'adaptix' ? (
             <>
@@ -834,10 +840,32 @@ function C2Panel({ pid, accent }) {
             </>
           ) : null}
 
-          <FieldRow label={form.type === 'cobalt_strike' ? 'REST API Token (Bearer)' : 'API Token'}>
-            <Input value={form.token} onChange={v => setF('token', v)} placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : 'token...')} monospace />
+          {form.type === 'mythic' ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <FieldRow label="Username (optional if API token set)">
+                <Input value={form.username} onChange={v => setF('username', v)} placeholder="mythic_admin" />
+              </FieldRow>
+              <FieldRow label="Password">
+                <Input value={form.password} onChange={v => setF('password', v)} placeholder={editing && form.has_password ? 'Stored - enter new to replace' : 'mythic password'} />
+              </FieldRow>
+            </div>
+          ) : null}
+
+          <FieldRow label={
+            form.type === 'mythic' ? 'API Token (preferred — set in Mythic UI → Settings)' :
+            form.type === 'sliver' ? 'Operator Config (paste the entire JSON from sliver-server operator --save)' :
+            'API Token'
+          }>
+            <Input
+              value={form.token}
+              onChange={v => setF('token', v)}
+              placeholder={editing && form.has_token ? 'Stored - enter new to replace' : (editing ? '(leave blank to keep existing)' : (form.type === 'sliver' ? '{"operator":"...","ca_certificate":"-----BEGIN CERTIFICATE-----..."}' : 'token...'))}
+              monospace
+              multiline={form.type === 'sliver'}
+              rows={form.type === 'sliver' ? 8 : 3}
+            />
           </FieldRow>
-          {editing && ((form.type === 'adaptix' && form.has_password) || (form.type !== 'adaptix' && form.has_token)) && (
+          {editing && ((form.type === 'adaptix' && form.has_password) || (form.type === 'mythic' && (form.has_password || form.has_token)) || (form.type !== 'adaptix' && form.type !== 'mythic' && form.has_token)) && (
             <div style={{ fontSize: 10, color: '#606570', marginBottom: 10, fontFamily: 'JetBrains Mono' }}>
               Stored integration secrets are write-only. Leave blank to keep current values.
             </div>

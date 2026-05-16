@@ -1,3 +1,4 @@
+import hashlib
 import re
 import uuid
 import json
@@ -14,9 +15,31 @@ def new_id(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
 
+def stable_edge_id(from_nid: str, to_nid: str, source: str, kind: str = "") -> str:
+    """Deterministic edge id from (from, to, source, kind).
+
+    Used by smart-build and other auto-edge producers so that UI state
+    (selection, hover, manual position annotations) survives rebuild.
+    """
+    raw = f"{from_nid or ''}|{to_nid or ''}|{source or ''}|{kind or ''}".encode("utf-8")
+    return "edg" + hashlib.sha1(raw).hexdigest()[:12]
+
+
 def ts_now() -> str:
     """Return current UTC time as ISO-8601 string with Z suffix: 2026-01-15T14:32:07Z"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utcnow() -> datetime:
+    """
+    Naive UTC datetime — drop-in replacement for deprecated `datetime.utcnow()`.
+
+    Use when you need a `datetime` object for arithmetic (subtraction, addition
+    with timedelta, comparison with stored strings parsed via `strptime`).
+    For string timestamps stored in DB rows or returned over the wire, use
+    `ts_now()` instead.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def normalize_domain(value: str) -> str:

@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..core.events import bcast
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 def _job_dict(job: models.Job) -> dict:

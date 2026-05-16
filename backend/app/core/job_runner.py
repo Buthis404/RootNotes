@@ -19,6 +19,8 @@ _SUPPORTED_QUEUED_OPERATIONS = {
     ("topology", "rebuild_layout"),
     ("httpx", "scan"),
     ("ffuf", "scan"),
+    # P4: live C2 actions as a queued playbook step
+    ("c2", "exec"),
 }
 
 
@@ -79,6 +81,9 @@ async def _dispatch_job(db, job: models.Job, cancel_token: CancellationToken) ->
         return
     if job.connector_key == "ffuf" and job.operation == "scan":
         await _run_ffuf_job(db, job, cancel_token)
+        return
+    if job.connector_key == "c2" and job.operation == "exec":
+        await _run_c2_exec_job(db, job, cancel_token)
         return
     finish_job(db, job, status="failed", error_output="Queued execution is not supported for this connector/operation yet")
 
@@ -457,3 +462,90 @@ async def _run_topology_rebuild_job(db, job: models.Job, cancel_token: Cancellat
     result = schemas.Network.from_orm_obj(network)
     bcast(job.pid, "network", "layout_applied", {"network": result.model_dump(), "updated_at": job.created_at})
     finish_job(db, job, status="done", result={"nodes_repositioned": len(positioned), "network_id": network.id})
+
+
+async def _run_c2_exec_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
+    """
+    Run a queued C2 command via Adaptix (or another supported framework).
+
+    Job payload (request_json) fields:
+        integration_id       — id of the saved C2 integration to use
+        agent_id             — target beacon/agent id on the C2
+        host_id              — RootNotes host the activity will attach to
+        commandline          — command to run (or BOF spec for bof mode)
+        mode                 — "command" | "bof"
+        credential_source    — "rootnotes" | "c2" (optional)
+        credential_id        — cred to use for command-line %vars% (optional)
+        wait_for_output      — bool, default True
+        timeout_seconds      — int, default 12
+    """
+    from ..routers.c2 import (
+        _load_integrations, _visible_integrations_for_pid,
+        resolve_c2_cred, perform_c2_command,
+    )
+
+    payload = job.request_json or {}
+    integration_id = (payload.get("integration_id") or "").strip()
+    agent_id = (payload.get("agent_id") or "").strip()
+    host_id = (payload.get("host_id") or "").strip()
+    commandline = (payload.get("commandline") or job.command or "").strip()
+    mode = (payload.get("mode") or "command").strip()
+    credential_source = (payload.get("credential_source") or "rootnotes").strip()
+    credential_id = (payload.get("credential_id") or "").strip()
+    wait_for_output = bool(payload.get("wait_for_output", True))
+    timeout_seconds = int(payload.get("timeout_seconds") or 12)
+    title = (payload.get("title") or job.title or "").strip() or (
+        "Adaptix BOF" if mode == "bof" else "Adaptix command"
+    )
+
+    if not integration_id or not agent_id or not host_id or not commandline:
+        finish_job(db, job, status="failed",
+                   error_output="c2 step requires integration_id, agent_id, host_id, commandline")
+        return
+
+    host = db.query(models.Host).filter(
+        models.Host.id == host_id, models.Host.pid == job.pid
+    ).first()
+    if not host:
+        finish_job(db, job, status="failed", error_output=f"Host {host_id} not in project")
+        return
+
+    cfg = next(
+        (i for i in _visible_integrations_for_pid(_load_integrations(db), job.pid)
+         if i.get("id") == integration_id),
+        None,
+    )
+    if not cfg:
+        finish_job(db, job, status="failed",
+                   error_output=f"C2 integration {integration_id} not visible in project")
+        return
+    from ..routers.c2 import SUPPORTED_EXEC_C2_TYPES
+    if cfg.get("type") not in SUPPORTED_EXEC_C2_TYPES:
+        finish_job(
+            db, job, status="failed",
+            error_output=f"Execution supported only for: {', '.join(SUPPORTED_EXEC_C2_TYPES)} "
+                         f"(integration is {cfg.get('type')!r})",
+        )
+        return
+
+    try:
+        selected_cred = await resolve_c2_cred(db, job.pid, credential_id, credential_source, cfg)
+        result, activity, rendered_command = await perform_c2_command(
+            db, job.pid, host, cfg, agent_id, commandline, mode, selected_cred,
+            wait_for_output, timeout_seconds, title,
+            actor_username=job.created_by or "playbook",
+        )
+    except Exception as exc:
+        finish_job(db, job, status="failed", error_output=f"C2 execution failed: {exc}")
+        return
+
+    finish_job(
+        db, job, status="done",
+        output=(result.get("output") or "")[:20000],
+        result={
+            "activity_id": activity.id,
+            "host_id": host.id,
+            "rendered_command": rendered_command,
+            "c2_result": result,
+        },
+    )

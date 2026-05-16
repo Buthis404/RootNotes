@@ -12,6 +12,20 @@ import AddFromProjectPanel from './network-map/AddFromProjectPanel.jsx';
 import { NodeShape, guessNodeType, inferAllRoles } from './network-map/NodeVisuals.jsx';
 import { ACTIVITY_TYPES, ACTIVITY_STATUS, NETWORK_BACKGROUNDS, REGION_FILL, REGION_STROKE, EMPTY_ACTIVITY, INSPECTOR_TABS, ROLE_ICON } from './network-map/constants.js';
 
+// P5 — Route semantics: per-transport colors for edge chips and legend.
+// Transport is derived server-side from edge.type / access_roles (see
+// backend/app/core/edge_semantics.py).
+const TRANSPORT_COLORS = {
+  ssh:    '#39d353',  // green
+  winrm:  '#5b8af5',  // blue
+  smb:    '#c07af0',  // purple
+  rdp:    '#f09a3a',  // orange
+  c2:     '#e8574a',  // red
+  ldap:   '#8f7af5',  // violet
+  http:   '#6fc8f0',  // cyan
+  mssql:  '#e8cc42',  // yellow
+};
+
 const CommitFieldInput = memo(function CommitFieldInput({ label, value, onCommit, placeholder, mono = true, textarea = false }) {
   const [draft, setDraft] = useState(value || '');
 
@@ -352,9 +366,36 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                       <select value={edge.type || 'link'} onChange={e => updateEdge(edge.id, { type: e.target.value })} style={{ background: '#0e1016', border: '1px solid #6fc8f044', borderRadius: 3, color: '#6fc8f0', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '1px 4px' }}>
                         {['ssh','winrm','smb_admin','local_admin','shell','c2_session','rdp','lateral','pivot','uplink','domain_admin','domain_member','auth_path','trust','same_subnet','lan','routed','exploit','tunnel','link'].map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
+                      {edge.transport && (() => {
+                        const tc = TRANSPORT_COLORS[edge.transport] || '#808590';
+                        return (
+                          <span title={`Transport (P5): ${edge.transport}`} style={{ fontSize: 9, color: tc, background: tc + '18', border: `1px solid ${tc}33`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{edge.transport}</span>
+                        );
+                      })()}
+                      {edge.kind && edge.kind !== 'other' && (
+                        <span title={`Kind (P5): ${edge.kind}`} style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.kind}</span>
+                      )}
                       <span style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.state || (edge.is_manual ? 'manual' : 'inferred')}</span>
                       <span style={{ fontSize: 9, color: edge.verified ? '#39d353' : '#808590', background: (edge.verified ? '#39d35318' : '#80859018'), border: `1px solid ${edge.verified ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.verified ? 'verified' : 'unverified'}</span>
                       {edge.confidence != null && <span style={{ fontSize: 9, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{Math.round(Number(edge.confidence) * 100)}%</span>}
+                      {Array.isArray(edge.mitre_techniques) && edge.mitre_techniques.length > 0 && (
+                        <span title="MITRE ATT&CK techniques" style={{ fontSize: 9, color: '#9a7af0', background: '#9a7af018', border: '1px solid #9a7af033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                          {edge.mitre_techniques.join(', ')}
+                        </span>
+                      )}
+                      {edge.noise_level && (() => {
+                        const nc = edge.noise_level === 'high' ? '#e8574a' : edge.noise_level === 'med' ? '#f09a3a' : '#39d353';
+                        return (
+                          <span title="OPSEC noise level" style={{ fontSize: 9, color: nc, background: nc + '18', border: `1px solid ${nc}33`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                            noise:{edge.noise_level}
+                          </span>
+                        );
+                      })()}
+                      {edge.kill_chain_stage && (
+                        <span title="Kill-chain stage" style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>
+                          {edge.kill_chain_stage.replace(/_/g, ' ')}
+                        </span>
+                      )}
                     </div>
                     <input value={edge.label || ''} onChange={e => updateEdge(edge.id, { label: e.target.value })} placeholder="VPN / SMB / trust" style={{ width: '100%', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, padding: '4px 6px', color: '#c8cdd6', fontSize: 10, outline: 'none', fontFamily: 'JetBrains Mono', boxSizing: 'border-box' }} />
                     <div style={{ display: 'flex', gap: 6 }}>
@@ -1192,6 +1233,7 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
     if (t === 'auth_path' || t === 'trust') return { stroke: '#c07af0', sw: 1.5, dash: '6 3', anim: false };
     if (t === 'uplink') return { stroke: '#f09a3a', sw: 2, dash: '7 3', anim: true };
     if (t === 'same_subnet' || t === 'lan') return { stroke: '#3a4a5a', sw: 1, dash: '5 5', anim: false };
+    if (t === 'service_dep') return { stroke: '#6a7180', sw: 1, dash: '2 4', anim: false };
     if (t === 'routed') return { stroke: '#2a3a50', sw: 1, dash: '3 7', anim: false };
     // Legacy style string
     const byStyle = {
@@ -1382,8 +1424,20 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
                         </g>
                       );
                     })() : null;
-                    if (!roleElems && !zoneElem) return null;
-                    return <>{roleElems}{zoneElem}</>;
+                    // SB3: Tier-0/1/2 chip — top-right corner; Tier 2 is silent
+                    const TIER_COLORS = { 0: '#e8574a', 1: '#f09a3a' };
+                    const tierVal = (node.tier === 0 || node.tier === 1) ? node.tier : null;
+                    const tierElem = tierVal !== null ? (() => {
+                      const tc = TIER_COLORS[tierVal];
+                      return (
+                        <g transform="translate(33,-2)">
+                          <circle cx="0" cy="0" r="6" fill={tc + '33'} stroke={tc} strokeWidth="1"/>
+                          <text x="0" y="2" textAnchor="middle" fontSize="6.5" fill={tc} fontFamily="JetBrains Mono" fontWeight="700">{`T${tierVal}`}</text>
+                        </g>
+                      );
+                    })() : null;
+                    if (!roleElems && !zoneElem && !tierElem) return null;
+                    return <>{roleElems}{zoneElem}{tierElem}</>;
                   })()}
                 </g>;
               })}
@@ -1406,7 +1460,30 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
               Click the target node or press ESC to cancel
             </div>
           </div>}
-          {edgeMenu && <div style={{ position: 'fixed', top: edgeMenu.y, left: edgeMenu.x, zIndex: 300, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, padding: 6, boxShadow: '0 8px 24px #00000088' }}><button onClick={() => { deleteEdge(edgeMenu.edgeId); setEdgeMenu(null); }} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px' }}><Icon name="trash" size={11} color="#cc2233" /> Delete edge</button></div>}
+          {edgeMenu && (() => {
+            const _menuEdge = edges.find(e => e.id === edgeMenu.edgeId);
+            const _isVerified = !!_menuEdge?.verified;
+            const _menuBtnBase = { background: 'transparent', border: 'none', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', width: '100%', textAlign: 'left' };
+            return (
+              <div style={{ position: 'fixed', top: edgeMenu.y, left: edgeMenu.x, zIndex: 300, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, padding: 6, boxShadow: '0 8px 24px #00000088', minWidth: 140 }}>
+                <button
+                  onClick={() => { updateEdge(edgeMenu.edgeId, { verified: !_isVerified, manual_override: true }); setEdgeMenu(null); }}
+                  style={{ ..._menuBtnBase, color: _isVerified ? '#808590' : '#39d353' }}
+                  title={_isVerified ? 'Mark this edge as inferred (auto)' : 'Promote this edge to verified — survives Smart Build rebuilds'}
+                >
+                  <Icon name={_isVerified ? 'eyeOff' : 'check'} size={11} color={_isVerified ? '#808590' : '#39d353'} />
+                  {_isVerified ? 'Unverify edge' : 'Verify edge'}
+                </button>
+                <div style={{ height: 1, background: '#2a2d35', margin: '4px 0' }} />
+                <button
+                  onClick={() => { deleteEdge(edgeMenu.edgeId); setEdgeMenu(null); }}
+                  style={{ ..._menuBtnBase, color: '#cc2233' }}
+                >
+                  <Icon name="trash" size={11} color="#cc2233" /> Delete edge
+                </button>
+              </div>
+            );
+          })()}
           <div style={{ position: 'absolute', bottom: 12, left: 12, background: '#0c0e13cc', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 12px', backdropFilter: 'blur(4px)', display: 'flex', gap: 16 }}>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Status</div>
@@ -1415,6 +1492,10 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Edges</div>
               {[['Access (verified)', '#39d353'], ['Access (inferred)', '#39d35399'], ['Entry uplink', '#f09a3a'], ['Domain admin', '#e8574a'], ['Exploit', '#cc2233'], ['Lateral/Pivot', '#e8cc42'], ['Tunnel', '#5b8af5'], ['Domain', '#8f7af5'], ['Subnet', '#3a4a5a']].map(([l, c]) => <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 14, height: 1.5, background: c, display: 'inline-block' }} /><span style={{ fontSize: 9, color: '#606570' }}>{l}</span></div>)}
+            </div>
+            <div>
+              <div title="P5: derived transport on access edges" style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Transport</div>
+              {Object.entries(TRANSPORT_COLORS).map(([t, c]) => <div key={t} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: c + '18', border: `1px solid ${c}55`, color: c, fontSize: 7, fontFamily: 'JetBrains Mono', textAlign: 'center', lineHeight: '12px', textTransform: 'uppercase' }}>{t[0]}</span><span style={{ fontSize: 9, color: '#606570', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t}</span></div>)}
             </div>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Keyboard shortcuts</div>

@@ -15,7 +15,7 @@ from ..core.deps import get_current_user
 from ..core.events import bcast
 from ..core.job_runner import schedule_job_run
 from ..core.job_tracker import queue_job
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import SessionLocal, get_db
 from ..plugins.registry import registry
 
@@ -23,7 +23,7 @@ router = APIRouter(tags=["playbooks"])
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 class PlaybookStepBody(BaseModel):
@@ -158,6 +158,25 @@ STEP_TEMPLATES = {
             {"key": "host_id", "label": "Host id", "type": "text", "default": ""},
             {"key": "cred_id", "label": "Cred id", "type": "text", "default": ""},
             {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
+    "c2:exec": {
+        "id": "c2:exec",
+        "title": "C2 Live Action",
+        "connector_key": "c2",
+        "operation": "exec",
+        "description": "Execute a command (or BOF) via a live C2 beacon — currently Adaptix; writes a HostActivity on completion.",
+        "fields": [
+            {"key": "integration_id", "label": "C2 Integration id", "type": "text", "default": "", "required": True},
+            {"key": "agent_id", "label": "Agent / Beacon id", "type": "text", "default": "", "required": True},
+            {"key": "host_id", "label": "Target host id", "type": "text", "default": "", "required": True},
+            {"key": "commandline", "label": "Command", "type": "textarea", "default": "", "required": True},
+            {"key": "mode", "label": "Mode", "type": "select", "options": ["command", "bof"], "default": "command"},
+            {"key": "credential_source", "label": "Cred source", "type": "select", "options": ["rootnotes", "c2"], "default": "rootnotes"},
+            {"key": "credential_id", "label": "Cred id", "type": "text", "default": ""},
+            {"key": "wait_for_output", "label": "Wait for output", "type": "boolean", "default": True},
+            {"key": "timeout_seconds", "label": "Timeout (sec)", "type": "number", "default": 12},
+            {"key": "title", "label": "Activity title", "type": "text", "default": ""},
         ],
     },
     # ── AD / Kerberos templates ───────────────────────────────────────────
@@ -1105,6 +1124,48 @@ def _job_spec_for_step(pid: str, step: dict, body: PlaybookRunBody, created_by: 
             "created_by": created_by,
         }
 
+    if connector_key == "c2" and operation == "exec":
+        integration_id = (params.get("integration_id") or "").strip()
+        agent_id = (params.get("agent_id") or "").strip()
+        host_id = (params.get("host_id") or "").strip()
+        commandline = (params.get("commandline") or "").strip()
+        if not integration_id:
+            raise HTTPException(400, "c2:exec step requires integration_id")
+        if not agent_id:
+            raise HTTPException(400, "c2:exec step requires agent_id")
+        if not host_id:
+            raise HTTPException(400, "c2:exec step requires host_id")
+        if not commandline:
+            raise HTTPException(400, "c2:exec step requires commandline")
+        # %var% substitution from run-time vars (target, target_url, etc.)
+        commandline = _substitute_run_vars(commandline, body)
+        mode = params.get("mode") or "command"
+        if mode not in ("command", "bof"):
+            raise HTTPException(400, f"c2:exec mode must be command|bof, got: {mode}")
+        return {
+            "job_type": "c2_exec",
+            "title": params.get("title") or title,
+            "target": params.get("target") or host_id,
+            "command": commandline,
+            "connector_key": "c2",
+            "operation": "exec",
+            "related_entity_type": "host",
+            "related_entity_id": host_id,
+            "request_json": {
+                "integration_id": integration_id,
+                "agent_id": agent_id,
+                "host_id": host_id,
+                "commandline": commandline,
+                "mode": mode,
+                "credential_source": params.get("credential_source") or "rootnotes",
+                "credential_id": params.get("credential_id") or "",
+                "wait_for_output": bool(params.get("wait_for_output", True)),
+                "timeout_seconds": int(params.get("timeout_seconds") or 12),
+                "title": params.get("title") or title,
+            },
+            "created_by": created_by,
+        }
+
     if connector_key == "ffuf" and operation == "scan":
         target_url = (params.get("target_url") or body.target_url or "").strip()
         if not target_url:
@@ -1667,7 +1728,7 @@ async def import_custom_playbooks(
 ):
     raw = json.loads((await file.read()).decode())
     items = raw if isinstance(raw, list) else raw.get("playbooks", [])
-    now = datetime.now(timezone.utc).isoformat()
+    now = ts_now()
     created = skipped = 0
     existing_titles = {p.title.strip().lower() for p in db.query(models.CustomPlaybook).all()}
     for item in items:
@@ -1827,7 +1888,7 @@ def create_operation_pack(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    now = datetime.now(timezone.utc).isoformat()
+    now = ts_now()
     pack = models.OperationPack(
         id=f"pack_{uuid4().hex[:10]}",
         name=body.name,
