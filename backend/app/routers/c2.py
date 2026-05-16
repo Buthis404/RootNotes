@@ -1,5 +1,5 @@
 """
-C2 framework integrations: Cobalt Strike, Sliver, Adaptix.
+C2 framework integrations: Sliver, Adaptix.
 
 Each integration is stored as an encrypted config in global_settings.
 Sync pulls sessions/agents/creds from the C2 and auto-populates
@@ -143,7 +143,7 @@ def _safe_integration(cfg: dict) -> dict:
 
 class C2IntegrationCreate(BaseModel):
     name: str
-    type: str                        # cobalt_strike | sliver | adaptix
+    type: str                        # sliver | adaptix
     url: str
     token: str = ""
     username: str = ""
@@ -199,7 +199,7 @@ def create_integration(
     _: models.User = Depends(require_admin),
 ):
     _require_c2()
-    if body.type not in ("cobalt_strike", "sliver", "adaptix"):
+    if body.type not in ("sliver", "adaptix"):
         raise HTTPException(400, f"Unknown C2 type: {body.type}")
     integrations = _load_integrations(db)
     cfg = body.model_dump()
@@ -239,62 +239,6 @@ def delete_integration(
 
 
 # ── Connectors ────────────────────────────────────────────────────────
-
-async def _cs_sync(cfg: dict) -> dict:
-    """
-    Cobalt Strike 4.7+ REST API.
-    Requires: Team Server REST API enabled, Bearer token set.
-    Docs: https://hstechdocs.helpsystems.com/manuals/cobaltstrike/current/userguide/content/topics/post-exploitation_cobalt-strike-api.htm
-    """
-    url = cfg["url"].rstrip("/")
-    headers = {"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
-        beacons_r = await client.get(f"{url}/api/v1/beacons", headers=headers)
-        beacons_r.raise_for_status()
-        beacons = beacons_r.json() if isinstance(beacons_r.json(), list) else beacons_r.json().get("beacons", [])
-
-        creds = []
-        try:
-            creds_r = await client.get(f"{url}/api/v1/credentials", headers=headers)
-            if creds_r.status_code == 200:
-                creds = creds_r.json() if isinstance(creds_r.json(), list) else creds_r.json().get("credentials", [])
-        except Exception:
-            pass
-
-    result_hosts = []
-    for b in beacons:
-        if not b:
-            continue
-        result_hosts.append({
-            "ip": b.get("internal") or b.get("host") or "",
-            "hostname": b.get("computer") or "",
-            "os": b.get("os") or "",
-            "username": b.get("user") or "",
-            "arch": b.get("arch") or "",
-            "process": b.get("process") or "",
-            "pid": b.get("pid"),
-            "alive": bool(b.get("alive", True)),
-            "beacon_id": str(b.get("id") or ""),
-            "note": b.get("note") or "",
-            "source": "cobalt_strike",
-        })
-
-    result_creds = []
-    for c in creds:
-        if not c:
-            continue
-        result_creds.append({
-            "username": c.get("user") or c.get("username") or "",
-            "secret": c.get("password") or c.get("hash") or "",
-            "type": "hash" if c.get("hash") and not c.get("password") else "plain",
-            "realm": c.get("realm") or c.get("domain") or "",
-            "host": c.get("host") or "",
-            "source": "cobalt_strike",
-        })
-
-    return {"hosts": result_hosts, "creds": result_creds}
-
 
 async def _sliver_sync(cfg: dict) -> dict:
     """
@@ -510,7 +454,6 @@ async def _adaptix_sync(cfg: dict) -> dict:
 
 
 _CONNECTORS = {
-    "cobalt_strike": _cs_sync,
     "sliver": _sliver_sync,
     "adaptix": _adaptix_sync,
 }
@@ -845,34 +788,6 @@ async def _adaptix_execute(cfg: dict, agent_id: str, commandline: str, wait_for_
         return result
 
 
-async def _cs_live_agents(cfg: dict) -> list[dict]:
-    url = cfg["url"].rstrip("/")
-    headers = {"Authorization": f"Bearer {cfg.get('token', '')}"}
-    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
-        r = await client.get(f"{url}/api/v1/beacons", headers=headers)
-        r.raise_for_status()
-        raw = r.json()
-        beacons = raw if isinstance(raw, list) else raw.get("beacons", [])
-    result = []
-    for b in (beacons or []):
-        alive = bool(b.get("alive", True))
-        result.append({
-            "ip": b.get("internal") or b.get("host") or "",
-            "hostname": b.get("computer") or "",
-            "username": b.get("user") or "",
-            "domain": "",
-            "os": b.get("os") or "",
-            "arch": b.get("arch") or "",
-            "process": b.get("process") or "",
-            "beacon_id": str(b.get("id") or ""),
-            "listener": "",
-            "alive": alive,
-            "mark": "alive" if alive else "dead",
-            "last_seen": b.get("last") or "",
-        })
-    return result
-
-
 async def _sliver_live_agents(cfg: dict) -> list[dict]:
     url = cfg["url"].rstrip("/")
     headers = {"Authorization": f"Bearer {cfg.get('token', '')}"}
@@ -904,7 +819,6 @@ async def _sliver_live_agents(cfg: dict) -> list[dict]:
 
 _LIVE_CONNECTORS: dict[str, Any] = {
     "adaptix":       _adaptix_live_agents,
-    "cobalt_strike": _cs_live_agents,
     "sliver":        _sliver_live_agents,
 }
 
