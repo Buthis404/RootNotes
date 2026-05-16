@@ -1137,6 +1137,32 @@ _JUNCTION_ROLES = {"network_device", "router", "firewall", "vpn", "gateway"}
 _JUNCTION_TAGS  = {"router", "gateway", "vpn", "firewall", "fw", "pivot"}
 _JUNCTION_KW    = ("vpn", "gw", "gateway", "router", "fw", "firewall", "pivot", "tunnel")
 
+# "Key" hosts deserve their own hub-and-spoke edges in the map.
+# Plain workstations / unknown hosts inherit the region grouping instead,
+# keeping the map readable when subnets contain dozens of unscanned nodes.
+_KEY_HOST_ROLES = (
+    _JUNCTION_ROLES
+    | {"domain_controller", "dc", "file_server", "web_server", "database",
+       "mail_server", "mail", "server", "jump_host", "attacker"}
+)
+_KEY_HOST_TAGS = (
+    _JUNCTION_TAGS
+    | {"server", "dc", "domain_controller", "attacker"}
+)
+
+
+def _is_key_host(h: dict) -> bool:
+    """A host is 'key' if it adds analytical value beyond mere subnet presence."""
+    if h.get("is_attacker"):
+        return True
+    role = (h.get("role") or "").lower()
+    if role in _KEY_HOST_ROLES:
+        return True
+    tags = {t.lower() for t in (h.get("tags") or [])}
+    if tags & _KEY_HOST_TAGS:
+        return True
+    return False
+
 
 _RFC1918_NETS = [
     ipaddress.ip_network("10.0.0.0/8"),
@@ -1997,6 +2023,36 @@ def _run_smart_build(
                 }):
                     edges_added += 1
 
+    # ── Key-host set: shared by P5 + P6.5 to keep the map readable ────
+    # A host is "key" if it adds analytical value beyond raw subnet presence
+    # (DCs, servers, network devices, attackers, C2 hosts, hosts with access).
+    # Plain workstations / unscanned hosts stay inside their region without
+    # explicit hub-and-spoke edges.
+    key_hids: set[str] = {h["id"] for h in hosts_meta if _is_key_host(h)}
+    for ha in db.query(models.HostActivity).filter(
+        models.HostActivity.pid == pid,
+        models.HostActivity.activity_type == "c2",
+        models.HostActivity.status == "done",
+    ).all():
+        if ha.host_id:
+            key_hids.add(ha.host_id)
+    for note in db.query(models.CredHostNote).filter(
+        models.CredHostNote.pid == pid,
+    ).all():
+        if note.access and note.host_id:
+            key_hids.add(note.host_id)
+    for sr in scope_region_defs:
+        gw_ip = (sr.get("gateway_ip") or "").strip()
+        if not gw_ip:
+            continue
+        for h in hosts_meta:
+            if _host_matches_gateway_ip(h, gw_ip):
+                key_hids.add(h["id"])
+
+    nid_to_hid = {
+        n.get("id"): n.get("host_id") for n in existing_nodes if n.get("host_id")
+    }
+
     # ── P5: Subnet proximity edges (hub-and-spoke) ───────────────────
     if include_subnet_edges:
         manual_gateway_by_subnet = {
@@ -2011,6 +2067,13 @@ def _run_smart_build(
             src_nid = ip_to_nid.get(link.source_ip)
             dst_nid = ip_to_nid.get(link.target_ip)
             if not src_nid or not dst_nid:
+                continue
+            # Drop edges where the spoke is a plain workstation/unknown host.
+            # The hub is implicitly key (scope gateway); we require the other
+            # end to also be key.
+            src_hid = nid_to_hid.get(src_nid)
+            dst_hid = nid_to_hid.get(dst_nid)
+            if src_hid not in key_hids or dst_hid not in key_hids:
                 continue
             if _add_edge(src_nid, dst_nid, {
                 "type": link.link_type, "label": link.label or "",
@@ -2068,6 +2131,9 @@ def _run_smart_build(
             if h["id"] == pivot_h["id"]:
                 continue
             if not h.get("ip") or not _ip_in_network(h["ip"], sr["net_obj"]):
+                continue
+            # Same noise filter as P5: only draw pivot edges to key hosts
+            if h["id"] not in key_hids:
                 continue
             dst_nid = hid_to_nid.get(h["id"])
             if not dst_nid:

@@ -12,8 +12,9 @@ from .. import models
 from ..core.deps import get_current_user
 from ..core.permissions import (
     get_membership, get_permissions_for_role, add_project_owner,
-    PROJECT_ROLES, user_has_permission,
+    PROJECT_ROLES,
 )
+from ..core.access import user_has_permission
 from ..core.utils import new_id, ts_now
 
 router = APIRouter(prefix="/api/projects", tags=["members"])
