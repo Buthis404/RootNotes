@@ -966,6 +966,155 @@ async def _sliver_live_agents(cfg: dict) -> list[dict]:
     return result
 
 
+async def _mythic_execute(cfg: dict, callback_id: str, commandline: str,
+                          wait_for_output: bool = True, timeout_seconds: int = 12) -> dict:
+    """
+    Run a command on a Mythic callback. Uses the `createTask` mutation
+    and polls task status + responses until completion (or timeout).
+
+    `commandline` is passed as `params` to the `shell` command, which is
+    the conventional arbitrary-shell entry point for most Mythic agents
+    (Apollo, Poseidon, Athena, Atomic). To target a different command,
+    prefix the line with `!<command> ` — e.g. `!run whoami`.
+    """
+    command = "shell"
+    params = commandline
+    stripped = commandline.lstrip()
+    if stripped.startswith("!"):
+        parts = stripped[1:].split(" ", 1)
+        command = parts[0]
+        params = parts[1] if len(parts) > 1 else ""
+
+    cb_id = _mythic_resolve_callback_db_id(callback_id)
+
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=max(30, timeout_seconds + 5)) as client:
+        headers = await _mythic_auth_headers(cfg, client)
+        # Mythic stores callback by integer id; agent_callback_id is a UUID
+        # the operator usually sees. Resolve UUID → id if needed.
+        if cb_id is None:
+            lookup = await _mythic_graphql(
+                cfg, client,
+                f'query {{ callback(where: {{agent_callback_id: {{_eq: "{callback_id}"}} }}) {{ id }} }}',
+                headers,
+            )
+            rows = lookup.get("callback") or []
+            if not rows:
+                raise HTTPException(404, f"Mythic callback {callback_id!r} not found")
+            cb_id = rows[0]["id"]
+
+        params_json = json.dumps(params)
+        mutation = (
+            "mutation RootNotesCreateTask {"
+            f"  createTask(callback_id: {cb_id}, command: \"{command}\", params: {params_json}) {{"
+            "    id display_id status error"
+            "  }"
+            "}"
+        )
+        data = await _mythic_graphql(cfg, client, mutation, headers)
+        out = (data.get("createTask") or {})
+        if out.get("error"):
+            raise HTTPException(400, f"Mythic createTask error: {out['error']}")
+        task_db_id = out.get("id")
+        task_display_id = out.get("display_id")
+        result = {
+            "accepted": True,
+            "task_id": task_db_id,
+            "display_id": task_display_id,
+            "commandline": commandline,
+            "command": command,
+            "agent_id": callback_id,
+        }
+        if not wait_for_output or not task_db_id:
+            return result
+
+        started = utcnow()
+        latest = None
+        while (utcnow() - started).total_seconds() < max(3, timeout_seconds):
+            poll_q = (
+                "query RootNotesPollTask {"
+                f"  task(where: {{id: {{_eq: {task_db_id}}} }}) {{"
+                "    id status completed stdout stderr"
+                "    responses(order_by: {sequence_number: asc}) { response_text is_error }"
+                "  }"
+                "}"
+            )
+            poll_data = await _mythic_graphql(cfg, client, poll_q, headers)
+            rows = poll_data.get("task") or []
+            if rows:
+                latest = rows[0]
+                if latest.get("completed") or (latest.get("status") or "").lower() in ("completed", "error"):
+                    break
+            await asyncio.sleep(0.8)
+
+        if latest:
+            responses = latest.get("responses") or []
+            output_parts = [r.get("response_text") or "" for r in responses]
+            if latest.get("stdout"):
+                output_parts.append(latest["stdout"])
+            result["output"] = "\n".join(p for p in output_parts if p)
+            result["task"] = latest
+        return result
+
+
+def _mythic_resolve_callback_db_id(callback_id: str) -> int | None:
+    """If callback_id is already numeric, return it as int. Otherwise None
+    (caller will resolve via GraphQL lookup using agent_callback_id UUID)."""
+    try:
+        return int(callback_id)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _mythic_fetch_agent_tasks(cfg: dict, callback_id: str, limit: int = 30) -> list[dict]:
+    cb_id = _mythic_resolve_callback_db_id(callback_id)
+    async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
+        headers = await _mythic_auth_headers(cfg, client)
+        if cb_id is None:
+            lookup = await _mythic_graphql(
+                cfg, client,
+                f'query {{ callback(where: {{agent_callback_id: {{_eq: "{callback_id}"}} }}) {{ id }} }}',
+                headers,
+            )
+            rows = lookup.get("callback") or []
+            if not rows:
+                return []
+            cb_id = rows[0]["id"]
+
+        query = (
+            "query RootNotesAgentTasks {"
+            f"  task(where: {{callback_id: {{_eq: {cb_id}}} }},"
+            f"    order_by: {{timestamp: desc}}, limit: {max(1, min(limit, 100))}) {{"
+            "    id display_id command_name params status completed timestamp stdout stderr"
+            "    responses(order_by: {sequence_number: asc}, limit: 50) { response_text is_error }"
+            "    operator { username }"
+            "  }"
+            "}"
+        )
+        data = await _mythic_graphql(cfg, client, query, headers)
+    rows = data.get("task") or []
+    result = []
+    for t in rows:
+        responses = t.get("responses") or []
+        output_parts = [r.get("response_text") or "" for r in responses]
+        if t.get("stdout"):
+            output_parts.append(t["stdout"])
+        result.append({
+            "task_id": t.get("id"),
+            "display_id": t.get("display_id"),
+            "cmdline": f"{t.get('command_name') or ''} {t.get('params') or ''}".strip(),
+            "completed": bool(t.get("completed")),
+            "text": "\n".join(p for p in output_parts if p),
+            "message": "",
+            "msg_type": t.get("status") or "",
+            "start_time": t.get("timestamp") or "",
+            "finish_time": "",
+            "computer": "",
+            "user": (t.get("operator") or {}).get("username") or "",
+            "raw": t,
+        })
+    return result
+
+
 async def _mythic_live_agents(cfg: dict) -> list[dict]:
     async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=30) as client:
         headers = await _mythic_auth_headers(cfg, client)
@@ -1392,6 +1541,8 @@ async def get_agent_tasks(
     try:
         if c2_type == "adaptix":
             return await _adaptix_fetch_agent_tasks(cfg, agent_id, max(1, min(limit, 100)))
+        if c2_type == "mythic":
+            return await _mythic_fetch_agent_tasks(cfg, agent_id, max(1, min(limit, 100)))
         raise HTTPException(400, f"Agent task history not supported for C2 type {c2_type!r}")
     except HTTPException:
         raise
@@ -1519,7 +1670,7 @@ async def resolve_c2_cred(
     }
 
 
-SUPPORTED_EXEC_C2_TYPES = ("adaptix",)
+SUPPORTED_EXEC_C2_TYPES = ("adaptix", "mythic")
 
 
 async def perform_c2_command(
@@ -1554,8 +1705,12 @@ async def perform_c2_command(
             f"Supported: {', '.join(SUPPORTED_EXEC_C2_TYPES)}"
         )
     rendered_command = _render_command_with_cred(commandline, cred, host)
-    result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
-    summary = f"Executed via Adaptix on agent {agent_id}"
+    if c2_type == "mythic":
+        result = await _mythic_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
+        summary = f"Executed via Mythic on callback {agent_id}"
+    else:
+        result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
+        summary = f"Executed via Adaptix on agent {agent_id}"
     output = result.get("output") or result.get("message") or result.get("error") or ""
     activity = models.HostActivity(
         id=new_id("ha"),
