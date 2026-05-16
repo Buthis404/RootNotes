@@ -12,6 +12,20 @@ import AddFromProjectPanel from './network-map/AddFromProjectPanel.jsx';
 import { NodeShape, guessNodeType, inferAllRoles } from './network-map/NodeVisuals.jsx';
 import { ACTIVITY_TYPES, ACTIVITY_STATUS, NETWORK_BACKGROUNDS, REGION_FILL, REGION_STROKE, EMPTY_ACTIVITY, INSPECTOR_TABS, ROLE_ICON } from './network-map/constants.js';
 
+// P5 — Route semantics: per-transport colors for edge chips and legend.
+// Transport is derived server-side from edge.type / access_roles (see
+// backend/app/core/edge_semantics.py).
+const TRANSPORT_COLORS = {
+  ssh:    '#39d353',  // green
+  winrm:  '#5b8af5',  // blue
+  smb:    '#c07af0',  // purple
+  rdp:    '#f09a3a',  // orange
+  c2:     '#e8574a',  // red
+  ldap:   '#8f7af5',  // violet
+  http:   '#6fc8f0',  // cyan
+  mssql:  '#e8cc42',  // yellow
+};
+
 const CommitFieldInput = memo(function CommitFieldInput({ label, value, onCommit, placeholder, mono = true, textarea = false }) {
   const [draft, setDraft] = useState(value || '');
 
@@ -352,6 +366,15 @@ function NetworkInspector({ projectId, accent, selectedNode, selectedRegion, hos
                       <select value={edge.type || 'link'} onChange={e => updateEdge(edge.id, { type: e.target.value })} style={{ background: '#0e1016', border: '1px solid #6fc8f044', borderRadius: 3, color: '#6fc8f0', fontSize: 9, fontFamily: 'JetBrains Mono', padding: '1px 4px' }}>
                         {['ssh','winrm','smb_admin','local_admin','shell','c2_session','rdp','lateral','pivot','uplink','domain_admin','domain_member','auth_path','trust','same_subnet','lan','routed','exploit','tunnel','link'].map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
+                      {edge.transport && (() => {
+                        const tc = TRANSPORT_COLORS[edge.transport] || '#808590';
+                        return (
+                          <span title={`Transport (P5): ${edge.transport}`} style={{ fontSize: 9, color: tc, background: tc + '18', border: `1px solid ${tc}33`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{edge.transport}</span>
+                        );
+                      })()}
+                      {edge.kind && edge.kind !== 'other' && (
+                        <span title={`Kind (P5): ${edge.kind}`} style={{ fontSize: 9, color: '#6fc8f0', background: '#6fc8f018', border: '1px solid #6fc8f033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.kind}</span>
+                      )}
                       <span style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.state || (edge.is_manual ? 'manual' : 'inferred')}</span>
                       <span style={{ fontSize: 9, color: edge.verified ? '#39d353' : '#808590', background: (edge.verified ? '#39d35318' : '#80859018'), border: `1px solid ${edge.verified ? '#39d35333' : '#80859033'}`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{edge.verified ? 'verified' : 'unverified'}</span>
                       {edge.confidence != null && <span style={{ fontSize: 9, color: '#c07af0', background: '#c07af018', border: '1px solid #c07af033', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{Math.round(Number(edge.confidence) * 100)}%</span>}
@@ -1469,6 +1492,10 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Edges</div>
               {[['Access (verified)', '#39d353'], ['Access (inferred)', '#39d35399'], ['Entry uplink', '#f09a3a'], ['Domain admin', '#e8574a'], ['Exploit', '#cc2233'], ['Lateral/Pivot', '#e8cc42'], ['Tunnel', '#5b8af5'], ['Domain', '#8f7af5'], ['Subnet', '#3a4a5a']].map(([l, c]) => <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 14, height: 1.5, background: c, display: 'inline-block' }} /><span style={{ fontSize: 9, color: '#606570' }}>{l}</span></div>)}
+            </div>
+            <div>
+              <div title="P5: derived transport on access edges" style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Transport</div>
+              {Object.entries(TRANSPORT_COLORS).map(([t, c]) => <div key={t} style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}><span style={{ width: 12, height: 12, borderRadius: 2, background: c + '18', border: `1px solid ${c}55`, color: c, fontSize: 7, fontFamily: 'JetBrains Mono', textAlign: 'center', lineHeight: '12px', textTransform: 'uppercase' }}>{t[0]}</span><span style={{ fontSize: 9, color: '#606570', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t}</span></div>)}
             </div>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Keyboard shortcuts</div>
