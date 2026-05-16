@@ -1437,7 +1437,30 @@ function NetworkCanvas({ projectId, net, onUpdate, onCreateHost, onUpdateHost, o
               Click the target node or press ESC to cancel
             </div>
           </div>}
-          {edgeMenu && <div style={{ position: 'fixed', top: edgeMenu.y, left: edgeMenu.x, zIndex: 300, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, padding: 6, boxShadow: '0 8px 24px #00000088' }}><button onClick={() => { deleteEdge(edgeMenu.edgeId); setEdgeMenu(null); }} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px' }}><Icon name="trash" size={11} color="#cc2233" /> Delete edge</button></div>}
+          {edgeMenu && (() => {
+            const _menuEdge = edges.find(e => e.id === edgeMenu.edgeId);
+            const _isVerified = !!_menuEdge?.verified;
+            const _menuBtnBase = { background: 'transparent', border: 'none', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', width: '100%', textAlign: 'left' };
+            return (
+              <div style={{ position: 'fixed', top: edgeMenu.y, left: edgeMenu.x, zIndex: 300, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, padding: 6, boxShadow: '0 8px 24px #00000088', minWidth: 140 }}>
+                <button
+                  onClick={() => { updateEdge(edgeMenu.edgeId, { verified: !_isVerified, manual_override: true }); setEdgeMenu(null); }}
+                  style={{ ..._menuBtnBase, color: _isVerified ? '#808590' : '#39d353' }}
+                  title={_isVerified ? 'Mark this edge as inferred (auto)' : 'Promote this edge to verified — survives Smart Build rebuilds'}
+                >
+                  <Icon name={_isVerified ? 'eyeOff' : 'check'} size={11} color={_isVerified ? '#808590' : '#39d353'} />
+                  {_isVerified ? 'Unverify edge' : 'Verify edge'}
+                </button>
+                <div style={{ height: 1, background: '#2a2d35', margin: '4px 0' }} />
+                <button
+                  onClick={() => { deleteEdge(edgeMenu.edgeId); setEdgeMenu(null); }}
+                  style={{ ..._menuBtnBase, color: '#cc2233' }}
+                >
+                  <Icon name="trash" size={11} color="#cc2233" /> Delete edge
+                </button>
+              </div>
+            );
+          })()}
           <div style={{ position: 'absolute', bottom: 12, left: 12, background: '#0c0e13cc', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 12px', backdropFilter: 'blur(4px)', display: 'flex', gap: 16 }}>
             <div>
               <div style={{ fontSize: 8, color: '#404550', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5 }}>Status</div>
