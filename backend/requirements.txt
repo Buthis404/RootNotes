@@ -17,3 +17,4 @@ pyzipper==0.3.6
 weasyprint==62.3
 pydyf==0.11.0
 redis[hiredis]==5.2.1
+msgpack==1.0.8
