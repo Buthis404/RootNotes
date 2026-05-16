@@ -1,22 +1,25 @@
 """
-Project-level RBAC.
+Project-level RBAC — role→permission data layer.
 
 Global roles (User.role):
   admin  — super_admin: sees all projects, bypasses project checks
   user   — normal user: sees only member projects
-  viewer — legacy read-only: same scope as user but blocked from writes at middleware level
+  viewer — legacy read-only: same scope as user but blocked from writes
+           at middleware level
 
 Project roles: owner > admin > editor > operator > viewer > auditor
+
+Runtime enforcement (check_pid_access / user_has_permission) lives in
+`access.py` — this module is pure data + membership lookup + the
+add_project_owner mutation helper.
 """
+from datetime import datetime
 from typing import Optional
-from fastapi import Depends, HTTPException, Request
+
 from sqlalchemy.orm import Session
 
-from ..database import get_db
 from .. import models
-from .deps import get_current_user
 from .utils import new_id
-from datetime import datetime
 
 # ── Permission strings ────────────────────────────────────────────────
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -151,82 +154,8 @@ def get_membership(db: Session, project_id: str, user_id: str) -> Optional[model
     )
 
 
-def user_has_permission(db: Session, project_id: str, user: models.User, permission: str) -> bool:
-    """Check if user has permission on project. Super-admin bypasses all checks."""
-    if user.role == "admin":  # global admin = super_admin
-        return True
-    membership = get_membership(db, project_id, user.id)
-    if not membership:
-        return False
-    return permission in get_permissions_for_role(membership.role)
-
-
-def require_project_permission(permission: str):
-    """Factory that returns a FastAPI dependency checking project permission."""
-    def dependency(
-        pid: str,
-        request: Request,
-        db: Session = Depends(get_db),
-        user: models.User = Depends(get_current_user),
-    ) -> models.User:
-        if user.role == "admin":
-            return user
-        membership = get_membership(db, pid, user.id)
-        if not membership:
-            raise HTTPException(404, "Project not found")
-        if permission not in get_permissions_for_role(membership.role):
-            raise HTTPException(403, "Insufficient project permissions")
-        return user
-    return dependency
-
-
-def require_project_member(pid: str, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)) -> tuple[models.User, Optional[models.ProjectMember]]:
-    """Check that user is a member of the project (or global admin). Returns (user, membership)."""
-    if user.role == "admin":
-        return user, None
-    membership = get_membership(db, pid, user.id)
-    if not membership:
-        raise HTTPException(404, "Project not found")
-    return user, membership
-
-
-def get_object_project_id(db: Session, model_class, object_id: str, id_field: str = "id") -> Optional[str]:
-    """Get project_id (pid) for a project-scoped object."""
-    obj = db.query(model_class).filter(getattr(model_class, id_field) == object_id).first()
-    if not obj:
-        return None
-    return getattr(obj, "pid", None)
-
-
-def require_object_permission(model_class, object_id_param: str, permission: str):
-    """Dependency that loads object, checks project membership and permission."""
-    def dependency(
-        request: Request,
-        db: Session = Depends(get_db),
-        user: models.User = Depends(get_current_user),
-    ):
-        object_id = request.path_params.get(object_id_param)
-        if not object_id:
-            raise HTTPException(400, "Missing object id")
-        obj = db.query(model_class).filter(getattr(model_class, "id") == object_id).first()
-        if not obj:
-            raise HTTPException(404, "Not found")
-        pid = getattr(obj, "pid", None)
-        if not pid:
-            raise HTTPException(404, "Not found")
-        if user.role == "admin":
-            return user
-        membership = get_membership(db, pid, user.id)
-        if not membership:
-            raise HTTPException(404, "Not found")
-        if permission not in get_permissions_for_role(membership.role):
-            raise HTTPException(403, "Insufficient permissions")
-        return user
-    return dependency
-
-
 def add_project_owner(db: Session, project_id: str, user_id: str, created_by: Optional[str] = None):
-    """Add user as owner of a project."""
+    """Add user as owner of a project (or upgrade existing membership)."""
     existing = get_membership(db, project_id, user_id)
     if existing:
         existing.role = "owner"
