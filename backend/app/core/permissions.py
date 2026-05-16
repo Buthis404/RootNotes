@@ -19,7 +19,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from .. import models
-from .utils import new_id
+from .utils import new_id, ts_now
 
 # ── Permission strings ────────────────────────────────────────────────
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -166,7 +166,7 @@ def add_project_owner(db: Session, project_id: str, user_id: str, created_by: Op
             project_id=project_id,
             user_id=user_id,
             role="owner",
-            created_at=datetime.utcnow().isoformat(),
+            created_at=ts_now(),
             created_by=created_by,
             is_active=True,
         )

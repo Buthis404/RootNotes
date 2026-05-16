@@ -16,7 +16,7 @@ from ..database import get_db
 from .. import models
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..core.events import log_event
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ router = APIRouter(tags=["import_scanners"])
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 def _strip_html(text: str) -> str:

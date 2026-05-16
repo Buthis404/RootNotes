@@ -15,7 +15,7 @@ from ..core.deps import get_current_user
 from ..core.events import bcast
 from ..core.job_runner import schedule_job_run
 from ..core.job_tracker import queue_job
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import SessionLocal, get_db
 from ..plugins.registry import registry
 
@@ -23,7 +23,7 @@ router = APIRouter(tags=["playbooks"])
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 class PlaybookStepBody(BaseModel):
@@ -1667,7 +1667,7 @@ async def import_custom_playbooks(
 ):
     raw = json.loads((await file.read()).decode())
     items = raw if isinstance(raw, list) else raw.get("playbooks", [])
-    now = datetime.now(timezone.utc).isoformat()
+    now = ts_now()
     created = skipped = 0
     existing_titles = {p.title.strip().lower() for p in db.query(models.CustomPlaybook).all()}
     for item in items:
@@ -1827,7 +1827,7 @@ def create_operation_pack(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    now = datetime.now(timezone.utc).isoformat()
+    now = ts_now()
     pack = models.OperationPack(
         id=f"pack_{uuid4().hex[:10]}",
         name=body.name,

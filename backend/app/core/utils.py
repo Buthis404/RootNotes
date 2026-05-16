@@ -30,6 +30,18 @@ def ts_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utcnow() -> datetime:
+    """
+    Naive UTC datetime — drop-in replacement for deprecated `datetime.utcnow()`.
+
+    Use when you need a `datetime` object for arithmetic (subtraction, addition
+    with timedelta, comparison with stored strings parsed via `strptime`).
+    For string timestamps stored in DB rows or returned over the wire, use
+    `ts_now()` instead.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def normalize_domain(value: str) -> str:
     cleaned = (value or "").strip().lower()
     if cleaned and cleaned.replace('.', '') == '':

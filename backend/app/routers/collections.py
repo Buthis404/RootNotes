@@ -26,7 +26,7 @@ from .. import models
 from ..core.access import check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import bcast
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 
 router = APIRouter(prefix="/api/projects/{pid}/collections", tags=["collections"])
@@ -180,7 +180,7 @@ def create_collection(
     user: models.User = Depends(get_current_user),
 ):
     check_pid_access(db, pid, user, "hosts.read")
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = ts_now()
     coll = models.HostCollection(
         id=new_id("coll"),
         pid=pid,
@@ -222,7 +222,7 @@ def update_collection(
 ):
     check_pid_access(db, pid, user, "hosts.read")
     coll = _get_or_404(db, pid, coll_id)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = ts_now()
     if body.name is not None:
         coll.name = body.name.strip()
     if body.description is not None:

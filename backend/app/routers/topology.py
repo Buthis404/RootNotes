@@ -25,7 +25,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
-from ..core.utils import new_id, normalize_domain, stable_edge_id, ts_now
+from ..core.utils import new_id, normalize_domain, stable_edge_id, ts_now, utcnow
 from ..core.layout import compute_layout
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
@@ -1311,7 +1311,7 @@ def _decay_confidence(c0: float, ts_iso: str, tau_days: float) -> tuple[float, b
         ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
         if ts.tzinfo is not None:
             ts = ts.replace(tzinfo=None)
-        delta_days = max(0.0, (datetime.utcnow() - ts).total_seconds() / 86400.0)
+        delta_days = max(0.0, (utcnow() - ts).total_seconds() / 86400.0)
     except (ValueError, TypeError):
         return c0, False
     import math
