@@ -13,6 +13,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from .. import models
+from .edge_semantics import classify_edge
 
 # ── Columns tracked in dedicated columns (not in extra_json) ─────────────────
 
@@ -83,6 +84,12 @@ def _edge_to_dict(e: models.NetworkEdge) -> dict:
     }
     if e.extra_json:
         d.update(e.extra_json)
+    # Derived route semantics (P5): transport + kind, computed at read time
+    # so the classifier stays the single source of truth (no migration on
+    # classifier changes). User-set values in extra_json take precedence.
+    transport, kind = classify_edge(d)
+    d.setdefault("transport", transport)
+    d.setdefault("kind", kind)
     return d
 
 
