@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Optional
 
 from .. import models
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from .network_data import get_nodes, get_edges
 
 _SENSITIVE_ROLES = {"domain_controller", "server", "file_server", "database"}
@@ -43,7 +43,7 @@ class CandidateResult:
 
 def run_scan(db, pid: str) -> CandidateResult:
     result = CandidateResult()
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    ts = ts_now()
 
     # Load project state once
     hosts      = {h.id: h for h in db.query(models.Host).filter(models.Host.pid == pid).all()}

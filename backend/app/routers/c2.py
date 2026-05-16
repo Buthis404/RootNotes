@@ -22,7 +22,7 @@ from ..core.deps import get_current_user, require_admin
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.logging_setup import get_logger
-from ..core.utils import new_id, ts_now
+from ..core.utils import new_id, ts_now, utcnow
 from ..database import get_db, SessionLocal
 from ..plugins.registry import registry
 
@@ -952,9 +952,9 @@ async def _adaptix_execute(cfg: dict, agent_id: str, commandline: str, wait_for_
         if not wait_for_output:
             return result
 
-        started = datetime.utcnow()
+        started = utcnow()
         latest = None
-        while (datetime.utcnow() - started).total_seconds() < max(3, timeout_seconds):
+        while (utcnow() - started).total_seconds() < max(3, timeout_seconds):
             task_r = await client.get(f"{base}/agent/task/list", headers=headers, params={"agent_id": agent_id, "limit": 20, "offset": 0})
             if task_r.status_code == 200:
                 tasks = task_r.json()

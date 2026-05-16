@@ -52,7 +52,7 @@ def cron_matches(expr: str, dt: datetime) -> bool:
 
 def next_run(expr: str, after: Optional[datetime] = None) -> datetime:
     """Return the next datetime (minute granularity) that matches *expr*."""
-    dt = (after or datetime.utcnow()).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    dt = (after or utcnow()).replace(second=0, microsecond=0) + timedelta(minutes=1)
     for _ in range(527041):  # max one year of minutes
         if cron_matches(expr, dt):
             return dt

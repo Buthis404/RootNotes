@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.deps import get_current_user
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ _MITRE_SEED = [
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 @router.get("", response_model=list[schemas.KBArticle])
@@ -196,7 +196,7 @@ async def import_kb(
 ):
     raw = json.loads((await file.read()).decode())
     articles = raw if isinstance(raw, list) else raw.get("articles", [])
-    now = datetime.now(timezone.utc).isoformat()
+    now = ts_now()
     created = skipped = 0
     for item in articles:
         title = (item.get("title") or "").strip()

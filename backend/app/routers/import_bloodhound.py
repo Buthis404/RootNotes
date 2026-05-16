@@ -30,7 +30,7 @@ from ..core.access import check_pid_access
 from ..core.deps import get_current_user
 from ..core.events import log_event
 from ..core.network_data import get_edges, replace_edges
-from ..core.utils import new_id
+from ..core.utils import new_id, ts_now
 from ..database import get_db
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ _WELL_KNOWN_DA_RIDS = {"-512", "-519", "-518", "-544"}  # DA, EA, Schema, Admini
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return ts_now()
 
 
 def _edge_id() -> str:

@@ -20,6 +20,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.orm import Session
 
 from .core.logging_setup import configure_logging, get_logger
+from .core.utils import utcnow, ts_now
 
 configure_logging()
 logger = get_logger(__name__)
@@ -61,7 +62,7 @@ async def _scheduled_playbooks_loop():
             from .routers.playbooks import _launch_playbook_run
             db = SessionLocal()
             try:
-                now = datetime.utcnow().replace(second=0, microsecond=0)
+                now = utcnow().replace(second=0, microsecond=0)
                 scheds = db.query(models.ScheduledPlaybook).filter(
                     models.ScheduledPlaybook.enabled == True
                 ).all()
@@ -106,7 +107,7 @@ async def _c2_auto_sync_loop():
             db = SessionLocal()
             try:
                 integrations = _load_integrations(db)
-                now = datetime.utcnow()
+                now = utcnow()
                 for cfg in integrations:
                     if not cfg.get("enabled"):
                         continue
@@ -154,7 +155,7 @@ async def lifespan(app: FastAPI):
                 display_name=env_username,
                 password_hash=hash_password(password),
                 role="admin",
-                created_at=datetime.utcnow().isoformat()[:16],
+                created_at=ts_now(),
                 active=True,
             )
             db.add(admin)
