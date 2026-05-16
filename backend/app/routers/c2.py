@@ -516,7 +516,7 @@ async def _msf_sync(cfg: dict) -> dict:
     """
     base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
     username = cfg.get("username") or "msf"
-    password = cfg.get("token") or cfg.get("password") or ""
+    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
 
     hosts_out = []
     creds_out = []
@@ -919,7 +919,7 @@ async def _msf_fetch_session_tasks(cfg: dict, session_id: str, limit: int = 30) 
     """
     base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
     username = cfg.get("username") or "msf"
-    password = cfg.get("token") or cfg.get("password") or ""
+    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
 
     async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
         auth_r = await client.post(
@@ -1074,7 +1074,7 @@ async def _msf_execute(
     """
     base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
     username = cfg.get("username") or "msf"
-    password = cfg.get("token") or cfg.get("password") or ""
+    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
 
     async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=max(30, timeout_seconds + 5)) as client:
         # 1. Auth
@@ -1214,7 +1214,7 @@ async def _msf_live_agents(cfg: dict) -> list[dict]:
     """
     base = (cfg.get("base_url") or cfg.get("url") or "http://localhost:55553").rstrip("/")
     username = cfg.get("username") or "msf"
-    password = cfg.get("token") or cfg.get("password") or ""
+    password = cfg.get("password") or cfg.get("token") or ""  # password is the canonical MSF field; token kept as legacy fallback
 
     async with httpx.AsyncClient(verify=cfg.get("verify_ssl", False), timeout=15) as client:
         auth_r = await client.post(
