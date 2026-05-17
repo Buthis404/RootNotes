@@ -494,9 +494,10 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
     const map = {};
     for (const s of sessions) {
       const key = s.integration_name || s.integration_id;
-      if (!map[key]) map[key] = { name: key, type: s.integration_type, sessions: [], error: null };
-      if (s.error) map[key].error = s.error;
-      else map[key].sessions.push(s);
+      if (!map[key]) map[key] = { name: key, type: s.integration_type, sessions: [], error: null, deadCount: 0 };
+      if (s.error) { map[key].error = s.error; continue; }
+      if (s.alive === false) { map[key].deadCount++; continue; }
+      map[key].sessions.push(s);
     }
     return map;
   }, [sessions]);
@@ -512,7 +513,7 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
           style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
           {loading ? 'Loading...' : 'Refresh'}
         </button>
-        {sessions && <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>{sessions.filter(s => !s.error).length} agent(s)</span>}
+        {sessions && <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono' }}>{sessions.filter(s => !s.error && s.alive !== false).length} live agent(s)</span>}
       </div>
 
       {error && <div style={{ fontSize: 11, color: '#cc2233', fontFamily: 'JetBrains Mono', marginBottom: 8 }}>{error}</div>}
@@ -522,6 +523,7 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
             <span style={{ fontSize: 10, color: typeColors[group.type] || '#808590', background: `${typeColors[group.type] || '#808590'}18`, border: `1px solid ${typeColors[group.type] || '#808590'}44`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{group.type}</span>
             <span style={{ fontSize: 11, color: '#808590' }}>{group.name}</span>
+            {group.deadCount > 0 && <span title={`${group.deadCount} dead agents hidden`} style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>({group.deadCount} dead hidden)</span>}
           </div>
           {group.error && (
             <div style={{ fontSize: 10, color: '#cc2233', fontFamily: 'JetBrains Mono', padding: '6px 8px', background: '#1a0508', border: '1px solid #cc223333', borderRadius: 4 }}>{group.error}</div>
@@ -609,7 +611,7 @@ function SessionsPanel({ pid, accent }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadedAt, setLoadedAt] = useState(null);
-  const [filter, setFilter] = useState({ type: '', tier: '', q: '', aliveOnly: false });
+  const [filter, setFilter] = useState({ type: '', tier: '', q: '', aliveOnly: true });
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   const load = useCallback(async () => {
