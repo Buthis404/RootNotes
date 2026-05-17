@@ -8,7 +8,7 @@ from .. import models, schemas
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, sync_scopes_from_project_ip, sync_project_ip_from_scopes
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.permissions import get_membership, add_project_owner, get_permissions_for_role
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -23,7 +23,7 @@ def list_projects(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    if user.role == "admin":
+    if is_admin(user):
         return db.query(models.Project).all()
     member_pids = [
         m.project_id for m in
@@ -63,7 +63,7 @@ def update_project(
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
-    if user.role != "admin":
+    if not is_admin(user):
         membership = get_membership(db, pid, user.id)
         if not membership:
             raise HTTPException(404, "Project not found")
@@ -93,7 +93,7 @@ def delete_project(
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
-    if user.role != "admin":
+    if not is_admin(user):
         membership = get_membership(db, pid, user.id)
         if not membership:
             raise HTTPException(404, "Project not found")
@@ -115,7 +115,7 @@ def purge_project(
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
-    if user.role != "admin":
+    if not is_admin(user):
         membership = get_membership(db, pid, user.id)
         if not membership:
             raise HTTPException(404, "Project not found")

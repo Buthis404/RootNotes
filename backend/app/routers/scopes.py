@@ -5,7 +5,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, sync_project_ip_from_scopes
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 router = APIRouter(prefix="/api/scopes", tags=["scopes"])
@@ -16,7 +16,7 @@ def list_scopes(pid: str | None = None, db: Session = Depends(get_db), user: mod
     if pid:
         check_pid_access(db, pid, user, "scopes.read")
         return db.query(models.Scope).filter(models.Scope.pid == pid).all()
-    if user.role == "admin":
+    if is_admin(user):
         return db.query(models.Scope).all()
     member_pids = get_user_member_pids(db, user)
     return db.query(models.Scope).filter(models.Scope.pid.in_(member_pids)).all()

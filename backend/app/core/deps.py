@@ -3,8 +3,19 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models
+from .enums import UserRole
 from .errors import AppError
 from .security import decode_token
+
+
+def is_admin(user: "models.User | None") -> bool:
+    """Convenience check that a user has the global admin role.
+
+    Centralised so we have a single place to update if the role schema
+    grows (super-admin, service-account, etc.). Use this instead of
+    `user.role == UserRole.ADMIN.value` (or the old literal) at call sites.
+    """
+    return bool(user is not None and user.role == UserRole.ADMIN.value)
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.User:
@@ -18,7 +29,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.
 
 
 def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
-    if user.role != "admin":
+    if not is_admin(user):
         raise AppError("admin_required", "Admin access required", status=403)
     return user
 

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..core.crypto import decrypt_str, encrypt_str
-from ..core.deps import get_current_user, require_admin
+from ..core.deps import get_current_user, require_admin, is_admin
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.logging_setup import get_logger
@@ -198,7 +198,7 @@ def _can_manage_integration(db: Session, user: models.User, cfg: dict) -> bool:
         (cfg["project_ids"] non-empty AND user owns at least one of them).
         Integrations with no project_ids (global) remain admin-only.
     """
-    if user.role == "admin":
+    if is_admin(user):
         return True
     pids = cfg.get("project_ids") or []
     if not pids:
@@ -209,7 +209,7 @@ def _can_manage_integration(db: Session, user: models.User, cfg: dict) -> bool:
 def _visible_to_user(db: Session, user: models.User, cfg: dict) -> bool:
     """List/read visibility — broader than _can_manage: any project member
     sees integrations bound to projects they're members of."""
-    if user.role == "admin":
+    if is_admin(user):
         return True
     pids = cfg.get("project_ids") or []
     if not pids:
@@ -238,7 +238,7 @@ def create_integration(
     if body.type not in ("sliver", "adaptix", "mythic"):
         raise HTTPException(400, f"Unknown C2 type: {body.type}")
     # Non-admins must scope the integration to projects they own.
-    if user.role != "admin":
+    if not is_admin(user):
         if not body.project_ids:
             raise HTTPException(403, "Only global admins can create unscoped C2 integrations")
         for pid in body.project_ids:
@@ -270,7 +270,7 @@ def update_integration(
     updates = body.model_dump(exclude_none=True)
     # Non-admins cannot widen the scope to include projects they don't own,
     # and cannot remove project_ids entirely (would become a global integration).
-    if user.role != "admin" and "project_ids" in updates:
+    if not is_admin(user) and "project_ids" in updates:
         new_pids = updates["project_ids"] or []
         if not new_pids:
             raise HTTPException(403, "Only global admins can make an integration global")
@@ -1687,7 +1687,7 @@ async def sync_to_project(
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")
-    if user.role != "admin":
+    if not is_admin(user):
         from ..core.access import check_pid_access
         check_pid_access(db, pid, user, "hosts.create")
     try:
@@ -1780,7 +1780,7 @@ async def get_host_actions(
     from ..core.access import check_pid_access
     from ..core.permissions import get_membership, get_permissions_for_role
     check_pid_access(db, pid, user, "hosts.read")
-    if user.role == "admin":
+    if is_admin(user):
         can_read_secret = True
     else:
         m = get_membership(db, pid, user.id)

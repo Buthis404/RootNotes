@@ -28,7 +28,7 @@ def _evaluate(
         "not_member"   — user is not a member of the project (→ 404)
         "no_permission" — user is a member but lacks the permission (→ 403)
     """
-    if user.role == "admin":
+    if is_admin(user):
         return None, None
     membership = get_membership(db, pid, user.id)
     if not membership:

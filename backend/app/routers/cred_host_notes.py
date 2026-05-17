@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.utils import new_id
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 router = APIRouter(prefix="/api/cred-host-notes", tags=["cred-host-notes"])
@@ -21,7 +21,7 @@ def list_cred_host_notes(
     if pid:
         check_pid_access(db, pid, user, "credentials.read")
         q = db.query(models.CredHostNote).filter(models.CredHostNote.pid == pid)
-    elif user.role == "admin":
+    elif is_admin(user):
         q = db.query(models.CredHostNote)
     else:
         member_pids = get_user_member_pids(db, user)

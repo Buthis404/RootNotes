@@ -11,7 +11,7 @@ from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
 from ..core.crypto import decrypt_str, encrypt_str, note_content_is_confidential
 from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root, ts_now
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def list_notes(
             log_event(db, pid, getattr(user, "username", None), "audit", "read_confidential_notes", f"Confidential notes viewed ({confidential_count})", {"count": confidential_count})
             db.commit()
         return [_note_out(note) for note in notes]
-    if user.role == "admin":
+    if is_admin(user):
         return [_note_out(note) for note in db.query(models.Note).all()]
     member_pids = get_user_member_pids(db, user)
     return [_note_out(note) for note in db.query(models.Note).filter(models.Note.pid.in_(member_pids)).all()]
