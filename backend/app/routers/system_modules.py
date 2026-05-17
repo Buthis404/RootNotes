@@ -103,6 +103,10 @@ class AttackerSSHTargetBody(BaseModel):
     exec_jump_username: str = ""
     project_ids: list[str] = []
     enabled: bool = True
+    # Role flags — both default True for backwards compatibility with
+    # targets stored before these fields existed.
+    is_operator: bool = True   # can run scans / bulk exec / playbooks
+    runs_pivot: bool = True    # chisel / ligolo runs here → pivot collector polls it
 
 
 class AttackerSSHExecuteBody(BaseModel):
@@ -222,6 +226,8 @@ def _validate_attacker_target(body: AttackerSSHTargetBody):
         raise HTTPException(400, "Execution proxy username is required when execution proxy password is provided")
     if body.exec_jump_host.strip() and body.exec_jump_port <= 0:
         raise HTTPException(400, "Invalid execution jump port")
+    if not body.is_operator and not body.runs_pivot:
+        raise HTTPException(400, "Target must be either an operator host, a pivot host, or both")
 
 
 @router.get("/attacker-ssh/config")
@@ -260,6 +266,8 @@ def admin_create_attacker_target(body: AttackerSSHTargetBody, admin: models.User
         "exec_jump_username": body.exec_jump_username.strip(),
         "project_ids": body.project_ids,
         "enabled": body.enabled,
+        "is_operator": body.is_operator,
+        "runs_pivot": body.runs_pivot,
         "created_at": ts_now(),
     }
     targets.append(target)
@@ -308,6 +316,8 @@ def admin_update_attacker_target(target_id: str, body: AttackerSSHTargetBody, ad
             "exec_jump_username": body.exec_jump_username.strip(),
             "project_ids": body.project_ids,
             "enabled": body.enabled,
+            "is_operator": body.is_operator,
+            "runs_pivot": body.runs_pivot,
         }
         save_attacker_targets(targets)
         return next(item for item in list_attacker_targets_safe() if item.get("id") == target_id)

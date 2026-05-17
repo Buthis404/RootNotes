@@ -307,7 +307,7 @@ export default function CredsView({ creds, onAdd, onUpdate, onDelete, selectedPr
           <Icon name="export" size={10} color="currentColor" /> CSV
         </button>
         <button onClick={() => setViewMode(v => v === 'matrix' ? 'list' : 'matrix')}
-          title="Матрица: учётные данные × хосты"
+          title="Matrix: credentials × hosts"
           style={{ background: viewMode === 'matrix' ? `${accent}22` : 'transparent', border: `1px solid ${viewMode === 'matrix' ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 12px', cursor: 'pointer', color: viewMode === 'matrix' ? accent : '#808590', fontSize: Math.max(10, fs - 3), fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
           ⊞ Matrix
         </button>

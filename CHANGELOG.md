@@ -1,5 +1,51 @@
 # RootNotes — Changelog
 
+## v0.3.1 — 2026-05-17
+
+### RBAC closures
+- **Knowledge Base** — `kb.*` permissions added to ROLE_PERMISSIONS; every
+  endpoint in `kb.py` now properly gated. Global articles remain admin-only
+  to write; project-scoped articles follow the project role.
+- **WebSocket broadcast filter** — per-recipient policy in `_local_broadcast`:
+  drops events for users without the entity read permission; redacts
+  sensitive fields (e.g. `cred.secret`) to `""` for users without the
+  secondary permission. Global admins bypass. Plain entities fall through
+  unchanged for backwards compatibility.
+- **Audit log coverage** — `read_credential_secrets` event extended to
+  the host-actions panel; new events `secret_used_bulk_exec`,
+  `secret_used_validate`, `secret_used_c2_exec`, `export_with_secrets`.
+- **Permission namespaces** — `playbooks.*`, `jobs.*`, `pivots.*`,
+  `webhooks.*`, `scans.*` added. Fixed dead-string bugs in
+  scheduled_playbooks.py, webhooks.py, domains.py, scans.py where
+  checks gated against non-existent permission strings.
+- **C2 project-owner self-service** — project owners can register C2
+  integrations (Adaptix / Mythic / Sliver) scoped to their projects.
+  Global integrations remain admin-only.
+
+### Pivots
+- **ligolo/chisel parser enrichment** — mode / direction / proxy_type /
+  server / forwards / target_host / interface extracted from `ps`
+  args; new `ss -tnlp` section in the SSH probe populates live
+  listen ports. Parsed fields stored as JSON `#params: {…}` trailer
+  in `notes` (no DB migration).
+- **Attacker target role flags** — every SSH target has `is_operator`
+  (run scans/exec) and `runs_pivot` (chisel/ligolo lives here).
+  Scan/exec endpoints filter operator-capable targets only; the
+  pivot collector filters pivot-capable targets only. Defaults
+  both-true.
+- **Project-scope collect isolation** — `/api/pivots/collect` decides
+  per observation whether routing info falls inside the current
+  project's CIDR scopes. Out-of-scope dropped by default
+  (`strict_scope_filter`); ambiguous (socks-only / hostname target)
+  kept by default (`keep_ambiguous`). Solves the data-leak when
+  one ligolo box serves several projects.
+
+### Docs
+- New top-level `SECURITY.md` — protected assets, threat boundaries,
+  encryption, RBAC, audit log, pre-deployment checklist.
+- New top-level `THREAT_MODEL.md` — STRIDE-style actor matrix and
+  seven specific attack scenarios.
+
 ## v0.3.0 — 2026-05-16
 
 ### C2 integrations

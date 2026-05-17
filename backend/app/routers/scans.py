@@ -24,7 +24,7 @@ from ..core.route_selection import choose_route_aware_target
 from ..core.utils import new_id, ts_now
 from ..database import get_db
 from ..plugins.registry import registry
-from ..plugins.state import list_attacker_targets
+from ..plugins.state import list_attacker_targets, list_attacker_targets_for_exec
 from .pivots import get_pivot_item, normalize_pivot_proxy_type
 
 
@@ -38,17 +38,22 @@ def _require_attacker_ssh():
 
 
 def _get_ssh_config(pid: str, target_id: Optional[str], db: Session | None = None, target_hint: str = "") -> dict:
-    targets = list_attacker_targets()
+    # Scans / exec run only on targets explicitly marked as operator hosts.
+    targets = list_attacker_targets_for_exec()
     if not targets:
-        raise HTTPException(400, "No attacker SSH targets configured")
+        raise HTTPException(400, "No operator-capable attacker SSH targets configured")
     if target_id:
-        t = next((t for t in targets if t.get("id") == target_id), None)
+        # Explicit selection — honour the id but reject pivot-only hosts.
+        all_targets = list_attacker_targets()
+        t = next((t for t in all_targets if t.get("id") == target_id), None)
         if not t:
             raise HTTPException(404, "Attacker target not found")
+        if not t.get("is_operator", True):
+            raise HTTPException(400, "Selected target is configured for pivots only — it cannot run scans")
         return t
     project_targets = [t for t in targets if not t.get("project_ids") or pid in t.get("project_ids", [])]
     if not project_targets:
-        raise HTTPException(400, "No attacker SSH target assigned to this project")
+        raise HTTPException(400, "No operator-capable attacker SSH target assigned to this project")
     if db is not None and target_hint:
         selected = choose_route_aware_target(pid, project_targets, db, target_hint)
         if selected:
@@ -664,7 +669,7 @@ async def run_httpx(
     current_user=Depends(get_current_user),
 ):
     _require_attacker_ssh()
-    check_pid_access(db, pid, current_user)
+    check_pid_access(db, pid, current_user, "scans.run")
     ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     username = current_user.username
     target = body.target.strip()
@@ -795,7 +800,7 @@ async def run_ffuf(
     current_user=Depends(get_current_user),
 ):
     _require_attacker_ssh()
-    check_pid_access(db, pid, current_user)
+    check_pid_access(db, pid, current_user, "scans.run")
     ssh_config = _get_ssh_config(pid, body.target_id, db, body.target_url)
     username = current_user.username
     target_url = body.target_url.strip().rstrip("/")

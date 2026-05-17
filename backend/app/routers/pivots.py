@@ -2,6 +2,7 @@ import hashlib
 import ipaddress
 import re
 from datetime import datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,7 +17,7 @@ from ..core.ssh_exec import run_ssh_command
 from ..core.network_data import get_nodes, get_edges, replace_edges
 from ..core.utils import new_id, stable_edge_id, ts_now
 from ..database import get_db
-from ..plugins.state import list_attacker_targets
+from ..plugins.state import list_attacker_targets, list_attacker_targets_for_pivot
 from .c2 import _load_integrations, _visible_integrations_for_pid
 
 router = APIRouter(prefix="/api/projects/{pid}/pivots", tags=["pivots"])
@@ -25,11 +26,234 @@ _TOOL_RE = re.compile(r"\b(chisel|ligolo|ligolo-ng|proxy|agent)\b", re.I)
 _CIDR_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b")
 _BIND_RE = re.compile(r"(?:R:)?(?P<bind>(?:\d{1,3}\.){3}\d{1,3}:\d+|\d+)")
 
+# chisel forward syntax: `R:1080:socks`, `R:127.0.0.1:8443:10.0.0.1:443`,
+# `L:8080:internal.local:80`, etc. Direction R = reverse, L = local. Type
+# `socks` means the special SOCKS5 listener; otherwise it's a TCP forward.
+_CHISEL_FWD_RE = re.compile(
+    r"(?:^|\s)(?P<dir>[RL]):(?P<spec>[^\s]+)",
+    re.I,
+)
+# `chisel client https://attacker:8080 R:socks` — extract the server URL.
+_CHISEL_SERVER_RE = re.compile(r"chisel\s+client\s+(?P<server>\S+)", re.I)
+
+# ligolo-ng: `agent -connect 10.0.0.1:11601 [-ignore-cert]`,
+# `proxy -selfcert -laddr 0.0.0.0:11601`, also `tunnel_start` interface
+# names like `ligolo`, `ligolo0`, etc.
+_LIGOLO_CONNECT_RE = re.compile(r"-connect\s+(?P<server>\S+)", re.I)
+_LIGOLO_LADDR_RE = re.compile(r"-laddr\s+(?P<bind>\S+)", re.I)
+_LIGOLO_IFACE_RE = re.compile(r"\bdev\s+(?P<iface>ligolo\w*)\b", re.I)
+
+
+def _parse_chisel_args(line: str) -> dict[str, Any]:
+    """Extract structured fields from a chisel ps line.
+
+    Returns a dict with whatever could be parsed; an empty dict when the
+    line is too generic to classify. Used to enrich PivotObservation.
+    """
+    lowered = line.lower()
+    out: dict[str, Any] = {}
+    if "server" in lowered and "--reverse" in lowered:
+        out["mode"] = "server"
+        out["direction"] = "reverse"
+    elif "server" in lowered:
+        out["mode"] = "server"
+    elif "client" in lowered:
+        out["mode"] = "client"
+        srv = _CHISEL_SERVER_RE.search(line)
+        if srv:
+            out["server"] = srv.group("server")
+
+    forwards = []
+    for m in _CHISEL_FWD_RE.finditer(line):
+        spec = m.group("spec") or ""
+        direction = "reverse" if m.group("dir").upper() == "R" else "local"
+        is_socks = spec.lower() == "socks" or spec.lower().endswith(":socks")
+        fwd: dict[str, Any] = {
+            "direction": direction,
+            "proxy_type": "socks" if is_socks else "tcp",
+            "raw": f"{m.group('dir').upper()}:{spec}",
+        }
+        # TCP forwards: try to pull the remote target. Two common forms:
+        #   R:1080:10.0.0.5:80    → forward our 1080 to 10.0.0.5:80
+        #   L:8080:internal.lan:80
+        # Either reverse or local, the 3rd segment is the target host.
+        if not is_socks:
+            parts = spec.split(":")
+            if len(parts) >= 3:
+                fwd["target_host"] = parts[-2]
+                try:
+                    fwd["target_port"] = int(parts[-1])
+                except ValueError:
+                    pass
+        forwards.append(fwd)
+    if forwards:
+        out["forwards"] = forwards
+        # Prefer the first one's direction/type as the headline for the row
+        first = forwards[0]
+        out.setdefault("direction", first["direction"])
+        out["proxy_type"] = first["proxy_type"]
+    return out
+
+
+def _parse_ligolo_args(line: str) -> dict[str, Any]:
+    """Extract structured fields from a ligolo/ligolo-ng ps line."""
+    lowered = line.lower()
+    out: dict[str, Any] = {}
+    if "proxy" in lowered and "agent" not in lowered:
+        out["mode"] = "proxy"
+        laddr = _LIGOLO_LADDR_RE.search(line)
+        if laddr:
+            out["listen"] = laddr.group("bind")
+    elif "agent" in lowered:
+        out["mode"] = "agent"
+        conn = _LIGOLO_CONNECT_RE.search(line)
+        if conn:
+            out["server"] = conn.group("server")
+    iface = _LIGOLO_IFACE_RE.search(line)
+    if iface:
+        out["interface"] = iface.group("iface")
+    return out
+
+
+def _format_params_note(raw_line: str, params: dict[str, Any]) -> str:
+    """Attach a JSON-encoded `#params:` trailer to the raw ps line so the
+    UI / downstream code can recover the parsed fields without a DB
+    migration."""
+    import json as _json
+    if not params:
+        return raw_line[:600]
+    trailer = "#params: " + _json.dumps(params, separators=(",", ":"))
+    # Keep total under ~1KB
+    body = raw_line[:600]
+    return f"{body}\n{trailer}"
+
+
+def _load_project_scope_networks(pid: str, db: Session) -> list[ipaddress._BaseNetwork]:
+    """All in-scope CIDR networks of a project, parsed and deduped.
+
+    Domain / hostname / regex scopes are skipped — pivot routes are
+    network-layer, so we only match against CIDR scopes. Returns an
+    empty list if the project has no CIDR scopes defined.
+    """
+    networks: list[ipaddress._BaseNetwork] = []
+    rows = db.query(models.Scope).filter(
+        models.Scope.pid == pid,
+        models.Scope.in_scope == True,
+        models.Scope.scope_type == "cidr",
+    ).all()
+    for row in rows:
+        val = (row.value or "").strip()
+        if not val:
+            continue
+        try:
+            net = ipaddress.ip_network(val, strict=False)
+        except ValueError:
+            continue
+        networks.append(net)
+    return networks
+
+
+def _observation_scope_decision(
+    item: dict,
+    scope_networks: list[ipaddress._BaseNetwork],
+) -> str:
+    """Return one of:
+       - 'in_scope'      — at least one piece of routing info matched a scope
+       - 'out_of_scope'  — routing info found but matched nothing
+       - 'ambiguous'     — no routing info to judge by (socks-only, no routes)
+
+    Empty `scope_networks` always yields 'in_scope' (no scope = no filter).
+    """
+    if not scope_networks:
+        return "in_scope"
+
+    saw_targeting_info = False
+
+    # route_cidr from `ip route show`
+    rc = (item.get("route_cidr") or "").strip()
+    if rc:
+        saw_targeting_info = True
+        try:
+            obs_net = ipaddress.ip_network(rc, strict=False)
+            for sn in scope_networks:
+                if obs_net.subnet_of(sn) or obs_net.supernet_of(sn) or obs_net.overlaps(sn):
+                    return "in_scope"
+        except ValueError:
+            pass
+
+    # chisel forward targets (parsed inside the params trailer in notes).
+    # Only IP targets count as "decidable" info — hostnames can't be
+    # checked without DNS, so they don't push the observation into
+    # out_of_scope on their own.
+    params = _extract_params_from_notes(item.get("notes") or "")
+    for fwd in (params.get("forwards") or []):
+        target_host = fwd.get("target_host") or ""
+        if not target_host:
+            continue
+        try:
+            ip = ipaddress.ip_address(target_host)
+        except ValueError:
+            continue  # hostname — can't check without DNS
+        saw_targeting_info = True
+        for sn in scope_networks:
+            if ip in sn:
+                return "in_scope"
+
+    return "out_of_scope" if saw_targeting_info else "ambiguous"
+
+
+def _extract_params_from_notes(notes: str) -> dict:
+    """Recover the JSON params trailer written by _format_params_note."""
+    if "#params: " not in notes:
+        return {}
+    try:
+        import json as _json
+        trailer = notes.rsplit("#params: ", 1)[1].splitlines()[0]
+        return _json.loads(trailer)
+    except Exception:
+        return {}
+
+
+def _parse_ss_lines(ss_lines: list[str]) -> dict[str, list[int]]:
+    """Map process name → listening ports (TCP) from `ss -tnlp` output.
+
+    The relevant column is `users:(("chisel",pid=1234,fd=3))`. We extract
+    the binary name and the local port from the same row.
+    """
+    by_proc: dict[str, list[int]] = {}
+    port_re = re.compile(r":(?P<port>\d+)\s")
+    proc_re = re.compile(r'"(?P<name>[^"]+)"')
+    for line in ss_lines:
+        lowered = line.lower()
+        if not any(t in lowered for t in ("chisel", "ligolo", "proxy", "agent")):
+            continue
+        proc_m = proc_re.search(line)
+        port_m = port_re.search(line)
+        if not proc_m or not port_m:
+            continue
+        name = proc_m.group("name").lower()
+        try:
+            port = int(port_m.group("port"))
+        except ValueError:
+            continue
+        by_proc.setdefault(name, []).append(port)
+    return by_proc
+
 
 class PivotCollectBody(BaseModel):
     target_id: str = ""
     source_host_id: str = ""
     clear_existing: bool = True
+    # When True (default), observations whose route_cidr or chisel-forward
+    # target falls outside every Scope of the current project are dropped.
+    # Use False to ingest everything seen on the box (debugging / shared
+    # infrastructure with no formal scopes yet).
+    strict_scope_filter: bool = True
+    # Independently controls whether observations without any targeting
+    # info (e.g. chisel client with SOCKS-only and no routes) are kept.
+    # Defaults to keeping them — they're useful as "something is running
+    # here" markers even if we can't decide project assignment.
+    keep_ambiguous: bool = True
 
 
 def _observation_out(obs: models.PivotObservation) -> dict:
@@ -182,10 +406,20 @@ def get_pivot_item(pid: str, pivot_id: str, db: Session) -> dict | None:
 
 
 def _resolve_pivot_target(pid: str, target_id: str, db: Session) -> tuple[dict, models.Host | None]:
-    targets = [target for target in list_attacker_targets() if target.get("enabled", True) and (not target.get("project_ids") or pid in target.get("project_ids", []))]
+    # Pivot collector only polls hosts where chisel/ligolo can run.
+    targets = [target for target in list_attacker_targets_for_pivot() if (not target.get("project_ids") or pid in target.get("project_ids", []))]
     if not targets:
-        raise HTTPException(400, "No attacker SSH targets are configured for this project")
-    target = next((item for item in targets if item.get("id") == target_id), None) if target_id else targets[0]
+        raise HTTPException(400, "No pivot-capable attacker SSH targets configured for this project")
+    if target_id:
+        # Explicit id — verify it's pivot-capable, otherwise fail with clear message
+        explicit = next((t for t in list_attacker_targets() if t.get("id") == target_id), None)
+        if not explicit:
+            raise HTTPException(404, "Attacker SSH target not found")
+        if not explicit.get("runs_pivot", True):
+            raise HTTPException(400, "Selected target is operator-only — chisel/ligolo are not expected to run there")
+        target = explicit
+    else:
+        target = targets[0]
     if not target:
         raise HTTPException(404, "Attacker SSH target not found")
     pivot_host = db.query(models.Host).filter(models.Host.pid == pid).filter((models.Host.ip == target.get("host")) | (models.Host.hostname == target.get("host"))).first()
@@ -223,39 +457,66 @@ def _parse_routes(route_lines: list[str]) -> list[str]:
     return seen
 
 
-def _parse_tool_observations(ps_lines: list[str], route_lines: list[str]) -> list[dict]:
+def _parse_tool_observations(
+    ps_lines: list[str],
+    route_lines: list[str],
+    ss_lines: list[str] | None = None,
+) -> list[dict]:
     routes = _parse_routes(route_lines)
+    listen_by_proc = _parse_ss_lines(ss_lines or [])
     observations = []
     for line in ps_lines:
         lowered = line.lower()
         if "chisel" in lowered:
-            pivot_type = "socks5" if "socks" in lowered else "tunnel"
+            params = _parse_chisel_args(line)
+            pivot_type = "socks5" if (params.get("proxy_type") == "socks" or "socks" in lowered) else "tunnel"
             bind_match = _BIND_RE.search(line)
             bind = bind_match.group("bind") if bind_match else ("1080" if pivot_type == "socks5" else "")
+            # Enrich with live ss listen ports if we have them
+            listen_ports = listen_by_proc.get("chisel") or []
+            if listen_ports:
+                params["live_listen_ports"] = sorted(set(listen_ports))
+            direction = params.get("direction") or ("reverse" if pivot_type == "socks5" else "")
+            label_parts = ["chisel"]
+            if params.get("mode"):
+                label_parts.append(params["mode"])
+            if direction:
+                label_parts.append(direction)
+            label_parts.append(pivot_type)
+            label = " ".join(label_parts)
             obs_routes = routes or [""]
             for route_cidr in obs_routes:
                 observations.append({
                     "tool": "chisel",
                     "pivot_type": pivot_type,
-                    "label": f"chisel {pivot_type}",
+                    "label": label,
                     "route_cidr": route_cidr,
-                    "bind_address": bind,
-                    "notes": line[:600],
+                    "bind_address": params.get("server") or bind,
+                    "notes": _format_params_note(line, params),
                 })
-        elif "ligolo" in lowered or " proxy " in f" {lowered} " or " agent " in f" {lowered} ":
-            bind = ""
-            laddr_match = re.search(r"-laddr\s+(\S+)", line)
-            if laddr_match:
-                bind = laddr_match.group(1)
+        elif "ligolo" in lowered or re.search(r"(?:^|[/\s])(?:proxy|agent)(?:\s|$)", lowered):
+            params = _parse_ligolo_args(line)
+            listen_ports = listen_by_proc.get("ligolo") or listen_by_proc.get("proxy") or listen_by_proc.get("agent") or []
+            if listen_ports:
+                params["live_listen_ports"] = sorted(set(listen_ports))
+            mode = params.get("mode") or ""
+            label_parts = ["ligolo"]
+            if mode:
+                label_parts.append(mode)
+            if params.get("interface"):
+                label_parts.append(f"({params['interface']})")
+            label_parts.append("route")
+            label = " ".join(label_parts)
+            bind_addr = params.get("listen") or params.get("server") or ""
             obs_routes = routes or [""]
             for route_cidr in obs_routes:
                 observations.append({
                     "tool": "ligolo",
                     "pivot_type": "route",
-                    "label": "ligolo route",
+                    "label": label,
                     "route_cidr": route_cidr,
-                    "bind_address": bind,
-                    "notes": line[:600],
+                    "bind_address": bind_addr,
+                    "notes": _format_params_note(line, params),
                 })
     return observations
 
@@ -265,14 +526,16 @@ def _collect_remote_pivots(target: dict) -> tuple[list[dict], str]:
         "printf '__PS__\\n'; "
         "sh -lc \"ps -eo args= | grep -E '(chisel|ligolo|ligolo-ng|/proxy|/agent)' | grep -v grep || true\"; "
         "printf '__ROUTES__\\n'; "
-        "sh -lc \"ip route show 2>/dev/null || route -n 2>/dev/null || true\""
+        "sh -lc \"ip route show 2>/dev/null || route -n 2>/dev/null || true\"; "
+        "printf '__SS__\\n'; "
+        "sh -lc \"ss -tnlp 2>/dev/null | grep -E '(chisel|ligolo|proxy|agent)' || true\""
     )
     result = run_ssh_command(target, command, 30)
     if not result.get("ok"):
         raise HTTPException(400, f"Pivot collector SSH failed: {result.get('stderr') or result.get('stdout') or 'unknown error'}")
     stdout = result.get("stdout") or ""
     section = None
-    sections = {"PS": [], "ROUTES": []}
+    sections = {"PS": [], "ROUTES": [], "SS": []}
     for raw in stdout.splitlines():
         line = raw.rstrip()
         if line == "__PS__":
@@ -281,9 +544,12 @@ def _collect_remote_pivots(target: dict) -> tuple[list[dict], str]:
         if line == "__ROUTES__":
             section = "ROUTES"
             continue
+        if line == "__SS__":
+            section = "SS"
+            continue
         if section and line:
             sections[section].append(line)
-    return _parse_tool_observations(sections["PS"], sections["ROUTES"]), stdout
+    return _parse_tool_observations(sections["PS"], sections["ROUTES"], sections["SS"]), stdout
 
 
 def _sync_pivot_edges(pid: str, db: Session):
@@ -526,6 +792,30 @@ def collect_pivots(pid: str, body: PivotCollectBody, request: Request, db: Sessi
         raise HTTPException(400, f"SSH collector target {target.get('host') or target.get('name')!r} is not mapped to a project host; add that host to the project first")
     source_host_id = _default_source_host(pid, body.source_host_id, db)
     observations, raw_stdout = _collect_remote_pivots(target)
+    # Project isolation: a shared chisel/ligolo host may be running routes for
+    # several projects at once. Without filtering, every /collect call from
+    # any project would write all of them. Decide per observation whether it
+    # belongs to the current project by intersecting routing info with the
+    # project's CIDR scopes.
+    scope_networks = _load_project_scope_networks(pid, db)
+    filtered: list[dict] = []
+    dropped_out_of_scope = 0
+    dropped_ambiguous = 0
+    for item in observations:
+        decision = _observation_scope_decision(item, scope_networks)
+        if decision == "in_scope":
+            filtered.append(item)
+        elif decision == "out_of_scope":
+            if body.strict_scope_filter:
+                dropped_out_of_scope += 1
+                continue
+            filtered.append(item)
+        else:  # ambiguous
+            if body.keep_ambiguous:
+                filtered.append(item)
+            else:
+                dropped_ambiguous += 1
+    observations = filtered
     if body.clear_existing:
         db.query(models.PivotObservation).filter(models.PivotObservation.pid == pid, models.PivotObservation.collector_target_id == target.get("id", "")).delete(synchronize_session=False)
         db.commit()
@@ -563,12 +853,26 @@ def collect_pivots(pid: str, body: PivotCollectBody, request: Request, db: Sessi
     for obs in created:
         db.refresh(obs)
     _sync_pivot_edges(pid, db)
-    log_event(db, pid, getattr(request.state, "username", None), "pivot", "collect", f"Pivot collection from SSH target: {target.get('name') or target.get('host')}", {"target_id": target.get("id", ""), "count": len(created), "pivot_host_id": pivot_host.id if pivot_host else "", "raw_preview": raw_stdout[:800]})
+    log_event(
+        db, pid, getattr(request.state, "username", None), "pivot", "collect",
+        f"Pivot collection from SSH target: {target.get('name') or target.get('host')}",
+        {
+            "target_id": target.get("id", ""),
+            "count": len(created),
+            "dropped_out_of_scope": dropped_out_of_scope,
+            "dropped_ambiguous": dropped_ambiguous,
+            "pivot_host_id": pivot_host.id if pivot_host else "",
+            "raw_preview": raw_stdout[:800],
+        },
+    )
     db.commit()
     return {
         "ok": True,
         "target": {"id": target.get("id", ""), "name": target.get("name") or target.get("host", ""), "host": target.get("host", "")},
         "pivot_host_id": pivot_host.id if pivot_host else "",
         "count": len(created),
+        "dropped_out_of_scope": dropped_out_of_scope,
+        "dropped_ambiguous": dropped_ambiguous,
+        "scope_networks": [str(n) for n in scope_networks],
         "items": [_observation_out(obs) for obs in created],
     }

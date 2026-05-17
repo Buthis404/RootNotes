@@ -184,28 +184,71 @@ class C2HostActionRequest(BaseModel):
 
 # ── CRUD ──────────────────────────────────────────────────────────────
 
+def _is_owner_of(db: Session, pid: str, user: models.User) -> bool:
+    from ..core.permissions import get_membership
+    m = get_membership(db, pid, user.id)
+    return bool(m and m.role == "owner")
+
+
+def _can_manage_integration(db: Session, user: models.User, cfg: dict) -> bool:
+    """
+    Who can manage a C2 integration:
+      - Global admin: always
+      - Project owner: only if the integration is bound to projects they own
+        (cfg["project_ids"] non-empty AND user owns at least one of them).
+        Integrations with no project_ids (global) remain admin-only.
+    """
+    if user.role == "admin":
+        return True
+    pids = cfg.get("project_ids") or []
+    if not pids:
+        return False
+    return any(_is_owner_of(db, pid, user) for pid in pids)
+
+
+def _visible_to_user(db: Session, user: models.User, cfg: dict) -> bool:
+    """List/read visibility — broader than _can_manage: any project member
+    sees integrations bound to projects they're members of."""
+    if user.role == "admin":
+        return True
+    pids = cfg.get("project_ids") or []
+    if not pids:
+        return False
+    from ..core.permissions import get_membership
+    return any(get_membership(db, pid, user.id) for pid in pids)
+
+
 @router.get("")
 def list_integrations(
     db: Session = Depends(get_db),
-    _: models.User = Depends(require_admin),
+    user: models.User = Depends(get_current_user),
 ):
     _require_c2()
-    return [_safe_integration(i) for i in _load_integrations(db)]
+    integrations = _load_integrations(db)
+    return [_safe_integration(i) for i in integrations if _visible_to_user(db, user, i)]
 
 
 @router.post("", status_code=201)
 def create_integration(
     body: C2IntegrationCreate,
     db: Session = Depends(get_db),
-    _: models.User = Depends(require_admin),
+    user: models.User = Depends(get_current_user),
 ):
     _require_c2()
     if body.type not in ("sliver", "adaptix", "mythic"):
         raise HTTPException(400, f"Unknown C2 type: {body.type}")
+    # Non-admins must scope the integration to projects they own.
+    if user.role != "admin":
+        if not body.project_ids:
+            raise HTTPException(403, "Only global admins can create unscoped C2 integrations")
+        for pid in body.project_ids:
+            if not _is_owner_of(db, pid, user):
+                raise HTTPException(403, f"You are not an owner of project {pid}")
     integrations = _load_integrations(db)
     cfg = body.model_dump()
     cfg["id"] = new_id("c2")
     cfg["last_sync"] = None
+    cfg["created_by"] = user.username
     integrations.append(cfg)
     _save_integrations(db, integrations)
     return _safe_integration(cfg)
@@ -216,13 +259,24 @@ def update_integration(
     iid: str,
     body: C2IntegrationUpdate,
     db: Session = Depends(get_db),
-    _: models.User = Depends(require_admin),
+    user: models.User = Depends(get_current_user),
 ):
     integrations = _load_integrations(db)
     idx = next((i for i, c in enumerate(integrations) if c.get("id") == iid), None)
     if idx is None:
         raise HTTPException(404, "Integration not found")
+    if not _can_manage_integration(db, user, integrations[idx]):
+        raise HTTPException(403, "Insufficient permissions to manage this integration")
     updates = body.model_dump(exclude_none=True)
+    # Non-admins cannot widen the scope to include projects they don't own,
+    # and cannot remove project_ids entirely (would become a global integration).
+    if user.role != "admin" and "project_ids" in updates:
+        new_pids = updates["project_ids"] or []
+        if not new_pids:
+            raise HTTPException(403, "Only global admins can make an integration global")
+        for pid in new_pids:
+            if not _is_owner_of(db, pid, user):
+                raise HTTPException(403, f"You are not an owner of project {pid}")
     integrations[idx].update(updates)
     _save_integrations(db, integrations)
     return _safe_integration(integrations[idx])
@@ -232,9 +286,14 @@ def update_integration(
 def delete_integration(
     iid: str,
     db: Session = Depends(get_db),
-    _: models.User = Depends(require_admin),
+    user: models.User = Depends(get_current_user),
 ):
     integrations = _load_integrations(db)
+    target = next((c for c in integrations if c.get("id") == iid), None)
+    if target is None:
+        raise HTTPException(404, "Integration not found")
+    if not _can_manage_integration(db, user, target):
+        raise HTTPException(403, "Insufficient permissions to manage this integration")
     integrations = [c for c in integrations if c.get("id") != iid]
     _save_integrations(db, integrations)
 
@@ -1303,12 +1362,14 @@ _LIVE_CONNECTORS: dict[str, Any] = {
 async def test_connection(
     iid: str,
     db: Session = Depends(get_db),
-    _: models.User = Depends(require_admin),
+    user: models.User = Depends(get_current_user),
 ):
     integrations = _load_integrations(db)
     cfg = next((c for c in integrations if c.get("id") == iid), None)
     if not cfg:
         raise HTTPException(404, "Integration not found")
+    if not _can_manage_integration(db, user, cfg):
+        raise HTTPException(403, "Insufficient permissions to manage this integration")
     if not cfg.get("enabled"):
         raise HTTPException(400, "Integration is disabled")
 
@@ -1696,7 +1757,13 @@ async def get_host_actions(
 ):
     _require_c2()
     from ..core.access import check_pid_access
+    from ..core.permissions import get_membership, get_permissions_for_role
     check_pid_access(db, pid, user, "hosts.read")
+    if user.role == "admin":
+        can_read_secret = True
+    else:
+        m = get_membership(db, pid, user.id)
+        can_read_secret = bool(m and "credentials.read_secret" in get_permissions_for_role(m.role))
     host = db.query(models.Host).filter(models.Host.id == host_id, models.Host.pid == pid).first()
     if not host:
         raise HTTPException(404, "Host not found")
@@ -1761,12 +1828,20 @@ async def get_host_actions(
                 "source": "rootnotes",
                 "integration_id": "",
                 "username": cred.username,
-                "secret": decrypt_str(cred.secret),
+                "secret": decrypt_str(cred.secret) if can_read_secret else "",
                 "domain": cred.domain,
                 "host": cred.host,
                 "type": cred.type,
                 "label": cred.username,
             })
+
+    if rootnotes_creds and can_read_secret:
+        log_event(
+            db, pid, getattr(user, "username", None), "audit", "read_credential_secrets",
+            f"Credential secrets viewed via host actions ({len(rootnotes_creds)})",
+            {"count": len(rootnotes_creds), "host_id": host.id},
+        )
+        db.commit()
 
     filtered_c2_creds = [item for item in c2_creds if _cred_matches_host(item, host)]
     return {
@@ -1842,6 +1917,13 @@ async def perform_c2_command(
             f"Supported: {', '.join(SUPPORTED_EXEC_C2_TYPES)}"
         )
     rendered_command = _render_command_with_cred(commandline, cred, host)
+    if cred and cred.get("secret"):
+        log_event(
+            db, pid, actor_username or None, "audit", "secret_used_c2_exec",
+            f"Credential secret used in C2 exec via {c2_type}: {cred.get('username') or ''}",
+            {"cred_id": cred.get("id"), "username": cred.get("username"), "c2_type": c2_type, "agent_id": agent_id},
+        )
+        db.commit()
     if c2_type == "mythic":
         result = await _mythic_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
         summary = f"Executed via Mythic on callback {agent_id}"

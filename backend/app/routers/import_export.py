@@ -16,7 +16,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.crypto import decrypt_str, encrypt_str, loot_value_is_sensitive, note_content_is_confidential
 from ..core.config import UPLOAD_ROOT
-from ..core.events import bcast
+from ..core.events import bcast, log_event
 from ..core.utils import new_id, normalize_domain, ensure_under_upload_root, sync_project_ip_from_scopes, sync_scopes_from_project_ip, ts_now
 from ..core.deps import get_current_user
 from ..core.access import check_pid_access
@@ -63,6 +63,14 @@ def export_project(
     has_secrets = can_read_secret and any(
         bool(decrypt_str(c.secret)) for c in creds if c.secret
     )
+
+    if can_read_secret and any(c.secret for c in creds):
+        log_event(
+            db, pid, getattr(user, "username", None), "audit", "export_with_secrets",
+            f"Project exported with credential secrets ({sum(1 for c in creds if c.secret)})",
+            {"cred_count": sum(1 for c in creds if c.secret)},
+        )
+        db.commit()
 
     zip_password: str | None = None
     if has_secrets:
