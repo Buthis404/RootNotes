@@ -29,7 +29,8 @@ Run tools through the platform. Every operation is a Job with a status, output, 
 | **Bulk operations** | Execute against dynamic host collections: all Windows, all with valid SMB cred, all in subnet |
 | **Credential validation** | SMB, WinRM, SSH, LDAP, MSSQL, RDP — results create access edges and finding candidates |
 | **AD workflows** | SPN enum, ASREP, delegation, ADCS, BloodHound collect, domain enum |
-| **Playbooks** | Ordered operation sequences with live step polling |
+| **C2 integrations** | Adaptix, Mythic, Sliver — pull sessions/callbacks and credentials, execute commands from the host actions panel or as a playbook step |
+| **Playbooks** | Ordered operation sequences with live step polling and a dedicated `c2:exec` step |
 | **Cancellation** | Running jobs can be killed — stops the subprocess, not just the DB record |
 
 ### State tracking
@@ -56,6 +57,17 @@ Two graph views showing different angles on the same engagement state.
 **Network Map** — topology canvas with VLAN regions, overlay modes (Threats · Sessions · Access · Roles · Pivots), drag-and-drop layout, host inspector with activity timeline. Entry uplink edges shown in orange. Subnets accessible only via a pivot host show `⇄ via [host]` on the region.
 
 **Attack Graph** — interactive canvas showing hosts connected by credential paths, access edges, pivot routes, and privilege escalation chains. Node badges for DA/DC status and reachability distance. Side panel shows privilege path and pivot routes for selected host.
+
+### C2 frameworks
+RootNotes integrates with three operator-side C2 frameworks. All three expose the same capability surface (sync ✓ live agents ✓ execute ✓ task history ✓) so the host actions panel and the `c2:exec` playbook step behave the same regardless of which framework holds the session.
+
+| Framework | Transport | Auth | Notes |
+|---|---|---|---|
+| **Adaptix** | REST over HTTPS | username + password (or token) | Pulls hosts, agents, credentials and the BOF catalog; supports raw command line execution |
+| **Mythic** | GraphQL (Hasura) | apitoken header or username/password → JWT | Pulls callbacks + credentials; `createTask` mutation for execution with optional `!command args` prefix to target a non-default Mythic command |
+| **Sliver** | Native gRPC via `sliver-py` | operator config JSON (paste the file produced by `sliver-server operator --save`) | Sessions + beacons; interactive `interact_session.execute` for sessions, async beacon tasks for beacons |
+
+Sessions appear in the host actions panel for hosts whose IP matches the agent's RemoteAddress; from there an operator can either fire a one-off command or queue a multi-step playbook against the agent.
 
 ### Pivots
 - Manual pivot creation from the Network Map toolbar (tool, type, route CIDR, status)

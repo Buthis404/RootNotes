@@ -51,13 +51,13 @@ export default function CredMatrix({ pid, accent = '#5b8af5' }) {
     setLoading(true);
     api.getCredMatrix(pid)
       .then(d => setData(d))
-      .catch(e => toastError('Не удалось загрузить матрицу: ' + e.message))
+      .catch(e => toastError('Failed to load matrix: ' + e.message))
       .finally(() => setLoading(false));
   }, [pid]);
 
   if (loading) return (
     <div style={{ padding: 40, textAlign: 'center', color: '#505560', fontFamily: 'JetBrains Mono', fontSize: 12 }}>
-      Загрузка матрицы...
+      Loading matrix…
     </div>
   );
 
@@ -105,7 +105,7 @@ export default function CredMatrix({ pid, accent = '#5b8af5' }) {
   if (creds.length === 0 || hosts.length === 0) {
     return (
       <div style={{ padding: 40, textAlign: 'center', color: '#505560', fontFamily: 'JetBrains Mono', fontSize: 12 }}>
-        {creds.length === 0 ? 'Нет учётных данных в проекте.' : 'Нет хостов в проекте.'}
+        {creds.length === 0 ? 'No credentials in this project.' : 'No hosts in this project.'}
       </div>
     );
   }
@@ -116,30 +116,30 @@ export default function CredMatrix({ pid, accent = '#5b8af5' }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', flexShrink: 0, flexWrap: 'wrap' }}>
         {/* Stats */}
         <div style={{ display: 'flex', gap: 8 }}>
-          <StatBadge label="Хосты" value={hosts.length} color="#5b8af5" />
-          <StatBadge label="Учёт. данные" value={creds.length} color="#c07af0" />
-          <StatBadge label="Успешно" value={successCells} color="#39d353" />
-          <StatBadge label="Проверено" value={triedCells} color="#f09a3a" />
-          <StatBadge label="Всего ячеек" value={totalCells} color="#505560" />
+          <StatBadge label="Hosts" value={hosts.length} color="#5b8af5" />
+          <StatBadge label="Creds" value={creds.length} color="#c07af0" />
+          <StatBadge label="Success" value={successCells} color="#39d353" />
+          <StatBadge label="Tried" value={triedCells} color="#f09a3a" />
+          <StatBadge label="Cells" value={totalCells} color="#505560" />
         </div>
         <div style={{ flex: 1 }} />
         {/* Filter */}
         {['all', 'success', 'tried'].map(f => (
           <button key={f} onClick={() => setFilter(f)}
             style={{ padding: '3px 9px', borderRadius: 4, fontSize: 10, fontFamily: 'JetBrains Mono', cursor: 'pointer', border: `1px solid ${filter === f ? accent : '#2a2d35'}`, background: filter === f ? accent + '22' : 'transparent', color: filter === f ? accent : '#8892a0', transition: 'all .15s' }}>
-            {f === 'all' ? 'Все' : f === 'success' ? 'Успешные' : 'Проверенные'}
+            {f === 'all' ? 'All' : f === 'success' ? 'Successful' : 'Tried'}
           </button>
         ))}
         {/* Search */}
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск cred..."
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search cred…"
           style={{ padding: '4px 9px', borderRadius: 4, background: '#0a0c10', border: '1px solid #2a2d35', color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none', width: 140 }} />
       </div>
 
       {/* Legend */}
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8, flexShrink: 0 }}>
-        <LegendItem color="#39d353" label="Доступ получен" />
-        <LegendItem color="#cc2233" label="Проверено — отказ" />
-        <LegendItem color="#2a2d35" label="Не проверялось" />
+        <LegendItem color="#39d353" label="Access granted" />
+        <LegendItem color="#cc2233" label="Tried — denied" />
+        <LegendItem color="#2a2d35" label="Not tried" />
       </div>
 
       {/* Scrollable matrix */}
@@ -198,7 +198,7 @@ export default function CredMatrix({ pid, accent = '#5b8af5' }) {
         </table>
         {filteredCreds.length === 0 && (
           <div style={{ padding: 20, textAlign: 'center', color: '#505560', fontFamily: 'JetBrains Mono', fontSize: 11 }}>
-            Нет результатов
+            No results
           </div>
         )}
       </div>

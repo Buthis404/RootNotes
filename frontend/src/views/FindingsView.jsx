@@ -317,39 +317,37 @@ export default function FindingsView({ findings, hosts, onAdd, onUpdate, onDelet
       {/* List */}
       <div style={{ width: 300, background: '#0a0c10', borderRight: '1px solid #1e2029', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
         <div style={{ padding: '12px 14px', borderBottom: '1px solid #1a1c22' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <div style={{ display: 'flex', gap: 4 }}>
-              <button onClick={() => setView('findings')}
-                style={{ background: view === 'findings' ? accent + '22' : 'none', border: `1px solid ${view === 'findings' ? accent + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: view === 'findings' ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                Findings {projFindings.length > 0 && `(${projFindings.length})`}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+            <button onClick={() => setView('findings')}
+              style={{ background: view === 'findings' ? accent + '22' : 'none', border: `1px solid ${view === 'findings' ? accent + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: view === 'findings' ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+              Findings {projFindings.length > 0 && `(${projFindings.length})`}
+            </button>
+            <button onClick={() => setView('candidates')}
+              style={{ background: view === 'candidates' ? '#f09a3a22' : 'none', border: `1px solid ${view === 'candidates' ? '#f09a3a66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: view === 'candidates' ? '#f09a3a' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+              Candidates {projCandidates.length > 0 && `(${projCandidates.length})`}
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 5, marginBottom: 8, flexWrap: 'wrap' }}>
+            {view === 'findings' && <>
+              <button onClick={() => setShowTemplates(true)}
+                style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                Templates
               </button>
-              <button onClick={() => setView('candidates')}
-                style={{ background: view === 'candidates' ? '#f09a3a22' : 'none', border: `1px solid ${view === 'candidates' ? '#f09a3a66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: view === 'candidates' ? '#f09a3a' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                Candidates {projCandidates.length > 0 && `(${projCandidates.length})`}
+              <button onClick={() => setShowNessus(true)}
+                style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                Nessus
               </button>
-            </div>
-            <div style={{ display: 'flex', gap: 5 }}>
-              {view === 'findings' && <>
-                <button onClick={() => setShowTemplates(true)}
-                  style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                  Templates
-                </button>
-                <button onClick={() => setShowNessus(true)}
-                  style={{ background: '#1e2029', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                  Nessus
-                </button>
-                <button onClick={() => { setSelected(null); setEditing(true); }}
-                  style={{ background: accent, border: 'none', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'JetBrains Mono' }}>
-                  <Icon name="plus" size={10} color="#fff" /> Add
-                </button>
-              </>}
-              {view === 'candidates' && (
-                <button onClick={handleScan} disabled={scanning}
-                  style={{ background: '#f09a3a', border: 'none', borderRadius: 4, padding: '3px 9px', cursor: scanning ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: scanning ? 0.7 : 1 }}>
-                  {scanning ? 'Scanning…' : '⚑ Scan'}
-                </button>
-              )}
-            </div>
+              <button onClick={() => { setSelected(null); setEditing(true); }}
+                style={{ background: accent, border: 'none', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'JetBrains Mono' }}>
+                <Icon name="plus" size={10} color="#fff" /> Add
+              </button>
+            </>}
+            {view === 'candidates' && (
+              <button onClick={handleScan} disabled={scanning}
+                style={{ background: '#f09a3a', border: 'none', borderRadius: 4, padding: '3px 9px', cursor: scanning ? 'default' : 'pointer', color: '#fff', fontSize: 10, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: scanning ? 0.7 : 1 }}>
+                {scanning ? 'Scanning…' : '⚑ Scan'}
+              </button>
+            )}
           </div>
           {/* Stats */}
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>

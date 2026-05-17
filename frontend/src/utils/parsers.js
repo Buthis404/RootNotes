@@ -3,7 +3,7 @@ export function parseNmapXml(xmlText) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlText, 'application/xml');
   const parseError = doc.querySelector('parsererror');
-  if (parseError) throw new Error('Невалидный XML: ' + parseError.textContent.slice(0, 120));
+  if (parseError) throw new Error('Invalid XML: ' + parseError.textContent.slice(0, 120));
 
   const hosts = [];
   doc.querySelectorAll('host').forEach(hostEl => {
