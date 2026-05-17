@@ -128,7 +128,8 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
 
   const sessions = data?.sessions || [];
   const creds = data?.creds || [];
-  const sessionOptions = sessions.filter(s => SUPPORTED_EXEC_C2.includes(s.integration_type));
+  const sessionOptions = sessions.filter(s => SUPPORTED_EXEC_C2.includes(s.integration_type) && s.alive !== false);
+  const deadSessionCount = sessions.filter(s => SUPPORTED_EXEC_C2.includes(s.integration_type) && s.alive === false).length;
   const operationTemplates = useMemo(() => getOperationTemplates(host), [host]);
   const selectedCredential = useMemo(() => creds.find(c => c.id === form.credentialId && c.source === form.credentialSource) || null, [creds, form.credentialId, form.credentialSource]);
   const credentialPacks = useMemo(() => getCredentialOperationPacks(host, selectedCredential), [host, selectedCredential]);
@@ -226,13 +227,16 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
   return (
     <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <span style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', flex: 1 }}>Adaptix live actions</span>
+        <span style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', flex: 1 }}>
+          Adaptix live actions
+          {deadSessionCount > 0 && <span title={`${deadSessionCount} dead agents hidden`} style={{ marginLeft: 6, color: '#606570', textTransform: 'none', letterSpacing: 0 }}>({deadSessionCount} dead hidden)</span>}
+        </span>
         <button onClick={() => setAutoRefresh(v => !v)} style={{ background: autoRefresh ? `${accent}22` : '#0e1016', border: `1px solid ${autoRefresh ? accent + '66' : '#2a2d35'}`, borderRadius: 3, padding: '1px 6px', cursor: 'pointer', color: autoRefresh ? accent : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{autoRefresh ? 'Auto' : 'Manual'}</button>
         <span style={{ fontSize: 9, color: '#cc2233', background: '#cc223318', border: '1px solid #cc223344', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>Adaptix</span>
       </div>
 
       {loading && <div style={{ fontSize: 10, color: '#404550' }}>Loading live sessions...</div>}
-      {!loading && sessionOptions.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>No Adaptix agent matched to this host</div>}
+      {!loading && sessionOptions.length === 0 && <div style={{ fontSize: 10, color: '#404550' }}>{deadSessionCount > 0 ? `No live agents matched to this host (${deadSessionCount} dead hidden)` : 'No live C2 agent matched to this host'}</div>}
 
       {!loading && sessionOptions.length > 0 && (
         <>
