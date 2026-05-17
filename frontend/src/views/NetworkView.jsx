@@ -1842,10 +1842,18 @@ export default function NetworkView({ projectId, accent, accentGreen, networks, 
 
   const handleCollectPivots = async () => {
     try {
-      await api.collectPivots(projectId, {});
+      const result = await api.collectPivots(projectId, {});
       const data = await api.listPivots(projectId);
       setPivots(data?.items || []);
       await onRefreshNetworks?.();
+      const oos = result?.dropped_out_of_scope ?? 0;
+      const amb = result?.dropped_ambiguous ?? 0;
+      if (oos || amb) {
+        const bits = [];
+        if (oos) bits.push(`${oos} out of project scope`);
+        if (amb) bits.push(`${amb} ambiguous`);
+        console.info(`[pivots] collected ${result?.count ?? 0}; dropped ${bits.join(', ')}`);
+      }
     } catch (e) {
       console.error('Pivot collection failed:', e);
     }
