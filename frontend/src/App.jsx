@@ -115,6 +115,7 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [importProjectId, setImportProjectId] = useState(null);
   const [presence, setPresence] = useState([]);
+  const [aiEnabled, setAiEnabled] = useState(true);
 
   // Track which request IDs originated locally — ignore own WS echoes
   const localOps = useRef(new Set());
@@ -156,6 +157,24 @@ export default function App() {
 
     return () => {
       cancelled = true;
+    };
+  }, [currentUser]);
+
+  // ── AI kill switch — gates whether the floating chat panel is mounted ──
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    const load = () => {
+      api.getAIStatus()
+        .then(s => { if (!cancelled) setAiEnabled(s?.enabled !== false); })
+        .catch(() => { if (!cancelled) setAiEnabled(false); });
+    };
+    load();
+    const handler = () => load();
+    window.addEventListener('rt:ai_status_changed', handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('rt:ai_status_changed', handler);
     };
   }, [currentUser]);
 
@@ -908,7 +927,7 @@ export default function App() {
           onImported={handleImported} />
       )}
 
-      {selectedProject && <AIChatPanel selectedProject={selectedProject} accent={acc} />}
+      {selectedProject && aiEnabled && <AIChatPanel selectedProject={selectedProject} accent={acc} />}
 
       <ToastContainer />
 

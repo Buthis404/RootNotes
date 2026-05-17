@@ -78,18 +78,42 @@ def _build_system_prompt(db: Session, pid: str) -> str:
 
 # ── Routes ────────────────────────────────────────────────────────────
 
+def _is_ai_enabled(cfg: dict) -> bool:
+    # Default True for backwards compatibility with existing deployments.
+    return cfg.get("ai_enabled", True) is not False
+
+
+@router.get("/api/ai/status")
+def get_ai_status(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    """Lightweight flag for the frontend to gate AI UI elements.
+
+    Any authenticated user can read this; it leaks no secrets, only a boolean.
+    """
+    cfg = get_config(db)
+    return {
+        "enabled": _is_ai_enabled(cfg),
+        "has_providers": bool([p for p in cfg.get("providers", []) if p.get("enabled")]),
+    }
+
+
 @router.get("/api/ai/config")
 def get_ai_config(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     cfg = get_config(db)
-    return _mask_config(cfg)
+    masked = _mask_config(cfg)
+    masked["ai_enabled"] = _is_ai_enabled(cfg)
+    return masked
 
 
 @router.put("/api/ai/config")
 def update_ai_config(body: dict, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     if user.role != "admin":
         raise HTTPException(403, "Admin only")
+    # Normalize the kill switch so we always persist an explicit boolean.
+    body["ai_enabled"] = body.get("ai_enabled", True) is not False
     save_config(db, body)
-    return _mask_config(body)
+    masked = _mask_config(body)
+    masked["ai_enabled"] = body["ai_enabled"]
+    return masked
 
 
 @router.post("/api/projects/{pid}/ai/chat")
@@ -102,6 +126,8 @@ async def ai_chat(
     check_pid_access(db, pid, user, "findings.read")
 
     cfg = get_config(db)
+    if not _is_ai_enabled(cfg):
+        raise HTTPException(503, "AI is disabled by the administrator")
     max_tool_calls = cfg.get("max_tool_calls", 10)
     agent_mode = body.agent_mode and cfg.get("agent_mode", True)
 

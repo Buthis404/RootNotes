@@ -334,6 +334,7 @@ export const api = {
   deleteDomain:   (id)          => req('DELETE', `/domains/${id}`),
 
   // AI
+  getAIStatus:       ()                => req('GET',  '/ai/status'),
   getAIConfig:       ()                => req('GET',  '/ai/config'),
   saveAIConfig:      (data)            => req('PUT',  '/ai/config', data),
   aiChat:            (pid, data)       => req('POST', `/projects/${pid}/ai/chat`, data),
