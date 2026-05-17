@@ -54,7 +54,10 @@ _REDIS_URL = os.environ.get("REDIS_URL", "")
 _ENTITY_POLICY: dict[str, dict[str, Any]] = {
     "cred":           {"read": "credentials.read", "redact": [("secret", "credentials.read_secret")]},
     "host":           {"read": "hosts.read"},
-    "host_activity":  {"read": "hosts.read"},
+    # host_activity carries `command` (impacket/netexec with substituted secrets)
+    # and `output` (which can include dumped hashes / harvested creds). Hide
+    # both from operators who lack credentials.read_secret.
+    "host_activity":  {"read": "hosts.read", "redact": [("command", "credentials.read_secret"), ("output", "credentials.read_secret")]},
     "finding":        {"read": "findings.read"},
     "note":           {"read": "notes.read"},
     "loot":           {"read": "loot.read"},
@@ -64,11 +67,20 @@ _ENTITY_POLICY: dict[str, dict[str, Any]] = {
     "checklist":      {"read": "checklist.read"},
     "timeline":       {"read": "timeline.read"},
     "command_output": {"read": "command_outputs.read"},
-    "job":            {"read": "command_outputs.read"},
+    # `command` may include substituted credentials; `request_json.password` /
+    # `.hash` likewise. Recursive scrub kicks in for the request_json blob.
+    "job":            {"read": "command_outputs.read", "redact": [("command", "credentials.read_secret"), ("output", "credentials.read_secret")], "scrub_keys": True},
+    "playbook_run":   {"redact": [("request_json", "credentials.read_secret")], "scrub_keys": True},
     "network_node":   {"read": "network.read"},
     "network_link":   {"read": "network.read"},
     "network":        {"read": "network.read"},
 }
+
+
+# Keys whose values are scrubbed (set to "") in nested dict payloads when the
+# recipient lacks `credentials.read_secret`. Names are matched case-insensitively
+# on substring so "user_password", "ldap_password" etc. are all caught.
+_SENSITIVE_KEY_SUBSTRINGS = ("password", "secret", "api_key", "apikey", "_hash", "credential_text")
 
 
 def _policy_for(msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -79,18 +91,39 @@ def _policy_for(msg: dict[str, Any]) -> dict[str, Any] | None:
     return _ENTITY_POLICY.get(entity)
 
 
+def _scrub_sensitive_keys(value: Any) -> Any:
+    """Walk a JSON-ish structure replacing values for sensitive key names with ''."""
+    if isinstance(value, dict):
+        return {
+            k: ("" if any(s in k.lower() for s in _SENSITIVE_KEY_SUBSTRINGS) else _scrub_sensitive_keys(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_sensitive_keys(item) for item in value]
+    return value
+
+
 def _redact_payload(msg: dict[str, Any], policy: dict[str, Any], permissions: frozenset[str]) -> dict[str, Any]:
     """Return a (possibly shallow-copied) message with sensitive fields stripped."""
     redact = policy.get("redact") or []
-    if not redact or "data" not in msg or not isinstance(msg["data"], dict):
+    scrub_keys = bool(policy.get("scrub_keys"))
+    if "data" not in msg or not isinstance(msg["data"], dict):
         return msg
+    can_read_secret = "credentials.read_secret" in permissions
     needs_redact = any(perm not in permissions for _, perm in redact)
-    if not needs_redact:
+    needs_scrub = scrub_keys and not can_read_secret
+    if not needs_redact and not needs_scrub:
         return msg
     redacted_data = dict(msg["data"])
     for field, perm in redact:
         if perm not in permissions and field in redacted_data:
             redacted_data[field] = ""
+    if needs_scrub:
+        for k, v in list(redacted_data.items()):
+            if any(s in k.lower() for s in _SENSITIVE_KEY_SUBSTRINGS):
+                redacted_data[k] = ""
+            elif isinstance(v, (dict, list)):
+                redacted_data[k] = _scrub_sensitive_keys(v)
     return {**msg, "data": redacted_data}
 
 
