@@ -10,7 +10,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, normalize_domain, ts_now
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 router = APIRouter(prefix="/api/hosts", tags=["hosts"])
@@ -28,7 +28,7 @@ def list_hosts(
     if pid:
         check_pid_access(db, pid, user, "hosts.read")
         q = db.query(models.Host).filter(models.Host.pid == pid)
-    elif user.role == "admin":
+    elif is_admin(user):
         q = db.query(models.Host)
     else:
         member_pids = get_user_member_pids(db, user)

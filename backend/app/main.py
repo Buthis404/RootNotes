@@ -31,7 +31,8 @@ from .ws import manager
 from .core.config import JWT_SECRET, JWT_ALGO, UPLOAD_ROOT, CORS_ORIGINS, COOKIE_NAME
 from .core.limiter import limiter
 from .core.security import decode_token, gen_password, hash_password
-from .core.deps import decode_ws_token
+from .core.deps import decode_ws_token, is_admin
+from .core.enums import UserRole
 from .core.utils import new_id
 from .core.crypto import encrypt_str, loot_value_is_sensitive, note_content_is_confidential
 from .plugins.registry import registry
@@ -197,7 +198,7 @@ async def lifespan(app: FastAPI):
             logger.info("Migrated %d sensitive loot values to encrypted storage", len(plaintext_loot_values))
 
         # Backfill: make admin user owner of all projects without owners
-        admin_users = db.query(models.User).filter(models.User.role == "admin", models.User.active == True).all()
+        admin_users = db.query(models.User).filter(models.User.role == UserRole.ADMIN.value, models.User.active == True).all()
         if admin_users:
             first_admin = admin_users[0]
             projects_without_owner = db.query(models.Project).filter(
@@ -457,7 +458,7 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
         await ws.close(code=4001)
         return
     from .core.permissions import get_membership, get_permissions_for_role
-    is_global_admin = user.role == "admin"
+    is_global_admin = is_admin(user)
     if is_global_admin:
         # Global admins effectively have every project-level permission
         permissions: frozenset[str] = frozenset()

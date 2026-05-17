@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.permissions import (
     get_membership, get_permissions_for_role, add_project_owner,
     PROJECT_ROLES,
@@ -62,7 +62,7 @@ def _get_project_or_404(pid: str, db: Session) -> models.Project:
 
 
 def _require_manage_members(pid: str, user: models.User, db: Session):
-    if user.role == "admin":
+    if is_admin(user):
         return
     if not user_has_permission(db, pid, user, "project.manage_members"):
         raise HTTPException(403, "Insufficient permissions to manage members")
@@ -99,7 +99,7 @@ def list_members(
     user: models.User = Depends(get_current_user),
 ):
     _get_project_or_404(pid, db)
-    if user.role != "admin":
+    if not is_admin(user):
         membership = get_membership(db, pid, user.id)
         if not membership:
             raise HTTPException(404, "Project not found")
@@ -136,7 +136,7 @@ def add_member(
     if body.role not in PROJECT_ROLES:
         raise HTTPException(400, f"Invalid role. Valid roles: {PROJECT_ROLES}")
 
-    if body.role == "owner" and user.role != "admin":
+    if body.role == "owner" and not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if not caller_membership or caller_membership.role != "owner":
             raise HTTPException(403, "Only owners can assign the owner role")
@@ -166,7 +166,7 @@ def bulk_add_members(
         raise HTTPException(400, f"Invalid role. Valid roles: {PROJECT_ROLES}")
     if not body.user_ids:
         raise HTTPException(400, "No users provided")
-    if body.role == "owner" and user.role != "admin":
+    if body.role == "owner" and not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if not caller_membership or caller_membership.role != "owner":
             raise HTTPException(403, "Only owners can assign the owner role")
@@ -247,12 +247,12 @@ def update_member_role(
 
     target_user = db.query(models.User).filter(models.User.id == target_uid).first()
 
-    if target_membership.role == "owner" and user.role != "admin":
+    if target_membership.role == "owner" and not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if not caller_membership or caller_membership.role != "owner":
             raise HTTPException(403, "Cannot change role of project owner")
 
-    if body.role == "owner" and user.role != "admin":
+    if body.role == "owner" and not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if not caller_membership or caller_membership.role != "owner":
             raise HTTPException(403, "Only owners can assign the owner role")
@@ -283,7 +283,7 @@ def remove_member(
     if not target_membership:
         raise HTTPException(404, "Member not found")
 
-    if target_membership.role == "owner" and user.role != "admin":
+    if target_membership.role == "owner" and not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if not caller_membership or caller_membership.role != "owner":
             raise HTTPException(403, "Cannot remove project owner")
@@ -310,7 +310,7 @@ def transfer_ownership(
 ):
     _get_project_or_404(pid, db)
 
-    if user.role != "admin":
+    if not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if not caller_membership or caller_membership.role != "owner":
             raise HTTPException(403, "Only project owner can transfer ownership")
@@ -321,7 +321,7 @@ def transfer_ownership(
 
     add_project_owner(db, pid, body.user_id, created_by=user.id)
 
-    if user.role != "admin":
+    if not is_admin(user):
         caller_membership = get_membership(db, pid, user.id)
         if caller_membership and caller_membership.user_id != body.user_id:
             caller_membership.role = "admin"
@@ -338,7 +338,7 @@ def get_my_permissions(
 ):
     _get_project_or_404(pid, db)
 
-    if user.role == "admin":
+    if is_admin(user):
         from ..core.permissions import ROLE_PERMISSIONS
         all_perms = set()
         for perms in ROLE_PERMISSIONS.values():

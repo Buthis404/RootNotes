@@ -18,7 +18,7 @@ from ..core.crypto import decrypt_str, encrypt_str, loot_value_is_sensitive, not
 from ..core.config import UPLOAD_ROOT
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, normalize_domain, ensure_under_upload_root, sync_project_ip_from_scopes, sync_scopes_from_project_ip, ts_now
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access
 from ..core.network_data import get_nodes, get_edges, get_regions, replace_nodes, replace_edges, replace_regions
 from ..core.permissions import add_project_owner, get_membership, get_permissions_for_role
@@ -40,7 +40,7 @@ def export_project(
 
     # Determine if user can read secrets
     can_read_secret = True
-    if user.role != "admin":
+    if not is_admin(user):
         m = get_membership(db, pid, user.id)
         can_read_secret = bool(m and "credentials.read_secret" in get_permissions_for_role(m.role))
 
@@ -218,7 +218,7 @@ def export_project(
 
     # Determine if user can read secrets
     can_read_secret = True
-    if user.role != "admin":
+    if not is_admin(user):
         m = get_membership(db, pid, user.id)
         can_read_secret = bool(m and "credentials.read_secret" in get_permissions_for_role(m.role))
 

@@ -5,7 +5,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast
 from ..core.utils import new_id
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 from ..core.network_data import (
     get_nodes, get_edges, get_regions,
@@ -29,7 +29,7 @@ def list_networks(pid: str | None = None, db: Session = Depends(get_db), user: m
     if pid:
         check_pid_access(db, pid, user, "network.read")
         nets = db.query(models.Network).filter(models.Network.pid == pid).all()
-    elif user.role == "admin":
+    elif is_admin(user):
         nets = db.query(models.Network).all()
     else:
         member_pids = get_user_member_pids(db, user)

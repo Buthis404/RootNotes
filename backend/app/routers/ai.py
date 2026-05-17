@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access
 from ..core.ai_manager import get_config, save_config, call_llm
 from ..core.ai_tools import TOOLS_OPENAI, execute_tool
@@ -106,7 +106,7 @@ def get_ai_config(db: Session = Depends(get_db), user: models.User = Depends(get
 
 @router.put("/api/ai/config")
 def update_ai_config(body: dict, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    if user.role != "admin":
+    if not is_admin(user):
         raise HTTPException(403, "Admin only")
     # Normalize the kill switch so we always persist an explicit boolean.
     body["ai_enabled"] = body.get("ai_enabled", True) is not False

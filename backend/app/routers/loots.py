@@ -11,7 +11,7 @@ from ..core.events import bcast, log_event
 from ..core.utils import new_id, safe_upload_name, ensure_under_upload_root, ts_now
 from ..core.artifact_extractor import sha256_bytes as _sha256
 from ..core.crypto import decrypt_str, encrypt_str, loot_value_is_sensitive
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 router = APIRouter(prefix="/api/loots", tags=["loots"])
@@ -54,7 +54,7 @@ def list_loots(
             log_event(db, pid, getattr(user, "username", None), "audit", "read_sensitive_loot", f"Sensitive loot viewed ({sensitive_count})", {"count": sensitive_count})
             db.commit()
         return [_loot_out(loot) for loot in loots]
-    if user.role == "admin":
+    if is_admin(user):
         q = db.query(models.Loot)
         if job_id:
             q = q.filter(models.Loot.job_id == job_id)

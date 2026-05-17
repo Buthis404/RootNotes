@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..core.config import WEBHOOK_HMAC_SECRET
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.events import bcast, log_event
 from ..core.limiter import limiter
 from ..core.utils import new_id, ts_now
@@ -50,7 +50,7 @@ def regenerate_webhook_token(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    if user.role != "admin":
+    if not is_admin(user):
         from ..core.access import check_pid_access
         check_pid_access(db, pid, user, "webhooks.manage")
     project = db.query(models.Project).filter(models.Project.id == pid).first()

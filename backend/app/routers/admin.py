@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.deps import require_admin
+from ..core.enums import UserRole
 from ..core.security import hash_password
 from ..core.utils import new_id, ts_now
 
@@ -53,7 +54,7 @@ def admin_update_user(
     if not user:
         raise HTTPException(404, "User not found")
     if body.role is not None:
-        if uid == admin.id and body.role != "admin":
+        if uid == admin.id and body.role != UserRole.ADMIN.value:
             raise HTTPException(400, "Нельзя снять с себя роль администратора")
         user.role = body.role
     if body.display_name is not None:

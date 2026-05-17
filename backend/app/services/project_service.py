@@ -4,6 +4,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..core.deps import is_admin
 from ..core.permissions import add_project_owner
 from ..core.utils import new_id
 
@@ -16,7 +17,7 @@ class ProjectService:
         return self.db.query(models.Project).filter(models.Project.id == project_id).first()
 
     def list_for_user(self, user: models.User) -> list[models.Project]:
-        if user.role == "admin":
+        if is_admin(user):
             return self.db.query(models.Project).all()
         member_pids = [
             m.project_id

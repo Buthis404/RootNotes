@@ -8,7 +8,7 @@ from sqlalchemy import or_, func
 
 from ..database import get_db
 from .. import models, schemas
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, get_user_member_pids
 from ..core.limiter import limiter
 from ..core.utils import ts_now
@@ -36,7 +36,7 @@ def _allowed_pids(db, user, pid: str):
     if pid:
         check_pid_access(db, pid, user, "search.read")
         return [pid]
-    if user.role == "admin":
+    if is_admin(user):
         return None
     return get_user_member_pids(db, user)
 
@@ -158,7 +158,7 @@ def search(
             rows = cq.filter(match).add_columns(rank).order_by(rank.desc()).limit(fetch).all()
             for c, rv in rows:
                 d = schemas.Cred.model_validate(c).model_dump()
-                if user.role != "admin":
+                if not is_admin(user):
                     m = get_membership(db, c.pid, user.id)
                     if not m or "credentials.read_secret" not in get_permissions_for_role(m.role):
                         d["secret"] = ""
@@ -171,7 +171,7 @@ def search(
             for c in cq.filter(or_(models.Cred.username.ilike(like), models.Cred.service.ilike(like),
                                    models.Cred.host.ilike(like), models.Cred.notes.ilike(like))).limit(fetch).all():
                 d = schemas.Cred.model_validate(c).model_dump()
-                if user.role != "admin":
+                if not is_admin(user):
                     m = get_membership(db, c.pid, user.id)
                     if not m or "credentials.read_secret" not in get_permissions_for_role(m.role):
                         d["secret"] = ""
