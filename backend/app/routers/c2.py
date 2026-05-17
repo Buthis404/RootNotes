@@ -715,10 +715,29 @@ async def _adaptix_live_agents(cfg: dict) -> list[dict]:
         if not isinstance(agents, list):
             agents = []
 
+    import time as _time
+    now_ts = int(_time.time())
+    # Per-integration override; otherwise treat agents idle > 10 min as dead.
+    stale_threshold = int(cfg.get("stale_agent_seconds", 600))
+
     result = []
     for a in agents:
         mark = (a.get("a_mark") or "").strip()
-        alive = mark.lower() not in ("terminated", "dead", "killed", "lost")
+        explicit_dead = mark.lower() in ("terminated", "dead", "killed", "lost", "inactive", "offline")
+
+        # Adaptix exposes the last checkin as a_last_tick (unix seconds) on most
+        # builds; older builds put it in a_last_seen as a parsable string. Treat
+        # an agent as stale when we have a freshness signal AND it is older than
+        # the configured threshold. If no signal is available we trust a_mark.
+        last_tick_raw = a.get("a_last_tick") or a.get("a_last_seen") or 0
+        try:
+            last_tick = int(last_tick_raw)
+        except Exception:
+            last_tick = 0
+        # a_last_tick is unix seconds when > 1e9
+        stale = bool(last_tick > 1_000_000_000 and (now_ts - last_tick) > stale_threshold)
+
+        alive = not (explicit_dead or stale)
         result.append({
             "ip": (a.get("a_internal_ip") or a.get("a_external_ip") or "").strip(),
             "hostname": (a.get("a_computer") or "").strip(),
@@ -731,8 +750,10 @@ async def _adaptix_live_agents(cfg: dict) -> list[dict]:
             "beacon_id": a.get("a_id") or "",
             "listener": a.get("a_listener") or "",
             "alive": alive,
-            "mark": mark,
+            "mark": mark or ("stale" if stale else ""),
             "last_seen": a.get("a_last_seen") or "",
+            "last_tick": last_tick if last_tick > 0 else None,
+            "stale_seconds": (now_ts - last_tick) if (alive is False and stale) else None,
         })
     return result
 
