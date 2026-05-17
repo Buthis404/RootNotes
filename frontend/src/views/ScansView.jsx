@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
+import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
 
 const SCAN_TYPES = [
   { id: 'nmap',   label: 'Nmap',           icon: 'target',   color: '#5b8af5', desc: 'Port scan → auto-fill hosts & ports' },
@@ -603,6 +604,20 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
 }
 
 function C2Panel({ pid, accent }) {
+  const { role: projectRole, isSuperAdmin } = useProjectPermissions();
+  const isProjectOwner = projectRole === 'owner';
+  // Who can create / edit / delete an integration:
+  //  - global admin: anything (scoped or global)
+  //  - project owner: only integrations scoped to this project
+  //  - everyone else: read-only
+  const canManage = isSuperAdmin || isProjectOwner;
+  const canManageIntegration = useCallback((cfg) => {
+    if (isSuperAdmin) return true;
+    if (!isProjectOwner) return false;
+    const ids = cfg?.project_ids || [];
+    return ids.length > 0 && pid && ids.includes(pid);
+  }, [isSuperAdmin, isProjectOwner, pid]);
+
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -619,8 +634,10 @@ function C2Panel({ pid, accent }) {
       const r = pid ? await api.listC2ForProject(pid) : await api.listC2Integrations();
       setIntegrations(r);
     } catch (e) {
-      if (e.message?.includes('403') || e.message?.includes('admin')) {
-        setErrors({ global: 'Admin access required to manage C2 integrations' });
+      if (e.message?.includes('403')) {
+        setErrors({ global: 'You do not have permission to view C2 integrations in this project' });
+      } else if (e.message) {
+        setErrors({ global: e.message });
       }
     }
     setLoading(false);
@@ -639,7 +656,13 @@ function C2Panel({ pid, accent }) {
   const closeForm = () => { setShowForm(false); setEditing(null); };
 
   const save = async () => {
-    if (!form.name.trim() || !form.url.trim()) return;
+    if (!form.name.trim()) return;
+    // URL is optional for Sliver (lhost/lport carried in operator config blob)
+    if (form.type !== 'sliver' && !form.url.trim()) return;
+    if (!isSuperAdmin && (!form.project_ids || form.project_ids.length === 0)) {
+      setErrors(prev => ({ ...prev, form: 'Project owners must scope the integration to a project. Switch to "This project only".' }));
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -767,14 +790,22 @@ function C2Panel({ pid, accent }) {
                   <Icon name="reset" size={10} color={ti.color} />
                   {isSyncing ? 'Syncing...' : `Sync → project`}
                 </button>
-                <button onClick={() => openEdit(cfg)}
-                  style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                  Edit
-                </button>
-                <button onClick={() => remove(cfg.id)}
-                  style={{ background: 'transparent', border: '1px solid #cc233344', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                  Delete
-                </button>
+                {canManageIntegration(cfg) ? (
+                  <>
+                    <button onClick={() => openEdit(cfg)}
+                      style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                      Edit
+                    </button>
+                    <button onClick={() => remove(cfg.id)}
+                      style={{ background: 'transparent', border: '1px solid #cc233344', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                      Delete
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', fontStyle: 'italic', alignSelf: 'center' }}>
+                    {(cfg.project_ids || []).length === 0 ? 'managed globally (admin only)' : 'read-only'}
+                  </span>
+                )}
               </div>
             </div>
           );
@@ -782,11 +813,16 @@ function C2Panel({ pid, accent }) {
       </div>
 
       {/* Add button */}
-      {!showForm && (
+      {!showForm && canManage && (
         <button onClick={openNew}
           style={{ background: `${accent}22`, border: `1px solid ${accent}55`, borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: accent, fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 }}>
           <Icon name="plus" size={11} color={accent} /> Add C2 Integration
         </button>
+      )}
+      {!showForm && !canManage && integrations.length > 0 && (
+        <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', marginTop: 4 }}>
+          Only the project owner or a global admin can register new C2 integrations.
+        </div>
       )}
 
       {/* Form */}
@@ -881,11 +917,19 @@ function C2Panel({ pid, accent }) {
                 style={{ flex: 1, background: (form.project_ids?.length > 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length > 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: (form.project_ids?.length > 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
                 This project only
               </button>
-              <button onClick={() => setF('project_ids', [])}
-                style={{ flex: 1, background: (form.project_ids?.length === 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length === 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: (form.project_ids?.length === 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                All projects
+              <button onClick={() => isSuperAdmin && setF('project_ids', [])}
+                disabled={!isSuperAdmin}
+                title={!isSuperAdmin ? 'Only global admins can create unscoped integrations' : ''}
+                style={{ flex: 1, background: (form.project_ids?.length === 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length === 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: isSuperAdmin ? 'pointer' : 'not-allowed', color: (form.project_ids?.length === 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono', opacity: isSuperAdmin ? 1 : 0.5 }}>
+                All projects {!isSuperAdmin && '🔒'}
               </button>
             </div>
+            {!isSuperAdmin && (
+              <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', marginTop: 4 }}>
+                As project owner you can register C2 integrations bound to this project.
+                Unscoped (cross-project) integrations require a global admin.
+              </div>
+            )}
           </FieldRow>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
@@ -904,7 +948,7 @@ function C2Panel({ pid, accent }) {
           )}
 
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={save} disabled={saving || !form.name.trim() || !form.url.trim()}
+            <button onClick={save} disabled={saving || !form.name.trim() || (form.type !== 'sliver' && !form.url.trim())}
               style={{ background: saving ? '#1a1c22' : accent, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: saving ? 'not-allowed' : 'pointer', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
               {saving ? 'Saving...' : editing ? 'Save changes' : 'Add integration'}
             </button>
