@@ -7,6 +7,10 @@ const ENTITY_META = {
   host:    { icon: 'hosts',   color: '#c07af0', label: 'Host' },
   cred:    { icon: 'person',  color: '#39d353', label: 'Cred' },
   finding: { icon: 'bug',     color: '#e8574a', label: 'Finding' },
+  // Audit events surface what privileged operators did with secrets;
+  // visually distinct from data-mutation events so an analyst can find
+  // them quickly when investigating insider-abuse scenarios.
+  audit:   { icon: 'shield',  color: '#f09a3a', label: 'Audit' },
 };
 
 const ACTION_META = {
@@ -14,6 +18,24 @@ const ACTION_META = {
   update: { icon: 'edit',    color: '#5b8af5', label: 'Updated' },
   delete: { icon: 'trash',   color: '#cc2233', label: 'Deleted' },
   status: { icon: 'target',  color: '#f09a3a', label: 'Status' },
+  // Audit-specific actions — see backend log_event call sites.
+  read_credential_secrets: { icon: 'eye',    color: '#f09a3a', label: 'Secrets viewed' },
+  secret_used_bulk_exec:   { icon: 'bolt',   color: '#cc6633', label: 'Secret → bulk exec' },
+  secret_used_validate:    { icon: 'bolt',   color: '#cc6633', label: 'Secret → validate' },
+  secret_used_c2_exec:     { icon: 'bolt',   color: '#cc6633', label: 'Secret → C2 exec' },
+  export_with_secrets:     { icon: 'export', color: '#e8574a', label: 'Export with secrets' },
+  webhook_token_regenerated: { icon: 'reset', color: '#5b8af5', label: 'Webhook token rotated' },
+};
+
+// Per-action highlight keys: which meta entries to show inline as chips.
+// Falls back to a generic "key=value" rendering for anything not listed.
+const AUDIT_HIGHLIGHTS = {
+  read_credential_secrets: ['count', 'host_id'],
+  secret_used_bulk_exec:   ['username', 'host_count'],
+  secret_used_validate:    ['username', 'host_count'],
+  secret_used_c2_exec:     ['c2_type', 'username', 'agent_id'],
+  export_with_secrets:     ['cred_count'],
+  webhook_token_regenerated: [],
 };
 
 function userColor(name) {
@@ -36,6 +58,13 @@ export default function TimelineView({ selectedProject, accent }) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(false);
   const [filterEntity, setFilterEntity] = useState(null);
+  const [expanded, setExpanded] = useState(new Set());
+
+  const toggleExpand = (id) => setExpanded(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
 
   const load = useCallback(async () => {
     if (!selectedProject) return;
@@ -106,19 +135,51 @@ export default function TimelineView({ selectedProject, accent }) {
               const am = ACTION_META[evt.action] || { icon: 'bolt', color: '#808590' };
               const uc = userColor(evt.username);
               const time = (evt.ts || '').slice(11, 16);
+              const isAudit = evt.entity === 'audit';
+              const meta = evt.meta || {};
+              const highlightKeys = AUDIT_HIGHLIGHTS[evt.action];
+              const inlineChips = isAudit && highlightKeys
+                ? highlightKeys
+                    .filter(k => meta[k] !== undefined && meta[k] !== null && meta[k] !== '')
+                    .map(k => ({ key: k, value: String(meta[k]) }))
+                : [];
+              const hasRawMeta = isAudit && Object.keys(meta).length > 0;
+              const isExpanded = expanded.has(evt.id);
               return (
-                <div key={evt.id} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid #0e1016' }}>
+                <div key={evt.id} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid #0e1016', background: isAudit ? '#10100808' : 'transparent' }}>
                   {/* Entity icon */}
                   <div style={{ width: 32, height: 32, borderRadius: 8, background: em.color + '18', border: `1px solid ${em.color}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                     <Icon name={em.icon} size={14} color={em.color} />
                   </div>
                   {/* Content */}
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}>
                       <span style={{ fontSize: 9, color: am.color, fontWeight: 700, fontFamily: 'JetBrains Mono', textTransform: 'uppercase', background: am.color + '18', padding: '1px 5px', borderRadius: 3 }}>{am.label || evt.action}</span>
                       <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>{em.label}</span>
                     </div>
                     <div style={{ fontSize: 12, color: '#b0b5c2', lineHeight: 1.4 }}>{evt.label}</div>
+                    {/* Audit highlight chips */}
+                    {inlineChips.length > 0 && (
+                      <div style={{ display: 'flex', gap: 5, marginTop: 5, flexWrap: 'wrap' }}>
+                        {inlineChips.map(({ key, value }) => (
+                          <span key={key} style={{ fontSize: 9, fontFamily: 'JetBrains Mono', color: '#909098', background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 3, padding: '1px 6px' }}>
+                            <span style={{ color: '#505560' }}>{key}=</span>{value}
+                          </span>
+                        ))}
+                        {hasRawMeta && (
+                          <button onClick={() => toggleExpand(evt.id)}
+                            style={{ fontSize: 9, fontFamily: 'JetBrains Mono', color: '#606570', background: 'transparent', border: '1px solid #2a2d35', borderRadius: 3, padding: '1px 6px', cursor: 'pointer' }}>
+                            {isExpanded ? '− raw' : '+ raw'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {/* Expanded raw meta JSON */}
+                    {isAudit && isExpanded && (
+                      <pre style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#808590', background: '#07080b', border: '1px solid #1a1c22', borderRadius: 4, padding: '6px 10px', marginTop: 6, overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                        {JSON.stringify(meta, null, 2)}
+                      </pre>
+                    )}
                   </div>
                   {/* Right side */}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
