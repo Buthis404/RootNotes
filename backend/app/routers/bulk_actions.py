@@ -343,8 +343,15 @@ async def bulk_exec(
         host_changes = _apply_host_enrichment(db, pid, host, enrichment)
         cred_changes = _apply_cred_enrichment(db, pid, enrichment)
 
+        # Mirror host changes (status promotion, role inference, port pickup)
+        # onto every network-map node that points at this host.
+        from ..core.network_data import sync_host_to_nodes as _sync_nodes
+        node_payloads = _sync_nodes(host, db, ts=ts_now())
+
         db.commit()
         db.refresh(activity)
+        for payload in node_payloads:
+            bcast(pid, "network", "node_updated", {"network_id": payload.pop("network_id", ""), "node": payload})
 
         finish_job(db, job,
                    status="done" if ok else "failed",
