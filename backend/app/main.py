@@ -273,6 +273,10 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
+# Unified error contract: every error response is {code, message, details?, detail}
+from .core.errors import install_error_handlers  # noqa: E402
+install_error_handlers(app)
+
 if CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,

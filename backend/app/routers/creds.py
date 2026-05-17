@@ -9,6 +9,7 @@ from ..core.deps import get_current_user
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 from ..core.permissions import get_membership, get_permissions_for_role
 from ..core.crypto import encrypt_str, decrypt_str
+from ..core.errors import AppError
 
 router = APIRouter(prefix="/api/creds", tags=["creds"])
 
@@ -39,11 +40,16 @@ def _validate_domain_host_links(pid: str, domain: str, host_ids: list[str], db: 
     by_id = {host.id: host for host in hosts}
     missing = [hid for hid in host_ids if hid not in by_id]
     if missing:
-        raise HTTPException(404, f"Host not found: {missing[0]}")
+        raise AppError("host_not_found", f"Host not found: {missing[0]}", status=404, details={"host_id": missing[0]})
     mismatched = [host for host in hosts if not domains_match(host.domain or '', normalized_domain)]
     if mismatched:
         labels = ", ".join((host.hostname or host.ip or host.id) for host in mismatched[:5])
-        raise HTTPException(400, f"Domain credential cannot be linked to hosts from another domain: {labels}")
+        raise AppError(
+            "cred_domain_mismatch",
+            f"Domain credential cannot be linked to hosts from another domain: {labels}",
+            status=400,
+            details={"mismatched_host_ids": [h.id for h in mismatched]},
+        )
 
 
 @router.get("", response_model=list[schemas.Cred])
@@ -100,7 +106,7 @@ def create_cred(body: schemas.CredCreate, request: Request, db: Session = Depend
 def update_cred(cid: str, body: schemas.CredUpdate, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     cred = db.query(models.Cred).filter(models.Cred.id == cid).first()
     if not cred:
-        raise HTTPException(404, "Cred not found")
+        raise AppError("cred_not_found", "Credential not found", status=404)
     check_object_access(db, cred.pid, user, "credentials.update")
     old_cracked = cred.cracked
     updates = body.model_dump(exclude_none=True)
@@ -133,7 +139,7 @@ def update_cred(cid: str, body: schemas.CredUpdate, request: Request, db: Sessio
 def delete_cred(cid: str, request: Request, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     cred = db.query(models.Cred).filter(models.Cred.id == cid).first()
     if not cred:
-        raise HTTPException(404, "Cred not found")
+        raise AppError("cred_not_found", "Credential not found", status=404)
     check_object_access(db, cred.pid, user, "credentials.delete")
     pid = cred.pid
     log_event(db, pid, getattr(request.state, "username", None), "cred", "delete", f"Cred deleted: {cred.username}", {"username": cred.username})
