@@ -112,15 +112,28 @@ def _upsert_host(db: Session, pid: str, ip: str, **kwargs) -> models.Host:
         for k, v in kwargs.items():
             if v is not None and v != "" and v != []:
                 setattr(host, k, v)
-    else:
-        host = models.Host(
-            id=new_id("hst"),
-            pid=pid,
-            ip=ip,
-            status="up",
-            **{k: v for k, v in kwargs.items() if v is not None},
-        )
-        db.add(host)
+        return host
+    # Race-safe: a parallel scan worker may insert the same (pid, ip) row
+    # between the SELECT and the INSERT. The unique index on hosts(pid, ip)
+    # turns that into an IntegrityError; we re-query and merge fields.
+    from ..core.db_upsert import try_insert_or_get
+    new_host = models.Host(
+        id=new_id("hst"),
+        pid=pid,
+        ip=ip,
+        status="up",
+        **{k: v for k, v in kwargs.items() if v is not None},
+    )
+    host, created = try_insert_or_get(
+        db, new_host,
+        requery=lambda: db.query(models.Host).filter(
+            models.Host.pid == pid, models.Host.ip == ip
+        ).first(),
+    )
+    if not created:
+        for k, v in kwargs.items():
+            if v is not None and v != "" and v != []:
+                setattr(host, k, v)
     return host
 
 

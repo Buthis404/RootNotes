@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -104,3 +105,41 @@ def upsert_host_by_ip(
     # report `created=True` only when the row id equals the one we proposed
     created = bool(host and host.id == insert_values["id"])
     return host, created
+
+
+def try_insert_or_get(
+    db: Session,
+    new_row: Any,
+    requery,
+) -> tuple[Any, bool]:
+    """Race-safe insert with re-query fallback when a unique index trips.
+
+    `new_row` is an already-constructed SQLAlchemy model instance ready to
+    `db.add()`. `requery` is a 0-arg callable that returns the row that
+    would have been the conflict target (typically a `db.query(...).first()`).
+
+    Returns `(row, created)` — when the savepoint commit fails with
+    IntegrityError we rollback, call `requery()` to fetch the row that
+    the parallel writer created, and hand it back. The caller can then
+    apply the same enrichment it would have applied on the
+    "row already exists" branch.
+
+    Use this for high-traffic surfaces (c2 sync, bulk import) where a
+    parallel writer could land between our existence check and our
+    INSERT. Cheaper than ON CONFLICT for cases where the insert payload
+    is computed lazily.
+    """
+    try:
+        with db.begin_nested():
+            db.add(new_row)
+            db.flush()
+        return new_row, True
+    except IntegrityError:
+        # The `with db.begin_nested():` context already rolled back the
+        # savepoint on the exception; the outer transaction is intact.
+        existing = requery()
+        if existing is None:
+            # Index reported a conflict but the row vanished (race+delete
+            # in the same window?). Surface the error so caller can decide.
+            raise
+        return existing, False

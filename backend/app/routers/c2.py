@@ -1482,34 +1482,39 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
         # Notes: include C2 session metadata (already pre-formatted by connector)
         new_notes = (h.get("note") or "").strip()
 
-        if existing:
-            if hostname and not existing.hostname:
-                existing.hostname = hostname
-            if domain and not existing.domain:
-                existing.domain = domain
-            if os_clean and os_clean != "Unknown" and (not existing.os or existing.os in ("Linux", "Unknown", "")):
-                existing.os = os_clean
+        def _enrich_existing_host(host):
+            """Apply C2 sync enrichment in-place to a pre-existing host row."""
+            if hostname and not host.hostname:
+                host.hostname = hostname
+            if domain and not host.domain:
+                host.domain = domain
+            if os_clean and os_clean != "Unknown" and (not host.os or host.os in ("Linux", "Unknown", "")):
+                host.os = os_clean
             derived_status = _status_from_c2_host("", h)
-            if _c2_owns_host_status(existing, source):
+            if _c2_owns_host_status(host, source):
                 if derived_status:
-                    existing.status = derived_status
+                    host.status = derived_status
             else:
-                next_status = _status_from_c2_host(existing.status or "", h)
+                next_status = _status_from_c2_host(host.status or "", h)
                 if next_status:
-                    existing.status = next_status
-            if new_notes and new_notes not in (existing.notes or ""):
-                existing.notes = ((existing.notes or "") + "\n\n---\n" + new_notes).strip()
-            if source not in (existing.tags or []):
-                existing.tags = list(existing.tags or []) + [source]
-            if not existing.import_source:
-                existing.import_source = source
+                    host.status = next_status
+            if new_notes and new_notes not in (host.notes or ""):
+                host.notes = ((host.notes or "") + "\n\n---\n" + new_notes).strip()
+            if source not in (host.tags or []):
+                host.tags = list(host.tags or []) + [source]
+            if not host.import_source:
+                host.import_source = source
+
+        if existing:
+            _enrich_existing_host(existing)
             updated_hosts += 1
             host_objects.append(existing)
         else:
             if not h.get("alive", True):
                 continue
             initial_status = _status_from_c2_host("", h)
-            hobj = models.Host(
+            from ..core.db_upsert import try_insert_or_get
+            new_host = models.Host(
                 id=new_id("hst"),
                 pid=pid,
                 ip=ip,
@@ -1521,9 +1526,20 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 notes=new_notes,
                 import_source=source,
             )
-            db.add(hobj)
-            created_hosts += 1
-            host_objects.append(hobj)
+            # Race-safe insert: if another sync just created the same (pid, ip)
+            # row, fall through and enrich it like the existing branch.
+            row, was_created = try_insert_or_get(
+                db, new_host,
+                requery=lambda: db.query(models.Host).filter(
+                    models.Host.pid == pid, models.Host.ip == ip
+                ).first(),
+            )
+            if was_created:
+                created_hosts += 1
+            else:
+                _enrich_existing_host(row)
+                updated_hosts += 1
+            host_objects.append(row)
 
         # Track hosts that have an actual live session signal
         if _has_live_session_signal(h):
@@ -1545,9 +1561,11 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                 models.Cred.pid == pid,
                 models.Cred.username == uname,
                 models.Cred.domain == domain,
+                models.Cred.host == ip,
             ).first()
             if not existing_cred:
-                db.add(models.Cred(
+                from ..core.db_upsert import try_insert_or_get
+                new_cred = models.Cred(
                     id=new_id("crd"),
                     pid=pid,
                     username=uname,
@@ -1557,8 +1575,18 @@ async def _do_project_sync_inner(cfg: dict, pid: str, db: Session, iid: str | No
                     service="os",
                     host=ip,
                     tags=["c2", source],
-                ))
-                created_creds += 1
+                )
+                _, cred_was_created = try_insert_or_get(
+                    db, new_cred,
+                    requery=lambda: db.query(models.Cred).filter(
+                        models.Cred.pid == pid,
+                        models.Cred.username == uname,
+                        models.Cred.domain == domain,
+                        models.Cred.host == ip,
+                    ).first(),
+                )
+                if cred_was_created:
+                    created_creds += 1
 
     # ── Upsert harvested creds ────────────────────────────────────────
     for c in data.get("creds", []):
