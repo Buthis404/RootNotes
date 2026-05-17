@@ -50,9 +50,16 @@ def check_pid_access(
     """
     membership, err = _evaluate(db, pid, user, permission)
     if err == "not_member":
-        raise HTTPException(404, "Not found")
+        from .errors import AppError
+        raise AppError("not_member", "Not found", status=404)
     if err == "no_permission":
-        raise HTTPException(403, "Insufficient permissions")
+        from .errors import AppError
+        raise AppError(
+            "insufficient_permissions",
+            "Insufficient permissions",
+            status=403,
+            details={"required": permission} if permission else None,
+        )
     return membership
 
 
@@ -64,7 +71,8 @@ def check_object_access(
 ) -> models.ProjectMember | None:
     """Same as check_pid_access but treats a missing pid as 404."""
     if not pid:
-        raise HTTPException(404, "Not found")
+        from .errors import AppError
+        raise AppError("not_found", "Not found", status=404)
     return check_pid_access(db, pid, user, permission)
 
 
