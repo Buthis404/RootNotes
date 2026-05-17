@@ -452,13 +452,18 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
     if not user:
         await ws.close(code=4001)
         return
-    if user.role != "admin":
-        from .core.permissions import get_membership
+    from .core.permissions import get_membership, get_permissions_for_role
+    is_global_admin = user.role == "admin"
+    if is_global_admin:
+        # Global admins effectively have every project-level permission
+        permissions: frozenset[str] = frozenset()
+    else:
         membership = get_membership(db, pid, user.id)
         if not membership:
             await ws.close(code=4003)
             return
-    await manager.connect(ws, pid, user.username)
+        permissions = frozenset(get_permissions_for_role(membership.role))
+    await manager.connect(ws, pid, user.username, permissions=permissions, is_global_admin=is_global_admin)
     await manager.broadcast_presence(pid)
     try:
         while True:
