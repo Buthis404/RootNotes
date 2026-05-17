@@ -238,13 +238,22 @@ async def bulk_exec(
         )
         title = body.snippet_title.strip() or f"{body.scan_type}: {target_ip}"
 
+        # `command` carries the literal cred_secret post-substitution. Scrub
+        # before persisting / broadcasting; the unscrubbed version stays in
+        # `cmd` (assigned below) for the executor only.
+        from ..core.secret_scrub import scrub_secret
+        safe_command = scrub_secret(command, cred_secret)
+        safe_body_dump = dict(body.model_dump())
+        if "command_template" in safe_body_dump:
+            safe_body_dump["command_template"] = scrub_secret(safe_body_dump["command_template"], cred_secret)
+
         activity = models.HostActivity(
             id=new_id("ha"),
             pid=pid,
             host_id=host.id,
             title=title,
             activity_type=body.activity_type or "scan",
-            command=command,
+            command=safe_command,
             summary="Running via attacker SSH (bulk run)...",
             output="",
             status="running",
@@ -260,10 +269,10 @@ async def bulk_exec(
         bcast(pid, "host_activity", "create", HASchema.model_validate(activity).model_dump())
 
         job = start_job(db, pid, body.scan_type or "exec", title,
-                        target=target_ip, command=command, created_by=exec_username or "",
+                        target=target_ip, command=safe_command, created_by=exec_username or "",
                         connector_key="attacker_ssh", operation="bulk_exec",
                         related_entity_type="host", related_entity_id=host.id,
-                        request_json={**body.model_dump(), "resolved_host_id": host.id, "resolved_target": target_ip})
+                        request_json={**safe_body_dump, "resolved_host_id": host.id, "resolved_target": target_ip})
 
         # Transport fallback: try each attacker config until one succeeds
         result = None
@@ -319,7 +328,7 @@ async def bulk_exec(
         combined = (result.get("stdout") or "") + (("\n" + result.get("stderr")) if result.get("stderr") else "")
         ok = result.get("ok", False)
         success = _is_bulk_auth_success(command, ok, result.get("exit_code", -1), combined)
-        activity.output = combined
+        activity.output = scrub_secret(combined, cred_secret) if cred_secret else combined
         activity.status = "done" if ok else "failed"
         activity.summary = "Credential-driven bulk run success" if success and selected_cred else "Completed via attacker SSH (bulk run)"
         if selected_cred:
@@ -339,8 +348,8 @@ async def bulk_exec(
 
         finish_job(db, job,
                    status="done" if ok else "failed",
-                   output=result.get("stdout", "")[:20000],
-                   error_output=result.get("stderr", ""),
+                   output=scrub_secret(result.get("stdout", "")[:20000], cred_secret) if cred_secret else result.get("stdout", "")[:20000],
+                   error_output=scrub_secret(result.get("stderr", ""), cred_secret) if cred_secret else result.get("stderr", ""),
                    result={
                        "exit_code": result.get("exit_code", -1),
                        "enrichment": {
