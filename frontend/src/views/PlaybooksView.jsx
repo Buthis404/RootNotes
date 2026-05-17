@@ -9,10 +9,11 @@ const RUN_STATUS = {
   done: { color: '#39d353', label: 'Done' },
   failed: { color: '#cc2233', label: 'Failed' },
   cancelled: { color: '#6a7080', label: 'Cancelled' },
+  skipped: { color: '#5b8af5', label: 'Skipped' },
 };
 
 function emptyStep() {
-  return { title: '', connector_key: 'nmap', operation: 'scan', params: {}, on_success: 'next', on_success_step: null, on_failure: 'stop', on_failure_step: null, result_conditions: [] };
+  return { title: '', connector_key: 'nmap', operation: 'scan', params: {}, on_success: 'next', on_success_step: null, on_failure: 'stop', on_failure_step: null, result_conditions: [], depends_on: [], retry_count: 0, retry_delay_seconds: 5, retry_on: ['failed'], precondition: null };
 }
 
 function emptyPlaybook() {
@@ -35,6 +36,11 @@ function buildStepFromTemplate(template) {
     on_failure: 'stop',
     on_failure_step: null,
     result_conditions: [],
+    depends_on: [],
+    retry_count: 0,
+    retry_delay_seconds: 5,
+    retry_on: ['failed'],
+    precondition: null,
   };
 }
 
@@ -216,6 +222,136 @@ function PlaybookCard({ playbook, accent, selected, onSelect }) {
   );
 }
 
+function AdvancedStepFields({ step, stepIndex, stepCount, onChange }) {
+  const dagEnabled = (step.depends_on?.length > 0) || (Number(step.retry_count) || 0) > 0 || !!step.precondition;
+  const [open, setOpen] = useState(dagEnabled);
+  const stepNumbers = Array.from({ length: stepCount }, (_, i) => i + 1).filter(n => n !== stepIndex + 1);
+  const depsSet = new Set((step.depends_on || []).map(Number));
+  const toggleDep = (n) => {
+    const next = new Set(depsSet);
+    if (next.has(n)) next.delete(n); else next.add(n);
+    onChange({ ...step, depends_on: [...next].sort((a, b) => a - b) });
+  };
+  const retryOnSet = new Set(step.retry_on || ['failed']);
+  const toggleRetryOn = (k) => {
+    const next = new Set(retryOnSet);
+    if (next.has(k)) next.delete(k); else next.add(k);
+    if (next.size === 0) next.add('failed');
+    onChange({ ...step, retry_on: [...next] });
+  };
+  const pre = step.precondition || null;
+  const setPre = (patch) => onChange({ ...step, precondition: { ...(pre || { step: stepIndex >= 1 ? stepIndex : null, result_key: '', operator: 'gt', value: '', negate: false }), ...patch } });
+  return (
+    <div style={{ marginTop: 10, background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: 10 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{ background: 'none', border: 'none', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', padding: 0, color: '#9098a8' }}
+      >
+        <span style={{ fontSize: 9, color: dagEnabled ? '#5b8af5' : '#404550', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: 'JetBrains Mono' }}>
+          Advanced — DAG · Retry · Precondition {dagEnabled ? '(active)' : ''}
+        </span>
+        <span style={{ fontSize: 12, color: '#404550' }}>{open ? '−' : '+'}</span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.08em' }}>depends_on (DAG predecessors)</div>
+            {stepNumbers.length === 0 ? (
+              <div style={{ fontSize: 10, color: '#505560' }}>No other steps to depend on.</div>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {stepNumbers.map(n => (
+                  <button
+                    key={n}
+                    onClick={() => toggleDep(n)}
+                    style={{
+                      background: depsSet.has(n) ? '#1a2e4a' : 'transparent',
+                      border: `1px solid ${depsSet.has(n) ? '#5b8af5' : '#2a2d35'}`,
+                      borderRadius: 4, padding: '3px 9px', cursor: 'pointer',
+                      color: depsSet.has(n) ? '#9bb7ff' : '#808590', fontSize: 10,
+                      fontFamily: 'JetBrains Mono',
+                    }}
+                  >Step {n}</button>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 9, color: '#505560', marginTop: 4 }}>Any non-empty selection switches this playbook to DAG mode. Steps with the same predecessors run in parallel.</div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '90px 110px 1fr', gap: 8, alignItems: 'end' }}>
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Retry count</div>
+              <input type="number" min={0} max={10} value={step.retry_count ?? 0} onChange={e => onChange({ ...step, retry_count: Math.max(0, Math.min(10, Number(e.target.value) || 0)) })} style={inp()} />
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Delay (s)</div>
+              <input type="number" min={0} max={3600} value={step.retry_delay_seconds ?? 5} onChange={e => onChange({ ...step, retry_delay_seconds: Math.max(0, Math.min(3600, Number(e.target.value) || 0)) })} style={inp()} />
+            </div>
+            <div>
+              <div style={{ fontSize: 9, color: '#404550', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Retry on</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {['failed', 'cancelled', 'timeout'].map(k => (
+                  <button
+                    key={k}
+                    onClick={() => toggleRetryOn(k)}
+                    style={{
+                      flex: 1,
+                      background: retryOnSet.has(k) ? '#1a2e1a' : 'transparent',
+                      border: `1px solid ${retryOnSet.has(k) ? '#39d353' : '#2a2d35'}`,
+                      borderRadius: 4, padding: '4px 0', cursor: 'pointer',
+                      color: retryOnSet.has(k) ? '#9bd9a8' : '#808590', fontSize: 10,
+                      fontFamily: 'JetBrains Mono',
+                    }}
+                  >{k}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Precondition (skip step if false)</div>
+              <button
+                onClick={() => pre ? onChange({ ...step, precondition: null }) : setPre({})}
+                style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', cursor: 'pointer', color: pre ? '#cc2233' : '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}
+              >{pre ? 'Remove' : 'Add precondition'}</button>
+            </div>
+            {pre ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr 80px 110px 80px', gap: 6 }}>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 3, textTransform: 'uppercase' }}>Of step</div>
+                  <select value={pre.step ?? ''} onChange={e => setPre({ step: e.target.value ? Number(e.target.value) : null })} style={inp()}>
+                    <option value="">(latest dep)</option>
+                    {stepNumbers.map(n => <option key={n} value={n}>Step {n}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 3, textTransform: 'uppercase' }}>Result key</div>
+                  <input value={pre.result_key || ''} onChange={e => setPre({ result_key: e.target.value })} placeholder="hosts_found" style={inp()} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 3, textTransform: 'uppercase' }}>Op</div>
+                  <select value={pre.operator || 'eq'} onChange={e => setPre({ operator: e.target.value })} style={inp()}>
+                    {['eq','ne','gt','gte','lt','lte','contains'].map(op => <option key={op} value={op}>{op}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 3, textTransform: 'uppercase' }}>Value</div>
+                  <input value={pre.value ?? ''} onChange={e => setPre({ value: e.target.value })} placeholder="0 / true" style={inp()} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: '#404550', marginBottom: 3, textTransform: 'uppercase' }}>Negate</div>
+                  <button onClick={() => setPre({ negate: !pre.negate })} style={{ width: '100%', ...toggleBtn(!!pre.negate, '#cc7733') }}>{pre.negate ? 'NOT' : 'as-is'}</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 10, color: '#505560' }}>No precondition — step runs whenever its deps are satisfied.</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChange, onDelete, onDuplicate, onMoveUp, onMoveDown, disableDelete, allSteps }) {
   const suggestedResultKeys = resultKeysForSteps(allSteps || []);
   const matchingConnectors = connectors.filter(c => c.key === step.connector_key);
@@ -384,6 +520,7 @@ function StepEditor({ step, connectors, templates, stepCount, stepIndex, onChang
           </div>
         )}
       </div>
+      <AdvancedStepFields step={step} stepIndex={stepIndex} stepCount={stepCount} onChange={onChange} />
       </div>
     </div>
   );
@@ -817,7 +954,22 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
       const payload = {
         title: editor.title,
         description: editor.description,
-        steps: (editor.steps || []).map(step => ({ title: step.title, connector_key: step.connector_key, operation: step.operation, params: step.params || {}, on_success: step.on_success || 'next', on_success_step: step.on_success_step ?? null, on_failure: step.on_failure || 'stop', on_failure_step: step.on_failure_step ?? null, result_conditions: step.result_conditions || [] })),
+        steps: (editor.steps || []).map(step => ({
+          title: step.title,
+          connector_key: step.connector_key,
+          operation: step.operation,
+          params: step.params || {},
+          on_success: step.on_success || 'next',
+          on_success_step: step.on_success_step ?? null,
+          on_failure: step.on_failure || 'stop',
+          on_failure_step: step.on_failure_step ?? null,
+          result_conditions: step.result_conditions || [],
+          depends_on: (step.depends_on || []).map(Number),
+          retry_count: Number(step.retry_count) || 0,
+          retry_delay_seconds: Number(step.retry_delay_seconds) || 0,
+          retry_on: step.retry_on?.length ? step.retry_on : ['failed'],
+          precondition: step.precondition || null,
+        })),
       };
       const validationRes = await api.validatePlaybook(payload);
       setValidation({ errors: validationRes.errors || [], warnings: validationRes.warnings || [] });
@@ -1194,6 +1346,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                           <StatusBadge status={run.status} />
                           {duration && <span style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>⏱ {duration}</span>}
                           {run.request_json?.batch_id && <span style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>batch</span>}
+                          {(run.result_json?.dag_mode || (run.jobs_json || []).some(s => s.step_idx !== undefined)) && <span title="DAG mode: parallel branches, retry, preconditions" style={{ fontSize: 9, color: '#5b8af5', background: '#5b8af518', border: '1px solid #5b8af533', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>DAG</span>}
                         </div>
                         <div style={{ fontSize: 10, color: '#606570', display: 'flex', gap: 12, flexWrap: 'wrap', fontFamily: 'JetBrains Mono', paddingLeft: 18 }}>
                           {run.target && <span>target: {run.target}</span>}
@@ -1212,13 +1365,39 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                             </div>
                             {(() => {
                               const liveJobs = runJobsCache[run.id];
-                              const steps = run.jobs_json || [];
+                              const rawSteps = run.jobs_json || [];
+                              const stepStates = run.result_json?.step_states || null;
+                              const dagMode = !!run.result_json?.dag_mode || rawSteps.some(s => s.step_idx !== undefined);
+                              // In DAG mode, group attempts by step_idx and keep the latest
+                              let steps = rawSteps;
+                              if (dagMode) {
+                                const byIdx = new Map();
+                                for (const s of rawSteps) {
+                                  const k = s.step_idx ?? -1;
+                                  const cur = byIdx.get(k);
+                                  if (!cur || (s.attempt ?? 1) > (cur.attempt ?? 1)) byIdx.set(k, s);
+                                }
+                                steps = [...byIdx.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+                                if (stepStates) {
+                                  for (const idx of Object.keys(stepStates).map(Number)) {
+                                    if (!byIdx.has(idx)) {
+                                      const st = stepStates[idx];
+                                      steps.push({ id: `__skipped_${idx}`, step_idx: idx, status: st.status || 'skipped', title: `Step ${idx + 1}`, attempt: st.attempts || 0, __synthetic: true });
+                                    }
+                                  }
+                                  steps.sort((a, b) => (a.step_idx ?? 0) - (b.step_idx ?? 0));
+                                }
+                              }
                               return steps.map((snapshot, idx) => {
                                 const liveJob = liveJobs?.find(j => j.id === snapshot.id);
                                 const job = liveJob || snapshot;
-                                const statusCfg = RUN_STATUS[job.status] || RUN_STATUS.queued;
-                                const isRunning = job.status === 'running';
-                                const isFailed = job.status === 'failed';
+                                const isSkipped = snapshot.__synthetic || job.status === 'skipped';
+                                const effectiveStatus = isSkipped ? 'skipped' : job.status;
+                                const statusCfg = RUN_STATUS[effectiveStatus] || RUN_STATUS.queued;
+                                const isRunning = effectiveStatus === 'running';
+                                const isFailed = effectiveStatus === 'failed';
+                                const stepIdx = snapshot.step_idx;
+                                const attempts = snapshot.attempt || 1;
                                 const dur = liveJob?.started_at ? (() => {
                                   const s = new Date(liveJob.started_at);
                                   const f = liveJob.finished_at ? new Date(liveJob.finished_at) : new Date();
@@ -1230,8 +1409,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                                 return (
                                   <div key={job.id} style={{ borderBottom: idx < steps.length - 1 ? '1px solid #12141a' : 'none', background: isRunning ? '#f09a3a06' : isFailed ? '#cc223306' : 'transparent' }}>
                                     <div style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                                      <div style={{ width: 20, height: 20, borderRadius: '50%', background: job.status === 'done' ? '#39d35322' : isRunning ? '#f09a3a22' : isFailed ? '#cc223322' : '#13161f', border: `1px solid ${statusCfg.color}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: statusCfg.color, fontSize: 9, fontFamily: 'JetBrains Mono', fontWeight: 700, flexShrink: 0 }}>
-                                        {isRunning ? <span style={{ animation: 'pulse 1.2s infinite' }}>●</span> : job.status === 'done' ? '✓' : isFailed ? '✗' : idx + 1}
+                                      <div style={{ width: 20, height: 20, borderRadius: '50%', background: effectiveStatus === 'done' ? '#39d35322' : isRunning ? '#f09a3a22' : isFailed ? '#cc223322' : isSkipped ? '#5b8af522' : '#13161f', border: `1px solid ${statusCfg.color}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: statusCfg.color, fontSize: 9, fontFamily: 'JetBrains Mono', fontWeight: 700, flexShrink: 0 }}>
+                                        {isRunning ? <span style={{ animation: 'pulse 1.2s infinite' }}>●</span> : effectiveStatus === 'done' ? '✓' : isFailed ? '✗' : isSkipped ? '↷' : (stepIdx !== undefined ? stepIdx + 1 : idx + 1)}
                                       </div>
                                       <div style={{ flex: 1, minWidth: 0 }}>
                                         <div style={{ fontSize: 11, color: '#c8cdd6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.title}</div>
@@ -1243,7 +1422,8 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                                         </div>
                                       </div>
                                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                                        <StatusBadge status={job.status} />
+                                        {attempts > 1 && <span title={`${attempts} attempts (retry)`} style={{ fontSize: 9, color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a33', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>↻{attempts}</span>}
+                                        <StatusBadge status={effectiveStatus} />
                                         {dur && <span style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>⏱{dur}</span>}
                                       </div>
                                     </div>

@@ -36,6 +36,12 @@ class PlaybookStepBody(BaseModel):
     on_failure: str = "stop"  # stop | continue | jump
     on_failure_step: int | None = None
     result_conditions: list[dict] = Field(default_factory=list)
+    # P4 — DAG / retry / preconditions
+    depends_on: list[int] = Field(default_factory=list)  # 1-based step numbers that must finish first
+    retry_count: int = 0                                  # max retries when job fails
+    retry_delay_seconds: int = 5                          # backoff between retries
+    retry_on: list[str] = Field(default_factory=lambda: ["failed"])  # job statuses that trigger retry
+    precondition: dict | None = None                      # {step, result_key, operator, value} — evaluated before run
 
 
 class PlaybookBody(BaseModel):
@@ -392,6 +398,113 @@ STEP_TEMPLATES = {
 
 CONDITION_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains"}
 
+RETRY_STATUSES = {"failed", "cancelled", "timeout"}
+
+
+def _step_deps_zero_idx(step: dict, default_prev: int | None = None) -> list[int]:
+    """Return 0-based dep indices for a normalized step.
+
+    If `depends_on` is empty we fall back to the implicit "previous step" model
+    (default_prev), so existing linear playbooks still execute correctly under
+    the DAG runner.
+    """
+    deps = step.get("depends_on") or []
+    out = []
+    for d in deps:
+        try:
+            out.append(int(d) - 1)
+        except Exception:
+            continue
+    if not out and default_prev is not None:
+        out.append(default_prev)
+    return out
+
+
+def _detect_cycle(adj: dict[int, list[int]], n: int) -> list[int] | None:
+    """Return a cycle as a list of 0-based step indices, or None if acyclic."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {i: WHITE for i in range(n)}
+    parent: dict[int, int] = {}
+    cycle_path: list[int] = []
+
+    def dfs(u: int) -> bool:
+        color[u] = GRAY
+        for v in adj.get(u, []):
+            if v < 0 or v >= n:
+                continue
+            if color[v] == GRAY:
+                # Reconstruct cycle u→…→v→u
+                path = [u]
+                cur = u
+                while cur != v and cur in parent:
+                    cur = parent[cur]
+                    path.append(cur)
+                path.reverse()
+                path.append(v)
+                cycle_path.extend(path)
+                return True
+            if color[v] == WHITE:
+                parent[v] = u
+                if dfs(v):
+                    return True
+        color[u] = BLACK
+        return False
+
+    for i in range(n):
+        if color[i] == WHITE and dfs(i):
+            return cycle_path
+    return None
+
+
+def _is_dag_mode(steps: list[dict]) -> bool:
+    """A playbook switches to DAG runner if any step opts into the new fields."""
+    for s in steps:
+        if (s.get("depends_on") or []):
+            return True
+        if int(s.get("retry_count") or 0) > 0:
+            return True
+        if s.get("precondition"):
+            return True
+    return False
+
+
+def _normalize_precondition(rule: dict | None) -> dict | None:
+    if not rule or not isinstance(rule, dict):
+        return None
+    step_ref = rule.get("step")
+    try:
+        step_ref = int(step_ref) if step_ref is not None else None
+    except Exception:
+        step_ref = None
+    return {
+        "step": step_ref,                                   # 1-based; None → most recent dep
+        "result_key": str(rule.get("result_key") or "").strip(),
+        "operator": str(rule.get("operator") or "eq").strip().lower(),
+        "value": rule.get("value"),
+        "negate": bool(rule.get("negate", False)),
+    }
+
+
+def _evaluate_precondition(pre: dict, state: dict[int, dict], deps: list[int]) -> bool:
+    """Return True if the step is eligible to run. False ⇒ skip."""
+    if not pre:
+        return True
+    target_idx = pre.get("step")
+    if target_idx is not None:
+        target_idx = int(target_idx) - 1
+    elif deps:
+        target_idx = deps[-1]
+    else:
+        return True  # no reference, nothing to evaluate
+    target_state = state.get(target_idx)
+    if not target_state or target_state.get("status") != "done":
+        # Referenced step did not complete successfully → precondition can't be true
+        return bool(pre.get("negate", False))
+    result_payload = (target_state.get("result_json") or {})
+    actual = _extract_result_value(result_payload, pre.get("result_key") or "")
+    matched = _condition_matches(actual, pre.get("operator") or "eq", pre.get("value"))
+    return (not matched) if pre.get("negate") else matched
+
 
 def _template_for(connector_key: str, operation: str) -> dict | None:
     return STEP_TEMPLATES.get(f"{connector_key}:{operation}")
@@ -557,6 +670,44 @@ def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[di
                   pass
               normalized_params[key] = _normalize_field_value(field, value)
           params = normalized_params
+        # P4 — DAG / retry / precondition validation
+        depends_on_norm: list[int] = []
+        for raw_dep in (step.depends_on or []):
+            try:
+                d = int(raw_dep)
+            except Exception:
+                errors.append(f"{prefix}: depends_on values must be integers")
+                continue
+            if d < 1 or d > total_steps:
+                errors.append(f"{prefix}: depends_on={d} is out of range 1..{total_steps}")
+                continue
+            if d == idx + 1:
+                errors.append(f"{prefix}: a step cannot depend on itself")
+                continue
+            if d not in depends_on_norm:
+                depends_on_norm.append(d)
+        retry_count = int(step.retry_count or 0)
+        if retry_count < 0 or retry_count > 10:
+            errors.append(f"{prefix}: retry_count must be 0..10")
+            retry_count = max(0, min(10, retry_count))
+        retry_delay = int(step.retry_delay_seconds or 0)
+        if retry_delay < 0 or retry_delay > 3600:
+            errors.append(f"{prefix}: retry_delay_seconds must be 0..3600")
+            retry_delay = max(0, min(3600, retry_delay))
+        retry_on = [s for s in (step.retry_on or ["failed"]) if s in RETRY_STATUSES]
+        if not retry_on:
+            retry_on = ["failed"]
+        pre_norm = _normalize_precondition(step.precondition) if step.precondition else None
+        if pre_norm is not None:
+            if not pre_norm["result_key"]:
+                errors.append(f"{prefix}: precondition requires result_key")
+            if pre_norm["operator"] not in CONDITION_OPERATORS:
+                errors.append(f"{prefix}: precondition operator must be one of {sorted(CONDITION_OPERATORS)}")
+            if pre_norm["step"] is not None:
+                if pre_norm["step"] < 1 or pre_norm["step"] > total_steps:
+                    errors.append(f"{prefix}: precondition.step out of range")
+                elif pre_norm["step"] == idx + 1:
+                    errors.append(f"{prefix}: precondition cannot reference its own step")
         normalized_steps.append({
             "title": step.title.strip(),
             "connector_key": step.connector_key,
@@ -567,7 +718,35 @@ def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[di
             "on_failure": on_failure,
             "on_failure_step": step.on_failure_step,
             "result_conditions": normalized_conditions,
+            "depends_on": depends_on_norm,
+            "retry_count": retry_count,
+            "retry_delay_seconds": retry_delay,
+            "retry_on": retry_on,
+            "precondition": pre_norm,
         })
+
+    # P4 — cross-step DAG validation (only if any step opted into the new model)
+    if _is_dag_mode(normalized_steps):
+        adj = {i: [d - 1 for d in (s.get("depends_on") or []) if 1 <= d <= total_steps]
+               for i, s in enumerate(normalized_steps)}
+        cycle = _detect_cycle(adj, total_steps)
+        if cycle:
+            errors.append("Dependency graph contains a cycle: " +
+                          " → ".join(f"#{i + 1}" for i in cycle))
+        for i, s in enumerate(normalized_steps):
+            if s.get("on_success") == "jump" or s.get("on_failure") == "jump":
+                errors.append(
+                    f"Step {i + 1}: 'jump' branching is not allowed in DAG mode "
+                    "(remove depends_on / retry_count / precondition or remove the jump)"
+                )
+            pre = s.get("precondition") or {}
+            ref = pre.get("step")
+            deps = s.get("depends_on") or []
+            if ref is not None and (ref not in deps):
+                warnings.append(
+                    f"Step {i + 1}: precondition references step #{ref} which is not "
+                    "listed in depends_on — its result may not be ready when this step runs"
+                )
 
     return {
         "ok": not errors,
@@ -1219,7 +1398,12 @@ async def _wait_for_job(job_id: str, run_id: str | None = None) -> dict:
             if run_id:
                 _upsert_run_job_state(db, run_id, job_id, job.status)
             if job.status in ("done", "failed", "cancelled"):
-                return {"status": job.status, "id": job.id}
+                return {
+                    "status": job.status,
+                    "id": job.id,
+                    "result_json": job.result_json or {},
+                    "error_output": job.error_output or "",
+                }
         finally:
             db.close()
 
@@ -1313,6 +1497,240 @@ async def _run_sequence(run_id: str, job_ids: list[str], steps: list[dict]) -> N
                 db.close()
             return
         idx = next_idx
+
+
+def _queue_single_step(
+    db: Session,
+    pid: str,
+    playbook_id: str,
+    step: dict,
+    body: PlaybookRunBody,
+    created_by: str,
+    run_id: str,
+    *,
+    step_idx: int,
+    attempt: int,
+) -> models.Job:
+    spec = _job_spec_for_step(pid, step, body, created_by)
+    request_json = {
+        **spec.get("request_json", {}),
+        "playbook_id": playbook_id,
+        "playbook_run_id": run_id,
+        "step_idx": step_idx,
+        "attempt": attempt,
+    }
+    return queue_job(
+        db,
+        pid,
+        spec["job_type"],
+        spec["title"],
+        target=spec.get("target", ""),
+        command=spec.get("command", ""),
+        created_by=spec.get("created_by", ""),
+        connector_key=spec["connector_key"],
+        operation=spec["operation"],
+        related_entity_type=spec.get("related_entity_type", "project"),
+        related_entity_id=spec.get("related_entity_id", pid),
+        request_json=request_json,
+    )
+
+
+def _append_run_job(run_id: str, job: models.Job, step_idx: int, attempt: int) -> None:
+    db = SessionLocal()
+    try:
+        run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+        if not run:
+            return
+        jobs_json = list(run.jobs_json or [])
+        jobs_json.append({
+            "id": job.id,
+            "title": job.title,
+            "status": job.status,
+            "step_idx": step_idx,
+            "attempt": attempt,
+        })
+        _update_run(db, run, jobs_json=jobs_json)
+    finally:
+        db.close()
+
+
+async def _run_dag(
+    run_id: str,
+    pid: str,
+    playbook: dict,
+    body: PlaybookRunBody,
+    created_by: str,
+) -> None:
+    """DAG-aware playbook runner with retry + precondition support.
+
+    States per step: pending → running → done|failed|skipped|cancelled.
+    A step becomes ready when every dependency is in {done, skipped, failed}.
+    If any dep failed and the step does not opt into running anyway (on_failure='next'),
+    the step is marked skipped (failure propagation).
+    """
+    steps = playbook.get("steps", [])
+    n = len(steps)
+
+    db = SessionLocal()
+    try:
+        run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+        if not run:
+            return
+        _update_run(db, run, status="running", started_at=run.started_at or _now())
+    finally:
+        db.close()
+
+    state: dict[int, dict] = {
+        i: {"status": "pending", "result_json": None, "job_id": None, "attempts": 0,
+            "final_status": None}
+        for i in range(n)
+    }
+
+    def _dep_status_ok(i: int) -> bool:
+        deps = _step_deps_zero_idx(steps[i])
+        return all(state[d]["status"] in ("done", "skipped", "failed") for d in deps)
+
+    def _should_skip_from_dep_failure(i: int) -> bool:
+        deps = _step_deps_zero_idx(steps[i])
+        any_failed = any(state[d]["final_status"] == "failed" for d in deps)
+        if not any_failed:
+            return False
+        # Allow override: if step opted-in on_failure='next' at its level (rare in DAG mode)
+        return _normalize_branch_action(steps[i].get("on_failure"), success=False) != "next"
+
+    async def _run_one_step(idx: int) -> None:
+        step = steps[idx]
+        retry_count = int(step.get("retry_count") or 0)
+        retry_delay = int(step.get("retry_delay_seconds") or 0)
+        retry_on = set(step.get("retry_on") or ["failed"])
+        attempts_max = retry_count + 1
+        last_status = "failed"
+        last_result: dict = {}
+        last_job_id: str | None = None
+        for attempt in range(1, attempts_max + 1):
+            state[idx]["attempts"] = attempt
+            db = SessionLocal()
+            try:
+                job = _queue_single_step(
+                    db, pid, playbook["id"], step, body, created_by, run_id,
+                    step_idx=idx, attempt=attempt,
+                )
+            finally:
+                db.close()
+            _append_run_job(run_id, job, idx, attempt)
+            state[idx]["job_id"] = job.id
+            last_job_id = job.id
+
+            # cancellation check before scheduling
+            db = SessionLocal()
+            try:
+                run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+                if not run or run.status == "cancelled":
+                    state[idx]["status"] = "cancelled"
+                    state[idx]["final_status"] = "cancelled"
+                    return
+            finally:
+                db.close()
+
+            schedule_job_run(job.id, pid=pid)
+            result = await _wait_for_job(job.id, run_id)
+            last_status = result.get("status") or "failed"
+            last_result = result.get("result_json") or {}
+            state[idx]["result_json"] = last_result
+
+            if last_status == "done":
+                state[idx]["status"] = "done"
+                state[idx]["final_status"] = "done"
+                return
+            if last_status in retry_on and attempt < attempts_max:
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
+                continue
+            break  # not retriable or out of attempts
+
+        # mark final non-done state
+        if last_status == "cancelled":
+            state[idx]["status"] = "cancelled"
+            state[idx]["final_status"] = "cancelled"
+        else:
+            state[idx]["status"] = "failed"
+            state[idx]["final_status"] = "failed"
+
+    running_tasks: dict[asyncio.Task, int] = {}
+    while True:
+        # cancellation check
+        db = SessionLocal()
+        try:
+            run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+            if not run:
+                return
+            if run.status == "cancelled":
+                for t in running_tasks:
+                    t.cancel()
+                return
+        finally:
+            db.close()
+
+        # spawn ready steps
+        for i in range(n):
+            if state[i]["status"] != "pending":
+                continue
+            if not _dep_status_ok(i):
+                continue
+            # precondition / failure-propagation
+            if _should_skip_from_dep_failure(i):
+                state[i]["status"] = "skipped"
+                state[i]["final_status"] = "skipped"
+                continue
+            deps = _step_deps_zero_idx(steps[i])
+            pre = steps[i].get("precondition")
+            if pre and not _evaluate_precondition(pre, state, deps):
+                state[i]["status"] = "skipped"
+                state[i]["final_status"] = "skipped"
+                continue
+            state[i]["status"] = "running"
+            task = asyncio.create_task(_run_one_step(i))
+            running_tasks[task] = i
+
+        if not running_tasks:
+            break
+
+        done_tasks, _pending = await asyncio.wait(
+            list(running_tasks.keys()), return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in done_tasks:
+            running_tasks.pop(t, None)
+
+    # finalize
+    completed = [s["job_id"] for s in state.values() if s["final_status"] == "done" and s["job_id"]]
+    failed_jobs = [s["job_id"] for s in state.values() if s["final_status"] == "failed" and s["job_id"]]
+    cancelled_any = any(s["final_status"] == "cancelled" for s in state.values())
+    any_failed = bool(failed_jobs)
+    db = SessionLocal()
+    try:
+        run = db.query(models.PlaybookRun).filter(models.PlaybookRun.id == run_id).first()
+        if not run or run.status == "cancelled":
+            return
+        terminal = "cancelled" if cancelled_any and not any_failed else ("failed" if any_failed else "done")
+        _update_run(
+            db, run,
+            status=terminal,
+            finished_at=_now(),
+            error_output="" if terminal == "done" else f"{len(failed_jobs)} step(s) failed",
+            result_json={
+                "completed_jobs": completed,
+                "failed_jobs": failed_jobs,
+                "step_states": {str(i): {
+                    "status": s["final_status"],
+                    "attempts": s["attempts"],
+                    "job_id": s["job_id"],
+                } for i, s in state.items()},
+                "dag_mode": True,
+                "rollup": _aggregate_run_results(db, completed),
+            },
+        )
+    finally:
+        db.close()
 
 
 def _create_run_record(db: Session, pid: str, playbook: dict, body: PlaybookRunBody, created_by: str, jobs: list[models.Job]) -> models.PlaybookRun:
@@ -1466,6 +1884,40 @@ async def run_playbook(
         raise HTTPException(404, "Playbook not found")
     created_by = getattr(user, "username", "") or ""
     provisional_run_id = f"pbr_{uuid4().hex[:10]}"
+    steps_list = playbook.get("steps", [])
+    dag_mode = _is_dag_mode(steps_list)
+
+    if dag_mode:
+        # Jobs are queued on-demand inside the DAG runner (retries create extra jobs).
+        run = models.PlaybookRun(
+            id=provisional_run_id,
+            pid=pid,
+            playbook_id=playbook["id"],
+            title=playbook["title"],
+            status="queued",
+            created_by=created_by,
+            created_at=_now(),
+            started_at="",
+            finished_at="",
+            target=body.target.strip() or body.target_url.strip(),
+            error_output="",
+            jobs_json=[],
+            request_json=body.model_dump(),
+            result_json={"dag_mode": True},
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        bcast(pid, "playbook_run", "create", _playbook_run_dict(run))
+        asyncio.create_task(_run_dag(run.id, pid, playbook, body, created_by))
+        return {
+            "ok": True,
+            "playbook_run": _playbook_run_dict(run),
+            "playbook": {"id": playbook["id"], "title": playbook["title"]},
+            "jobs": [],
+            "dag_mode": True,
+        }
+
     jobs = _queue_playbook_jobs(db, pid, playbook, body, created_by, provisional_run_id)
     run = models.PlaybookRun(
         id=provisional_run_id,
