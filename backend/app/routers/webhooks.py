@@ -134,29 +134,28 @@ async def receive_webhook(
 
     # ── Beacon / new implant ─────────────────────────────────────────
     if event.type in ("beacon", "implant", "session", "checkin") and ip:
-        host = db.query(models.Host).filter(
-            models.Host.pid == pid, models.Host.ip == ip
-        ).first()
-        if not host:
-            host = models.Host(
-                id=new_id("hst"),
-                pid=pid,
-                ip=ip,
-                hostname=hostname,
-                os=event.os or "",
-                status="pwned",
-                tags=["c2", event.source or "beacon"],
-                notes=f"C2 beacon — {event.source or 'unknown'}\nProcess: {event.process or ''}\nArch: {event.arch or ''}",
-            )
-            db.add(host)
-            results["host"] = "created"
-        else:
-            host.status = "pwned"
+        from ..core.db_upsert import upsert_host_by_ip
+        # Atomic upsert closes the parallel-beacon race: two C2 listeners
+        # hitting this endpoint for the same IP simultaneously can no longer
+        # both fall into the "not exists" branch.
+        defaults = {
+            "hostname": hostname,
+            "os": event.os or "",
+            "status": "pwned",
+            "tags": ["c2", event.source or "beacon"],
+            "notes": f"C2 beacon — {event.source or 'unknown'}\nProcess: {event.process or ''}\nArch: {event.arch or ''}",
+        }
+        update_fields = {"status": "pwned"}
+        host, created = upsert_host_by_ip(
+            db, pid=pid, ip=ip, defaults=defaults, update_on_conflict=update_fields,
+        )
+        # Non-clobbering enrichment for fields that should only fill, not overwrite
+        if not created:
             if hostname and not host.hostname:
                 host.hostname = hostname
             if event.os and (not host.os or host.os == "Linux"):
                 host.os = event.os
-            results["host"] = "updated"
+        results["host"] = "created" if created else "updated"
 
         log_event(db, pid, None, "host", "c2_beacon", f"C2 beacon: {ip} ({hostname})", {"ip": ip, "source": event.source})
         db.flush()
