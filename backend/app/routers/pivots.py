@@ -68,11 +68,24 @@ def _parse_chisel_args(line: str) -> dict[str, Any]:
         spec = m.group("spec") or ""
         direction = "reverse" if m.group("dir").upper() == "R" else "local"
         is_socks = spec.lower() == "socks" or spec.lower().endswith(":socks")
-        forwards.append({
+        fwd: dict[str, Any] = {
             "direction": direction,
             "proxy_type": "socks" if is_socks else "tcp",
             "raw": f"{m.group('dir').upper()}:{spec}",
-        })
+        }
+        # TCP forwards: try to pull the remote target. Two common forms:
+        #   R:1080:10.0.0.5:80    → forward our 1080 to 10.0.0.5:80
+        #   L:8080:internal.lan:80
+        # Either reverse or local, the 3rd segment is the target host.
+        if not is_socks:
+            parts = spec.split(":")
+            if len(parts) >= 3:
+                fwd["target_host"] = parts[-2]
+                try:
+                    fwd["target_port"] = int(parts[-1])
+                except ValueError:
+                    pass
+        forwards.append(fwd)
     if forwards:
         out["forwards"] = forwards
         # Prefer the first one's direction/type as the headline for the row
@@ -115,6 +128,92 @@ def _format_params_note(raw_line: str, params: dict[str, Any]) -> str:
     return f"{body}\n{trailer}"
 
 
+def _load_project_scope_networks(pid: str, db: Session) -> list[ipaddress._BaseNetwork]:
+    """All in-scope CIDR networks of a project, parsed and deduped.
+
+    Domain / hostname / regex scopes are skipped — pivot routes are
+    network-layer, so we only match against CIDR scopes. Returns an
+    empty list if the project has no CIDR scopes defined.
+    """
+    networks: list[ipaddress._BaseNetwork] = []
+    rows = db.query(models.Scope).filter(
+        models.Scope.pid == pid,
+        models.Scope.in_scope == True,
+        models.Scope.scope_type == "cidr",
+    ).all()
+    for row in rows:
+        val = (row.value or "").strip()
+        if not val:
+            continue
+        try:
+            net = ipaddress.ip_network(val, strict=False)
+        except ValueError:
+            continue
+        networks.append(net)
+    return networks
+
+
+def _observation_scope_decision(
+    item: dict,
+    scope_networks: list[ipaddress._BaseNetwork],
+) -> str:
+    """Return one of:
+       - 'in_scope'      — at least one piece of routing info matched a scope
+       - 'out_of_scope'  — routing info found but matched nothing
+       - 'ambiguous'     — no routing info to judge by (socks-only, no routes)
+
+    Empty `scope_networks` always yields 'in_scope' (no scope = no filter).
+    """
+    if not scope_networks:
+        return "in_scope"
+
+    saw_targeting_info = False
+
+    # route_cidr from `ip route show`
+    rc = (item.get("route_cidr") or "").strip()
+    if rc:
+        saw_targeting_info = True
+        try:
+            obs_net = ipaddress.ip_network(rc, strict=False)
+            for sn in scope_networks:
+                if obs_net.subnet_of(sn) or obs_net.supernet_of(sn) or obs_net.overlaps(sn):
+                    return "in_scope"
+        except ValueError:
+            pass
+
+    # chisel forward targets (parsed inside the params trailer in notes).
+    # Only IP targets count as "decidable" info — hostnames can't be
+    # checked without DNS, so they don't push the observation into
+    # out_of_scope on their own.
+    params = _extract_params_from_notes(item.get("notes") or "")
+    for fwd in (params.get("forwards") or []):
+        target_host = fwd.get("target_host") or ""
+        if not target_host:
+            continue
+        try:
+            ip = ipaddress.ip_address(target_host)
+        except ValueError:
+            continue  # hostname — can't check without DNS
+        saw_targeting_info = True
+        for sn in scope_networks:
+            if ip in sn:
+                return "in_scope"
+
+    return "out_of_scope" if saw_targeting_info else "ambiguous"
+
+
+def _extract_params_from_notes(notes: str) -> dict:
+    """Recover the JSON params trailer written by _format_params_note."""
+    if "#params: " not in notes:
+        return {}
+    try:
+        import json as _json
+        trailer = notes.rsplit("#params: ", 1)[1].splitlines()[0]
+        return _json.loads(trailer)
+    except Exception:
+        return {}
+
+
 def _parse_ss_lines(ss_lines: list[str]) -> dict[str, list[int]]:
     """Map process name → listening ports (TCP) from `ss -tnlp` output.
 
@@ -145,6 +244,16 @@ class PivotCollectBody(BaseModel):
     target_id: str = ""
     source_host_id: str = ""
     clear_existing: bool = True
+    # When True (default), observations whose route_cidr or chisel-forward
+    # target falls outside every Scope of the current project are dropped.
+    # Use False to ingest everything seen on the box (debugging / shared
+    # infrastructure with no formal scopes yet).
+    strict_scope_filter: bool = True
+    # Independently controls whether observations without any targeting
+    # info (e.g. chisel client with SOCKS-only and no routes) are kept.
+    # Defaults to keeping them — they're useful as "something is running
+    # here" markers even if we can't decide project assignment.
+    keep_ambiguous: bool = True
 
 
 def _observation_out(obs: models.PivotObservation) -> dict:
@@ -683,6 +792,30 @@ def collect_pivots(pid: str, body: PivotCollectBody, request: Request, db: Sessi
         raise HTTPException(400, f"SSH collector target {target.get('host') or target.get('name')!r} is not mapped to a project host; add that host to the project first")
     source_host_id = _default_source_host(pid, body.source_host_id, db)
     observations, raw_stdout = _collect_remote_pivots(target)
+    # Project isolation: a shared chisel/ligolo host may be running routes for
+    # several projects at once. Without filtering, every /collect call from
+    # any project would write all of them. Decide per observation whether it
+    # belongs to the current project by intersecting routing info with the
+    # project's CIDR scopes.
+    scope_networks = _load_project_scope_networks(pid, db)
+    filtered: list[dict] = []
+    dropped_out_of_scope = 0
+    dropped_ambiguous = 0
+    for item in observations:
+        decision = _observation_scope_decision(item, scope_networks)
+        if decision == "in_scope":
+            filtered.append(item)
+        elif decision == "out_of_scope":
+            if body.strict_scope_filter:
+                dropped_out_of_scope += 1
+                continue
+            filtered.append(item)
+        else:  # ambiguous
+            if body.keep_ambiguous:
+                filtered.append(item)
+            else:
+                dropped_ambiguous += 1
+    observations = filtered
     if body.clear_existing:
         db.query(models.PivotObservation).filter(models.PivotObservation.pid == pid, models.PivotObservation.collector_target_id == target.get("id", "")).delete(synchronize_session=False)
         db.commit()
@@ -720,12 +853,26 @@ def collect_pivots(pid: str, body: PivotCollectBody, request: Request, db: Sessi
     for obs in created:
         db.refresh(obs)
     _sync_pivot_edges(pid, db)
-    log_event(db, pid, getattr(request.state, "username", None), "pivot", "collect", f"Pivot collection from SSH target: {target.get('name') or target.get('host')}", {"target_id": target.get("id", ""), "count": len(created), "pivot_host_id": pivot_host.id if pivot_host else "", "raw_preview": raw_stdout[:800]})
+    log_event(
+        db, pid, getattr(request.state, "username", None), "pivot", "collect",
+        f"Pivot collection from SSH target: {target.get('name') or target.get('host')}",
+        {
+            "target_id": target.get("id", ""),
+            "count": len(created),
+            "dropped_out_of_scope": dropped_out_of_scope,
+            "dropped_ambiguous": dropped_ambiguous,
+            "pivot_host_id": pivot_host.id if pivot_host else "",
+            "raw_preview": raw_stdout[:800],
+        },
+    )
     db.commit()
     return {
         "ok": True,
         "target": {"id": target.get("id", ""), "name": target.get("name") or target.get("host", ""), "host": target.get("host", "")},
         "pivot_host_id": pivot_host.id if pivot_host else "",
         "count": len(created),
+        "dropped_out_of_scope": dropped_out_of_scope,
+        "dropped_ambiguous": dropped_ambiguous,
+        "scope_networks": [str(n) for n in scope_networks],
         "items": [_observation_out(obs) for obs in created],
     }
