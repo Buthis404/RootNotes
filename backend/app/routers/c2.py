@@ -1696,7 +1696,13 @@ async def get_host_actions(
 ):
     _require_c2()
     from ..core.access import check_pid_access
+    from ..core.permissions import get_membership, get_permissions_for_role
     check_pid_access(db, pid, user, "hosts.read")
+    if user.role == "admin":
+        can_read_secret = True
+    else:
+        m = get_membership(db, pid, user.id)
+        can_read_secret = bool(m and "credentials.read_secret" in get_permissions_for_role(m.role))
     host = db.query(models.Host).filter(models.Host.id == host_id, models.Host.pid == pid).first()
     if not host:
         raise HTTPException(404, "Host not found")
@@ -1761,12 +1767,20 @@ async def get_host_actions(
                 "source": "rootnotes",
                 "integration_id": "",
                 "username": cred.username,
-                "secret": decrypt_str(cred.secret),
+                "secret": decrypt_str(cred.secret) if can_read_secret else "",
                 "domain": cred.domain,
                 "host": cred.host,
                 "type": cred.type,
                 "label": cred.username,
             })
+
+    if rootnotes_creds and can_read_secret:
+        log_event(
+            db, pid, getattr(user, "username", None), "audit", "read_credential_secrets",
+            f"Credential secrets viewed via host actions ({len(rootnotes_creds)})",
+            {"count": len(rootnotes_creds), "host_id": host.id},
+        )
+        db.commit()
 
     filtered_c2_creds = [item for item in c2_creds if _cred_matches_host(item, host)]
     return {
@@ -1842,6 +1856,13 @@ async def perform_c2_command(
             f"Supported: {', '.join(SUPPORTED_EXEC_C2_TYPES)}"
         )
     rendered_command = _render_command_with_cred(commandline, cred, host)
+    if cred and cred.get("secret"):
+        log_event(
+            db, pid, actor_username or None, "audit", "secret_used_c2_exec",
+            f"Credential secret used in C2 exec via {c2_type}: {cred.get('username') or ''}",
+            {"cred_id": cred.get("id"), "username": cred.get("username"), "c2_type": c2_type, "agent_id": agent_id},
+        )
+        db.commit()
     if c2_type == "mythic":
         result = await _mythic_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
         summary = f"Executed via Mythic on callback {agent_id}"
