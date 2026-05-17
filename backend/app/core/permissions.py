@@ -43,6 +43,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "checklist.read", "checklist.update",
         "objectives.read", "objectives.create", "objectives.update", "objectives.delete",
         "search.read",
+        "kb.read", "kb.create", "kb.update", "kb.delete", "kb.export",
     },
     "admin": {
         "project.read", "project.update",
@@ -63,6 +64,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "checklist.read", "checklist.update",
         "objectives.read", "objectives.create", "objectives.update", "objectives.delete",
         "search.read",
+        "kb.read", "kb.create", "kb.update", "kb.delete", "kb.export",
     },
     "editor": {
         "project.read", "project.export",
@@ -81,6 +83,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "checklist.read", "checklist.update",
         "objectives.read", "objectives.create", "objectives.update", "objectives.delete",
         "search.read",
+        "kb.read", "kb.create", "kb.update", "kb.export",
     },
     "operator": {
         "project.read",
@@ -99,6 +102,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "checklist.read", "checklist.update",
         "objectives.read", "objectives.update",
         "search.read",
+        "kb.read", "kb.create", "kb.update",
     },
     "viewer": {
         "project.read",
@@ -117,6 +121,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "checklist.read",
         "objectives.read",
         "search.read",
+        "kb.read",
     },
     "auditor": {
         "project.read",
@@ -132,6 +137,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "checklist.read",
         "objectives.read",
         "search.read",
+        "kb.read",
     },
 }
 

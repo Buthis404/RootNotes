@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models, schemas
-from ..core.deps import get_current_user
+from ..core.access import check_pid_access, get_user_member_pids
+from ..core.deps import get_current_user, require_admin
 from ..core.utils import new_id, ts_now
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,11 @@ def _now() -> str:
     return ts_now()
 
 
+def _can_write_global(user: models.User) -> bool:
+    """Global (pid=None) KB articles are admin-only for write."""
+    return user.role == "admin"
+
+
 @router.get("", response_model=list[schemas.KBArticle])
 def list_kb_articles(
     pid: Optional[str] = None,
@@ -109,12 +115,13 @@ def list_kb_articles(
     user: models.User = Depends(get_current_user),
 ):
     if pid:
+        check_pid_access(db, pid, user, "kb.read")
         # Return global (pid IS NULL) + project articles
         query = db.query(models.KBArticle).filter(
             (models.KBArticle.pid == None) | (models.KBArticle.pid == pid)
         )
     else:
-        # Return only global articles
+        # Return only global articles — readable by any authenticated user
         query = db.query(models.KBArticle).filter(models.KBArticle.pid == None)
 
     if category:
@@ -138,10 +145,10 @@ def create_kb_article(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    # If project-scoped, validate access
     if body.pid:
-        from ..core.access import check_pid_access
-        check_pid_access(db, body.pid, user)
+        check_pid_access(db, body.pid, user, "kb.create")
+    elif not _can_write_global(user):
+        raise HTTPException(403, "Global KB articles can only be created by global admins")
 
     now = _now()
     article = models.KBArticle(
@@ -169,6 +176,10 @@ def export_kb(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    if pid:
+        check_pid_access(db, pid, user, "kb.export")
+    elif user.role != "admin":
+        raise HTTPException(403, "Global KB export requires global admin")
     q = db.query(models.KBArticle)
     if pid:
         q = q.filter((models.KBArticle.pid == pid) | (models.KBArticle.pid == None))
@@ -194,6 +205,10 @@ async def import_kb(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
+    if pid:
+        check_pid_access(db, pid, user, "kb.create")
+    elif user.role != "admin":
+        raise HTTPException(403, "Global KB import requires global admin")
     raw = json.loads((await file.read()).decode())
     articles = raw if isinstance(raw, list) else raw.get("articles", [])
     now = ts_now()
@@ -205,6 +220,11 @@ async def import_kb(
             skipped += 1
             continue
         target_pid = pid or item.get("pid")
+        if target_pid and target_pid != pid and user.role != "admin":
+            # Item carried a foreign pid the importer doesn't own
+            if not any(target_pid == m for m in get_user_member_pids(db, user)):
+                skipped += 1
+                continue
         existing = db.query(models.KBArticle).filter(
             models.KBArticle.title == title,
             models.KBArticle.category == category,
@@ -238,6 +258,8 @@ def get_kb_article(
     article = db.query(models.KBArticle).filter(models.KBArticle.id == aid).first()
     if not article:
         raise HTTPException(404, "Article not found")
+    if article.pid:
+        check_pid_access(db, article.pid, user, "kb.read")
     return article
 
 
@@ -251,6 +273,10 @@ def update_kb_article(
     article = db.query(models.KBArticle).filter(models.KBArticle.id == aid).first()
     if not article:
         raise HTTPException(404, "Article not found")
+    if article.pid:
+        check_pid_access(db, article.pid, user, "kb.update")
+    elif not _can_write_global(user):
+        raise HTTPException(403, "Global KB articles can only be edited by global admins")
 
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(article, k, v)
@@ -270,6 +296,10 @@ def delete_kb_article(
     article = db.query(models.KBArticle).filter(models.KBArticle.id == aid).first()
     if not article:
         raise HTTPException(404, "Article not found")
+    if article.pid:
+        check_pid_access(db, article.pid, user, "kb.delete")
+    elif not _can_write_global(user):
+        raise HTTPException(403, "Global KB articles can only be deleted by global admins")
     db.delete(article)
     db.commit()
 
@@ -277,7 +307,7 @@ def delete_kb_article(
 @router.post("/seed/mitre", status_code=200)
 def seed_mitre(
     db: Session = Depends(get_db),
-    user: models.User = Depends(get_current_user),
+    _: models.User = Depends(require_admin),
 ):
     """Seed global KB with MITRE ATT&CK technique articles (idempotent)."""
     existing_ids = {
