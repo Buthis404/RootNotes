@@ -664,7 +664,7 @@ async def run_httpx(
     current_user=Depends(get_current_user),
 ):
     _require_attacker_ssh()
-    check_pid_access(db, pid, current_user)
+    check_pid_access(db, pid, current_user, "scans.run")
     ssh_config = _get_ssh_config(pid, body.target_id, db, body.target)
     username = current_user.username
     target = body.target.strip()
@@ -795,7 +795,7 @@ async def run_ffuf(
     current_user=Depends(get_current_user),
 ):
     _require_attacker_ssh()
-    check_pid_access(db, pid, current_user)
+    check_pid_access(db, pid, current_user, "scans.run")
     ssh_config = _get_ssh_config(pid, body.target_id, db, body.target_url)
     username = current_user.username
     target_url = body.target_url.strip().rstrip("/")

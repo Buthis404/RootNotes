@@ -44,6 +44,11 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "objectives.read", "objectives.create", "objectives.update", "objectives.delete",
         "search.read",
         "kb.read", "kb.create", "kb.update", "kb.delete", "kb.export",
+        "playbooks.read", "playbooks.create", "playbooks.update", "playbooks.delete",
+        "jobs.read", "jobs.cancel",
+        "pivots.read", "pivots.manage",
+        "webhooks.read", "webhooks.manage",
+        "scans.run", "scans.read",
     },
     "admin": {
         "project.read", "project.update",
@@ -65,6 +70,11 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "objectives.read", "objectives.create", "objectives.update", "objectives.delete",
         "search.read",
         "kb.read", "kb.create", "kb.update", "kb.delete", "kb.export",
+        "playbooks.read", "playbooks.create", "playbooks.update", "playbooks.delete",
+        "jobs.read", "jobs.cancel",
+        "pivots.read", "pivots.manage",
+        "webhooks.read", "webhooks.manage",
+        "scans.run", "scans.read",
     },
     "editor": {
         "project.read", "project.export",
@@ -84,6 +94,11 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "objectives.read", "objectives.create", "objectives.update", "objectives.delete",
         "search.read",
         "kb.read", "kb.create", "kb.update", "kb.export",
+        "playbooks.read", "playbooks.create", "playbooks.update", "playbooks.delete",
+        "jobs.read", "jobs.cancel",
+        "pivots.read", "pivots.manage",
+        "webhooks.read",
+        "scans.run", "scans.read",
     },
     "operator": {
         "project.read",
@@ -103,6 +118,10 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "objectives.read", "objectives.update",
         "search.read",
         "kb.read", "kb.create", "kb.update",
+        "playbooks.read", "playbooks.create", "playbooks.update",
+        "jobs.read", "jobs.cancel",
+        "pivots.read", "pivots.manage",
+        "scans.run", "scans.read",
     },
     "viewer": {
         "project.read",
@@ -122,6 +141,10 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "objectives.read",
         "search.read",
         "kb.read",
+        "playbooks.read",
+        "jobs.read",
+        "pivots.read",
+        "scans.read",
     },
     "auditor": {
         "project.read",
@@ -138,6 +161,10 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "objectives.read",
         "search.read",
         "kb.read",
+        "playbooks.read",
+        "jobs.read",
+        "pivots.read",
+        "scans.read",
     },
 }
 
