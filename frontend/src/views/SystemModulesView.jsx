@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { moduleRegistry } from '../features/plugins/registry.js';
 
 function AttackerSSHPanel({ accent, enabled }) {
-  const emptyTarget = { name: '', host: '', port: 22, username: '', password: '', private_key: '', known_hosts_policy: 'accept_new', proxy_type: 'none', proxy_host: '', proxy_port: 1080, proxy_username: '', proxy_password: '', proxy_private_key: '', exec_proxy_type: 'none', exec_proxy_host: '', exec_proxy_port: 1080, exec_proxy_username: '', exec_proxy_password: '', exec_jump_host: '', exec_jump_port: 22, exec_jump_username: '', project_ids: [], enabled: true, has_password: false, has_private_key: false, has_proxy_password: false, has_proxy_private_key: false, has_exec_proxy_password: false };
+  const emptyTarget = { name: '', host: '', port: 22, username: '', password: '', private_key: '', known_hosts_policy: 'accept_new', proxy_type: 'none', proxy_host: '', proxy_port: 1080, proxy_username: '', proxy_password: '', proxy_private_key: '', exec_proxy_type: 'none', exec_proxy_host: '', exec_proxy_port: 1080, exec_proxy_username: '', exec_proxy_password: '', exec_jump_host: '', exec_jump_port: 22, exec_jump_username: '', project_ids: [], enabled: true, is_operator: true, runs_pivot: true, has_password: false, has_private_key: false, has_proxy_password: false, has_proxy_private_key: false, has_exec_proxy_password: false };
   const [targets, setTargets] = useState([]);
   const [projects, setProjects] = useState([]);
   const [selectedTargetId, setSelectedTargetId] = useState('');
@@ -216,6 +216,34 @@ function AttackerSSHPanel({ accent, enabled }) {
               Stored proxy credentials are also write-only. Leave fields blank to keep current jump-host secrets.
             </div>
           )}
+
+          {/* Role flags */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 9, color: '#404550', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Host role</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: enabled ? 'pointer' : 'default' }}>
+                <input type="checkbox" checked={!!form.is_operator} disabled={!enabled}
+                  onChange={e => setForm(prev => ({ ...prev, is_operator: e.target.checked }))} />
+                <div>
+                  <div style={{ fontSize: 11, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>Operator host</div>
+                  <div style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>Run scans, bulk exec, playbook commands from this host</div>
+                </div>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: enabled ? 'pointer' : 'default' }}>
+                <input type="checkbox" checked={!!form.runs_pivot} disabled={!enabled}
+                  onChange={e => setForm(prev => ({ ...prev, runs_pivot: e.target.checked }))} />
+                <div>
+                  <div style={{ fontSize: 11, color: '#c8cdd6', fontFamily: 'JetBrains Mono' }}>Runs chisel / ligolo (pivot box)</div>
+                  <div style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono' }}>Pivot collector will SSH here to read ps / routes / ss state</div>
+                </div>
+              </label>
+            </div>
+            {!form.is_operator && !form.runs_pivot && (
+              <div style={{ marginTop: 6, fontSize: 10, color: '#cc6633', fontFamily: 'JetBrains Mono' }}>
+                Select at least one role — otherwise this host can't be used for anything.
+              </div>
+            )}
+          </div>
 
           {/* Project scope */}
           <div style={{ marginBottom: 14 }}>
