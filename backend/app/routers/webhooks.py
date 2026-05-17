@@ -52,7 +52,7 @@ def regenerate_webhook_token(
 ):
     if user.role != "admin":
         from ..core.access import check_pid_access
-        check_pid_access(db, pid, user, "project.manage")
+        check_pid_access(db, pid, user, "webhooks.manage")
     project = db.query(models.Project).filter(models.Project.id == pid).first()
     if not project:
         raise HTTPException(404, "Project not found")

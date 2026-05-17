@@ -21,13 +21,13 @@ def _now() -> str:
 
 @router.get("", response_model=list[schemas.ProjectDomain])
 def list_domains(pid: str, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    check_pid_access(db, pid, user, "notes.read")
+    check_pid_access(db, pid, user, "hosts.read")
     return db.query(models.ProjectDomain).filter(models.ProjectDomain.pid == pid).all()
 
 
 @router.post("", response_model=schemas.ProjectDomain, status_code=201)
 def create_domain(body: schemas.ProjectDomainCreate, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    check_pid_access(db, body.pid, user, "notes.write")
+    check_pid_access(db, body.pid, user, "hosts.update")
     domain = models.ProjectDomain(
         id=new_id("dom"),
         pid=body.pid,
@@ -47,7 +47,7 @@ def update_domain(did: str, body: schemas.ProjectDomainUpdate, db: Session = Dep
     domain = db.query(models.ProjectDomain).filter(models.ProjectDomain.id == did).first()
     if not domain:
         raise HTTPException(404, "Domain not found")
-    check_pid_access(db, domain.pid, user, "notes.write")
+    check_pid_access(db, domain.pid, user, "hosts.update")
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(domain, k, v)
     db.commit()
@@ -60,6 +60,6 @@ def delete_domain(did: str, db: Session = Depends(get_db), user: models.User = D
     domain = db.query(models.ProjectDomain).filter(models.ProjectDomain.id == did).first()
     if not domain:
         raise HTTPException(404, "Domain not found")
-    check_pid_access(db, domain.pid, user, "notes.write")
+    check_pid_access(db, domain.pid, user, "hosts.update")
     db.delete(domain)
     db.commit()
