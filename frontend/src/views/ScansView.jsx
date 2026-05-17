@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
 import { api } from '../api.js';
+import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
 
 const SCAN_TYPES = [
-  { id: 'nmap',   label: 'Nmap',           icon: 'target',   color: '#5b8af5', desc: 'Port scan → auto-fill hosts & ports' },
-  { id: 'nuclei', label: 'Nuclei',          icon: 'bug',      color: '#e8574a', desc: 'Vuln templates → auto-create findings' },
-  { id: 'cme',    label: 'CME / NetExec',   icon: 'hosts',    color: '#c07af0', desc: 'AD enum → auto-fill hosts & creds' },
-  { id: 'bulk',   label: 'Bulk Host Import',icon: 'plus',     color: '#f09a3a', desc: 'IP list or CIDR → batch add hosts' },
-  { id: 'c2',     label: 'C2 Integrations', icon: 'bolt',     color: '#cc2233', desc: 'Adaptix / Mythic / Sliver → auto-sync sessions' },
-  { id: 'webhook',label: 'C2 Webhook',      icon: 'shield',   color: '#39d353', desc: 'Receive push callbacks from any C2 framework' },
+  { id: 'nmap',     label: 'Nmap',            icon: 'target',   color: '#5b8af5', desc: 'Port scan → auto-fill hosts & ports' },
+  { id: 'nuclei',   label: 'Nuclei',          icon: 'bug',      color: '#e8574a', desc: 'Vuln templates → auto-create findings' },
+  { id: 'cme',      label: 'CME / NetExec',   icon: 'hosts',    color: '#c07af0', desc: 'AD enum → auto-fill hosts & creds' },
+  { id: 'bulk',     label: 'Bulk Host Import',icon: 'plus',     color: '#f09a3a', desc: 'IP list or CIDR → batch add hosts' },
+  { id: 'c2',       label: 'C2 Integrations', icon: 'bolt',     color: '#cc2233', desc: 'Adaptix / Mythic / Sliver → auto-sync sessions' },
+  { id: 'sessions', label: 'Live Sessions',   icon: 'eye',      color: '#39d353', desc: 'All live agents across every C2 integration' },
+  { id: 'webhook',  label: 'C2 Webhook',      icon: 'shield',   color: '#39d353', desc: 'Receive push callbacks from any C2 framework' },
 ];
 
 const FieldRow = ({ label, children }) => (
@@ -602,7 +604,190 @@ function C2SessionsPanel({ pid, accent, onNavigateToHost }) {
   );
 }
 
+// ── Live C2 sessions across all integrations ───────────────────────────
+function SessionsPanel({ pid, accent }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadedAt, setLoadedAt] = useState(null);
+  const [filter, setFilter] = useState({ type: '', tier: '', q: '', aliveOnly: false });
+  const [autoRefresh, setAutoRefresh] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!pid) return;
+    setLoading(true);
+    try {
+      const data = await api.getC2LiveSessions(pid);
+      setRows(Array.isArray(data) ? data : []);
+      setLoadedAt(new Date());
+    } catch (e) {
+      console.error('Live sessions fetch failed:', e);
+    }
+    setLoading(false);
+  }, [pid]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [autoRefresh, load]);
+
+  // error rows come back inline; pull them out for a separate header strip
+  const errorRows = rows.filter(r => r.error);
+  const sessionRows = rows.filter(r => !r.error);
+
+  // counters per integration
+  const perIntegration = {};
+  for (const r of sessionRows) {
+    const k = r.integration_id;
+    if (!perIntegration[k]) {
+      perIntegration[k] = { name: r.integration_name, type: r.integration_type, total: 0, alive: 0 };
+    }
+    perIntegration[k].total++;
+    if (r.alive) perIntegration[k].alive++;
+  }
+
+  const filtered = sessionRows.filter(r => {
+    if (filter.aliveOnly && !r.alive) return false;
+    if (filter.type && r.integration_type !== filter.type) return false;
+    if (filter.tier && r.privilege_tier !== filter.tier) return false;
+    if (filter.q) {
+      const q = filter.q.toLowerCase();
+      const blob = `${r.ip} ${r.hostname || ''} ${r.username || ''} ${r.domain || ''}`.toLowerCase();
+      if (!blob.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const tierColor = { system: '#cc2233', admin: '#f09a3a', user: '#5b8af5' };
+  const typeColor = { adaptix: '#c07af0', mythic: '#ffa726', sliver: '#5b8af5' };
+
+  return (
+    <div>
+      {/* Per-integration health */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        {Object.entries(perIntegration).map(([id, info]) => (
+          <div key={id} style={{ background: '#0c0e13', border: `1px solid ${typeColor[info.type] || '#2a2d35'}55`, borderRadius: 6, padding: '6px 12px', fontSize: 11, fontFamily: 'JetBrains Mono', color: '#c8cdd6', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ color: typeColor[info.type] || '#808590', fontWeight: 600 }}>{info.name}</span>
+            <span style={{ color: '#39d353', fontSize: 10 }}>● {info.alive} live</span>
+            <span style={{ color: '#505560', fontSize: 10 }}>{info.total} total</span>
+          </div>
+        ))}
+        {errorRows.map((r, i) => (
+          <div key={`err-${i}`} style={{ background: '#1a0508', border: '1px solid #cc223355', borderRadius: 6, padding: '6px 12px', fontSize: 11, fontFamily: 'JetBrains Mono', color: '#cc2233' }}>
+            ⚠ {r.integration_name}: {r.error}
+          </div>
+        ))}
+      </div>
+
+      {/* Toolbar */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+        <input type="text" placeholder="Search ip / hostname / user…" value={filter.q}
+          onChange={e => setFilter(f => ({ ...f, q: e.target.value }))}
+          style={{ flex: 1, minWidth: 200, padding: '6px 10px', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none' }} />
+        <select value={filter.type} onChange={e => setFilter(f => ({ ...f, type: e.target.value }))}
+          style={{ padding: '6px 10px', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+          <option value="">All C2 types</option>
+          <option value="adaptix">Adaptix</option>
+          <option value="mythic">Mythic</option>
+          <option value="sliver">Sliver</option>
+        </select>
+        <select value={filter.tier} onChange={e => setFilter(f => ({ ...f, tier: e.target.value }))}
+          style={{ padding: '6px 10px', background: '#0a0c10', border: '1px solid #2a2d35', borderRadius: 4, color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+          <option value="">All privileges</option>
+          <option value="system">SYSTEM</option>
+          <option value="admin">Admin</option>
+          <option value="user">User</option>
+        </select>
+        <button onClick={() => setFilter(f => ({ ...f, aliveOnly: !f.aliveOnly }))}
+          style={{ background: filter.aliveOnly ? '#1a3a1a' : '#1a1c22', border: `1px solid ${filter.aliveOnly ? '#39d353' : '#2a2d35'}`, borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: filter.aliveOnly ? '#39d353' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+          {filter.aliveOnly ? '✓ Alive only' : 'Alive only'}
+        </button>
+        <button onClick={() => setAutoRefresh(v => !v)}
+          style={{ background: autoRefresh ? '#0e1a2a' : '#1a1c22', border: `1px solid ${autoRefresh ? '#5b8af5' : '#2a2d35'}`, borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: autoRefresh ? '#5b8af5' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+          {autoRefresh ? '↻ Auto (15s)' : 'Auto refresh'}
+        </button>
+        <button onClick={load} disabled={loading}
+          style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 12px', cursor: loading ? 'not-allowed' : 'pointer', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Icon name="reset" size={11} color="#c8cdd6" /> {loading ? 'Loading…' : 'Refresh'}
+        </button>
+        {loadedAt && (
+          <span style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>
+            updated {loadedAt.toTimeString().slice(0, 8)}
+          </span>
+        )}
+      </div>
+
+      {/* Sessions table */}
+      {sessionRows.length === 0 && !loading && (
+        <div style={{ padding: '32px 0', textAlign: 'center', color: '#353840', fontSize: 12, fontFamily: 'JetBrains Mono' }}>
+          No live sessions. Configure a C2 integration and run a sync first.
+        </div>
+      )}
+      {filtered.length > 0 && (
+        <div style={{ background: '#0c0e13', border: '1px solid #1a1c22', borderRadius: 6, overflow: 'hidden' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '120px 160px 1fr 140px 90px 90px 100px', gap: 0, fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '8px 12px', borderBottom: '1px solid #1a1c22', background: '#0a0c10' }}>
+            <div>IP</div><div>Hostname</div><div>User / Domain</div><div>Integration</div><div>Priv</div><div>Status</div><div>Last seen</div>
+          </div>
+          {filtered.map((r, i) => (
+            <div key={`${r.integration_id}-${r.ip}-${r.privilege_tier}-${i}`}
+              style={{ display: 'grid', gridTemplateColumns: '120px 160px 1fr 140px 90px 90px 100px', gap: 0, fontSize: 11, color: '#b0b5c2', fontFamily: 'JetBrains Mono', padding: '8px 12px', borderBottom: '1px solid #0e1016', alignItems: 'center', opacity: r.alive ? 1 : 0.5 }}>
+              <div style={{ color: '#e0e4ec' }}>{r.ip}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.hostname}>
+                {r.hostname || <span style={{ color: '#353840' }}>—</span>}
+              </div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ color: '#c8cdd6' }}>{r.username || '—'}</span>
+                {r.domain && <span style={{ color: '#606570' }}> @ {r.domain}</span>}
+              </div>
+              <div>
+                <span style={{ fontSize: 9, color: typeColor[r.integration_type] || '#808590', background: `${typeColor[r.integration_type] || '#808590'}18`, border: `1px solid ${typeColor[r.integration_type] || '#808590'}44`, borderRadius: 3, padding: '1px 6px' }}>
+                  {r.integration_name}
+                </span>
+              </div>
+              <div>
+                <span style={{ fontSize: 9, fontWeight: 700, color: tierColor[r.privilege_tier] || '#808590', background: `${tierColor[r.privilege_tier] || '#808590'}18`, border: `1px solid ${tierColor[r.privilege_tier] || '#808590'}44`, borderRadius: 3, padding: '1px 6px', textTransform: 'uppercase' }}>
+                  {r.privilege_label || r.privilege_tier}
+                </span>
+              </div>
+              <div>
+                {r.alive
+                  ? <span style={{ color: '#39d353', fontSize: 10 }}>● alive</span>
+                  : <span style={{ color: '#606570', fontSize: 10 }}>○ dead</span>}
+              </div>
+              <div style={{ fontSize: 10, color: '#505560' }} title={r.last_seen || ''}>
+                {(r.last_seen || '').slice(0, 16).replace('T', ' ') || '—'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {filtered.length === 0 && sessionRows.length > 0 && (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#404550', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
+          {sessionRows.length} session(s) total — none match the current filter.
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function C2Panel({ pid, accent }) {
+  const { role: projectRole, isSuperAdmin } = useProjectPermissions();
+  const isProjectOwner = projectRole === 'owner';
+  // Who can create / edit / delete an integration:
+  //  - global admin: anything (scoped or global)
+  //  - project owner: only integrations scoped to this project
+  //  - everyone else: read-only
+  const canManage = isSuperAdmin || isProjectOwner;
+  const canManageIntegration = useCallback((cfg) => {
+    if (isSuperAdmin) return true;
+    if (!isProjectOwner) return false;
+    const ids = cfg?.project_ids || [];
+    return ids.length > 0 && pid && ids.includes(pid);
+  }, [isSuperAdmin, isProjectOwner, pid]);
+
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -619,8 +804,10 @@ function C2Panel({ pid, accent }) {
       const r = pid ? await api.listC2ForProject(pid) : await api.listC2Integrations();
       setIntegrations(r);
     } catch (e) {
-      if (e.message?.includes('403') || e.message?.includes('admin')) {
-        setErrors({ global: 'Admin access required to manage C2 integrations' });
+      if (e.message?.includes('403')) {
+        setErrors({ global: 'You do not have permission to view C2 integrations in this project' });
+      } else if (e.message) {
+        setErrors({ global: e.message });
       }
     }
     setLoading(false);
@@ -639,7 +826,13 @@ function C2Panel({ pid, accent }) {
   const closeForm = () => { setShowForm(false); setEditing(null); };
 
   const save = async () => {
-    if (!form.name.trim() || !form.url.trim()) return;
+    if (!form.name.trim()) return;
+    // URL is optional for Sliver (lhost/lport carried in operator config blob)
+    if (form.type !== 'sliver' && !form.url.trim()) return;
+    if (!isSuperAdmin && (!form.project_ids || form.project_ids.length === 0)) {
+      setErrors(prev => ({ ...prev, form: 'Project owners must scope the integration to a project. Switch to "This project only".' }));
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -767,14 +960,22 @@ function C2Panel({ pid, accent }) {
                   <Icon name="reset" size={10} color={ti.color} />
                   {isSyncing ? 'Syncing...' : `Sync → project`}
                 </button>
-                <button onClick={() => openEdit(cfg)}
-                  style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                  Edit
-                </button>
-                <button onClick={() => remove(cfg.id)}
-                  style={{ background: 'transparent', border: '1px solid #cc233344', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                  Delete
-                </button>
+                {canManageIntegration(cfg) ? (
+                  <>
+                    <button onClick={() => openEdit(cfg)}
+                      style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                      Edit
+                    </button>
+                    <button onClick={() => remove(cfg.id)}
+                      style={{ background: 'transparent', border: '1px solid #cc233344', borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: '#cc2233', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                      Delete
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', fontStyle: 'italic', alignSelf: 'center' }}>
+                    {(cfg.project_ids || []).length === 0 ? 'managed globally (admin only)' : 'read-only'}
+                  </span>
+                )}
               </div>
             </div>
           );
@@ -782,11 +983,16 @@ function C2Panel({ pid, accent }) {
       </div>
 
       {/* Add button */}
-      {!showForm && (
+      {!showForm && canManage && (
         <button onClick={openNew}
           style={{ background: `${accent}22`, border: `1px solid ${accent}55`, borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: accent, fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 }}>
           <Icon name="plus" size={11} color={accent} /> Add C2 Integration
         </button>
+      )}
+      {!showForm && !canManage && integrations.length > 0 && (
+        <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', marginTop: 4 }}>
+          Only the project owner or a global admin can register new C2 integrations.
+        </div>
       )}
 
       {/* Form */}
@@ -881,11 +1087,19 @@ function C2Panel({ pid, accent }) {
                 style={{ flex: 1, background: (form.project_ids?.length > 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length > 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: (form.project_ids?.length > 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
                 This project only
               </button>
-              <button onClick={() => setF('project_ids', [])}
-                style={{ flex: 1, background: (form.project_ids?.length === 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length === 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: 'pointer', color: (form.project_ids?.length === 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                All projects
+              <button onClick={() => isSuperAdmin && setF('project_ids', [])}
+                disabled={!isSuperAdmin}
+                title={!isSuperAdmin ? 'Only global admins can create unscoped integrations' : ''}
+                style={{ flex: 1, background: (form.project_ids?.length === 0) ? `${accent}22` : '#1a1c22', border: `1px solid ${(form.project_ids?.length === 0) ? accent + '88' : '#2a2d35'}`, borderRadius: 4, padding: '5px 10px', cursor: isSuperAdmin ? 'pointer' : 'not-allowed', color: (form.project_ids?.length === 0) ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono', opacity: isSuperAdmin ? 1 : 0.5 }}>
+                All projects {!isSuperAdmin && '🔒'}
               </button>
             </div>
+            {!isSuperAdmin && (
+              <div style={{ fontSize: 10, color: '#404550', fontFamily: 'JetBrains Mono', marginTop: 4 }}>
+                As project owner you can register C2 integrations bound to this project.
+                Unscoped (cross-project) integrations require a global admin.
+              </div>
+            )}
           </FieldRow>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
@@ -904,7 +1118,7 @@ function C2Panel({ pid, accent }) {
           )}
 
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={save} disabled={saving || !form.name.trim() || !form.url.trim()}
+            <button onClick={save} disabled={saving || !form.name.trim() || (form.type !== 'sliver' && !form.url.trim())}
               style={{ background: saving ? '#1a1c22' : accent, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: saving ? 'not-allowed' : 'pointer', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono' }}>
               {saving ? 'Saving...' : editing ? 'Save changes' : 'Add integration'}
             </button>
@@ -972,8 +1186,9 @@ export default function ScansView({ selectedProject, accent }) {
           {activeType === 'nuclei'  && <NucleiPanel  pid={selectedProject} accent={accent} />}
           {activeType === 'cme'     && <CmePanel     pid={selectedProject} accent={accent} />}
           {activeType === 'bulk'    && <BulkImportPanel pid={selectedProject} accent={accent} />}
-          {activeType === 'c2'      && <C2Panel      pid={selectedProject} accent={accent} />}
-          {activeType === 'webhook' && <WebhookPanel pid={selectedProject} accent={accent} />}
+          {activeType === 'c2'       && <C2Panel       pid={selectedProject} accent={accent} />}
+          {activeType === 'sessions' && <SessionsPanel pid={selectedProject} accent={accent} />}
+          {activeType === 'webhook'  && <WebhookPanel  pid={selectedProject} accent={accent} />}
         </div>
       </div>
     </div>

@@ -11,17 +11,31 @@ export async function req(method, path, body, authRequired = true) {
     throw new Error('Unauthorized');
   }
   if (res.status === 409) {
-    const data = await res.json();
-    const err = new Error('conflict');
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.message || data.detail || 'conflict');
     err.status = 409;
-    err.serverNote = data.detail;
+    err.code = data.code || 'conflict';
+    err.details = data.details;
+    err.serverNote = data.message || data.detail;
     throw err;
   }
   if (!res.ok) {
     const text = await res.text();
     let msg = text;
-    try { msg = JSON.parse(text).detail || text; } catch {}
-    throw new Error(msg);
+    let code, details;
+    try {
+      const parsed = JSON.parse(text);
+      // Unified error contract (v0.3.2+): {code, message, details?, detail}.
+      // Older endpoints / unhandled exceptions may still emit bare {detail}.
+      msg = parsed.message || parsed.detail || text;
+      code = parsed.code;
+      details = parsed.details;
+    } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    if (code) err.code = code;
+    if (details !== undefined) err.details = details;
+    throw err;
   }
   return res.json();
 }

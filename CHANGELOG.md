@@ -1,5 +1,56 @@
 # RootNotes — Changelog
 
+## v0.3.2 — 2026-05-17
+
+### Frontend follow-ups for v0.3.1 backend work
+- **C2 panel respects project-owner self-service** — `ScansView`'s
+  C2 panel now reads project role; non-admin project owners can
+  register Adaptix/Mythic/Sliver integrations scoped to their own
+  project. "All projects" toggle locked for non-admins; Edit/Delete
+  hidden for integrations the user can't manage; informative
+  "managed globally" / "read-only" labels instead of broken buttons.
+- **Audit log structured rendering** — Timeline view gets a dedicated
+  Audit filter chip + shield icon; audit-specific verbs labelled
+  ("Secret → C2 exec", "Export with secrets", …); inline meta chips
+  (`count=5`, `c2_type=mythic`, `host_count=12`) under each event;
+  expandable raw-JSON view per row.
+
+### Unified error contract (B5-3)
+- New `app/core/errors.py` — `AppError(code, message, status, details)`
+  plus FastAPI exception handlers that wrap every error response into
+  `{code, message, details?, detail}`. `code` is a stable machine
+  identifier (`insufficient_permissions`, `cred_not_found`,
+  `validation_failed`, …); `detail` mirrors `message` for backwards
+  compat with the old `{detail}` shape.
+- Migrated the highest-traffic gates to explicit codes — `deps.py`,
+  `core/access.py`, `routers/creds.py`. The remaining 340+ existing
+  `HTTPException(...)` call sites keep working unchanged and inherit
+  status-derived codes (`bad_request` / `forbidden` / `not_found` / …).
+- Frontend `api/client.js` reads `code` and `details` onto the thrown
+  Error object — replaces brittle string-matching like
+  `e.message.includes('admin')`.
+
+### Live C2 Sessions panel
+- New first-class tab inside Scans → "Live Sessions" — single view
+  showing every live agent across every configured C2 integration
+  (Adaptix / Mythic / Sliver) in one place.
+- Per-integration health chips (alive / total counters, error
+  banners), filters (free-text, framework, privilege tier, alive-only),
+  auto-refresh (15s), manual refresh with last-fetch timestamp.
+- Sortable table with framework badges and red/amber/blue privilege
+  tier chips; dead rows muted.
+
+### Loot polish
+- **Fixed download filename clobbering** — value-only loots no longer
+  get `.txt` blindly appended to a name that already has an extension
+  (e.g. `report.yaml` was saving as `report.yaml.txt`).
+- **New inline preview modal** — eye-icon button on every previewable
+  loot row + detail panel; supports image / pdf / text (lazy-fetched) /
+  audio / video with native players, plus a fallback for unsupported
+  binaries. Escape / outside click closes.
+- Detail-panel download button shows the actual format
+  ("Download (PDF)", "Download (YAML)", …).
+
 ## v0.3.1 — 2026-05-17
 
 ### RBAC closures
