@@ -24,7 +24,7 @@ from ..core.network_data import get_nodes, get_edges, upsert_edge, replace_edges
 from ..core.utils import new_id, ts_now
 from ..database import get_db
 from ..plugins.registry import registry
-from ..plugins.state import list_attacker_targets
+from ..plugins.state import list_attacker_targets, list_attacker_targets_for_exec
 from .collections import resolve_collection_hosts
 from ..core.output_parser import parse_output as _parse_output
 from ..schemas import HostActivity as HASchema
@@ -92,6 +92,8 @@ def _resolve_exec_ssh_configs(
     if attacker_target_id:
         for t in list_attacker_targets():
             if t.get("id") == attacker_target_id and t.get("enabled", True):
+                if not t.get("is_operator", True):
+                    raise HTTPException(400, "Selected target is configured for pivots only — it cannot run exec")
                 return [t]
         return []
 
@@ -107,10 +109,8 @@ def _resolve_exec_ssh_configs(
         if cfg:
             configs.append(cfg)
 
-    # --- Auto: all global targets for this project ---
-    for target in list_attacker_targets():
-        if not target.get("enabled", True):
-            continue
+    # --- Auto: all global targets for this project (operator-capable only) ---
+    for target in list_attacker_targets_for_exec():
         project_ids = target.get("project_ids", [])
         if not project_ids or pid in project_ids:
             t = dict(target)

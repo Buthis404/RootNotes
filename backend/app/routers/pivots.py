@@ -17,7 +17,7 @@ from ..core.ssh_exec import run_ssh_command
 from ..core.network_data import get_nodes, get_edges, replace_edges
 from ..core.utils import new_id, stable_edge_id, ts_now
 from ..database import get_db
-from ..plugins.state import list_attacker_targets
+from ..plugins.state import list_attacker_targets, list_attacker_targets_for_pivot
 from .c2 import _load_integrations, _visible_integrations_for_pid
 
 router = APIRouter(prefix="/api/projects/{pid}/pivots", tags=["pivots"])
@@ -297,10 +297,20 @@ def get_pivot_item(pid: str, pivot_id: str, db: Session) -> dict | None:
 
 
 def _resolve_pivot_target(pid: str, target_id: str, db: Session) -> tuple[dict, models.Host | None]:
-    targets = [target for target in list_attacker_targets() if target.get("enabled", True) and (not target.get("project_ids") or pid in target.get("project_ids", []))]
+    # Pivot collector only polls hosts where chisel/ligolo can run.
+    targets = [target for target in list_attacker_targets_for_pivot() if (not target.get("project_ids") or pid in target.get("project_ids", []))]
     if not targets:
-        raise HTTPException(400, "No attacker SSH targets are configured for this project")
-    target = next((item for item in targets if item.get("id") == target_id), None) if target_id else targets[0]
+        raise HTTPException(400, "No pivot-capable attacker SSH targets configured for this project")
+    if target_id:
+        # Explicit id — verify it's pivot-capable, otherwise fail with clear message
+        explicit = next((t for t in list_attacker_targets() if t.get("id") == target_id), None)
+        if not explicit:
+            raise HTTPException(404, "Attacker SSH target not found")
+        if not explicit.get("runs_pivot", True):
+            raise HTTPException(400, "Selected target is operator-only — chisel/ligolo are not expected to run there")
+        target = explicit
+    else:
+        target = targets[0]
     if not target:
         raise HTTPException(404, "Attacker SSH target not found")
     pivot_host = db.query(models.Host).filter(models.Host.pid == pid).filter((models.Host.ip == target.get("host")) | (models.Host.hostname == target.get("host"))).first()

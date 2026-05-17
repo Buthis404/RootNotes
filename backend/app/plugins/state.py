@@ -102,14 +102,34 @@ def save_attacker_ssh_config(config: dict, db: Session | None = None) -> dict:
 
 
 def _decrypt_target(target: dict) -> dict:
-    """Return a copy of target with password/private_key decrypted."""
+    """Return a copy of target with password/private_key decrypted.
+
+    Also fills role flags (`is_operator`, `runs_pivot`) with True defaults
+    for targets created before these fields existed — preserves prior
+    behaviour where every target could both exec and host pivots.
+    """
     t = dict(target)
     t["password"] = decrypt_str(t.get("password", ""))
     t["private_key"] = decrypt_str(t.get("private_key", ""))
     t["proxy_password"] = decrypt_str(t.get("proxy_password", ""))
     t["proxy_private_key"] = decrypt_str(t.get("proxy_private_key", ""))
     t["exec_proxy_password"] = decrypt_str(t.get("exec_proxy_password", ""))
+    t.setdefault("is_operator", True)
+    t.setdefault("runs_pivot", True)
     return t
+
+
+def list_attacker_targets_for_exec(db: Session | None = None) -> list[dict]:
+    """Subset of enabled targets that can be used for scans / playbook exec."""
+    return [t for t in list_attacker_targets(db)
+            if t.get("enabled", True) and t.get("is_operator", True)]
+
+
+def list_attacker_targets_for_pivot(db: Session | None = None) -> list[dict]:
+    """Subset of enabled targets that run chisel/ligolo (or were configured
+    to host pivot routes)."""
+    return [t for t in list_attacker_targets(db)
+            if t.get("enabled", True) and t.get("runs_pivot", True)]
 
 
 def _encrypt_target(target: dict) -> dict:
