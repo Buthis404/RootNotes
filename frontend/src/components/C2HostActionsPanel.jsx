@@ -130,6 +130,25 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
   const creds = data?.creds || [];
   const sessionOptions = sessions.filter(s => SUPPORTED_EXEC_C2.includes(s.integration_type) && s.alive !== false);
   const deadSessionCount = sessions.filter(s => SUPPORTED_EXEC_C2.includes(s.integration_type) && s.alive === false).length;
+  const selectedSession = useMemo(
+    () => sessionOptions.find(s => s.integration_id === form.integrationId && (s.agent_id === form.agentId || s.beacon_id === form.agentId)) || null,
+    [sessionOptions, form.integrationId, form.agentId],
+  );
+  const activeC2Type = (selectedSession?.integration_type || '').toLowerCase();
+  const C2_META = {
+    adaptix: { label: 'Adaptix', color: '#cc2233', supportsBof: true },
+    mythic:  { label: 'Mythic',  color: '#ffa726', supportsBof: false },
+    sliver:  { label: 'Sliver',  color: '#8bc34a', supportsBof: false },
+  };
+  const c2Meta = C2_META[activeC2Type] || { label: 'C2', color: '#5b8af5', supportsBof: false };
+
+  // If user has BOF selected but switched to a framework that doesn't support
+  // it, snap back to command mode automatically.
+  useEffect(() => {
+    if (form.mode === 'bof' && !c2Meta.supportsBof) {
+      setForm(prev => ({ ...prev, mode: 'command' }));
+    }
+  }, [c2Meta.supportsBof, form.mode]);
   const operationTemplates = useMemo(() => getOperationTemplates(host), [host]);
   const selectedCredential = useMemo(() => creds.find(c => c.id === form.credentialId && c.source === form.credentialSource) || null, [creds, form.credentialId, form.credentialSource]);
   const credentialPacks = useMemo(() => getCredentialOperationPacks(host, selectedCredential), [host, selectedCredential]);
@@ -213,7 +232,9 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
         credential_id: form.credentialId || '',
         credential_source: form.credentialSource || '',
         wait_for_output: !interactive,
-        title: interactive ? 'Adaptix CLI command' : (form.mode === 'bof' ? (selectedCommand?.title || 'Adaptix BOF') : 'Adaptix command'),
+        title: interactive
+          ? `${c2Meta.label} CLI command`
+          : (form.mode === 'bof' ? (selectedCommand?.title || `${c2Meta.label} BOF`) : `${c2Meta.label} command`),
       });
       setResult(res);
       await refreshTasks({ silent: true });
@@ -228,11 +249,11 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
     <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 6, padding: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 9, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', flex: 1 }}>
-          Adaptix live actions
+          C2 live actions
           {deadSessionCount > 0 && <span title={`${deadSessionCount} dead agents hidden`} style={{ marginLeft: 6, color: '#606570', textTransform: 'none', letterSpacing: 0 }}>({deadSessionCount} dead hidden)</span>}
         </span>
         <button onClick={() => setAutoRefresh(v => !v)} style={{ background: autoRefresh ? `${accent}22` : '#0e1016', border: `1px solid ${autoRefresh ? accent + '66' : '#2a2d35'}`, borderRadius: 3, padding: '1px 6px', cursor: 'pointer', color: autoRefresh ? accent : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>{autoRefresh ? 'Auto' : 'Manual'}</button>
-        <span style={{ fontSize: 9, color: '#cc2233', background: '#cc223318', border: '1px solid #cc223344', borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>Adaptix</span>
+        <span title={selectedSession ? `${c2Meta.label} agent` : 'Select an agent to choose a framework'} style={{ fontSize: 9, color: c2Meta.color, background: `${c2Meta.color}18`, border: `1px solid ${c2Meta.color}44`, borderRadius: 3, padding: '1px 6px', fontFamily: 'JetBrains Mono' }}>{c2Meta.label}</span>
       </div>
 
       {loading && <div style={{ fontSize: 10, color: '#404550' }}>Loading live sessions...</div>}
@@ -241,12 +262,26 @@ export default function C2HostActionsPanel({ pid, host, accent = '#5b8af5', onEx
       {!loading && sessionOptions.length > 0 && (
         <>
           <select value={form.integrationId && form.agentId ? `${form.integrationId}::${form.agentId}` : ''} onChange={e => onPickSession(e.target.value)} style={{ width: '100%', background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', color: '#c8cdd6', fontSize: 10, fontFamily: 'JetBrains Mono', marginBottom: 8 }}>
-            {sessionOptions.map(s => <option key={`${s.integration_id}::${s.agent_id || s.beacon_id}`} value={`${s.integration_id}::${s.agent_id || s.beacon_id}`}>{s.integration_name} :: {s.username || '?'} @ {s.ip || '?'}</option>)}
+            {sessionOptions.map(s => <option key={`${s.integration_id}::${s.agent_id || s.beacon_id}`} value={`${s.integration_id}::${s.agent_id || s.beacon_id}`}>[{(s.integration_type || '?').toUpperCase()}] {s.integration_name} :: {s.username || '?'} @ {s.ip || '?'}</option>)}
           </select>
 
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
             <button onClick={() => setForm(prev => ({ ...prev, mode: 'command' }))} style={{ flex: 1, background: form.mode === 'command' ? `${accent}22` : '#0e1016', border: `1px solid ${form.mode === 'command' ? accent + '77' : '#2a2d35'}`, borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: form.mode === 'command' ? accent : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>Command</button>
-            <button onClick={() => setForm(prev => ({ ...prev, mode: 'bof' }))} style={{ flex: 1, background: form.mode === 'bof' ? '#cc223322' : '#0e1016', border: `1px solid ${form.mode === 'bof' ? '#cc223377' : '#2a2d35'}`, borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: form.mode === 'bof' ? '#cc2233' : '#606570', fontSize: 9, fontFamily: 'JetBrains Mono' }}>BOF</button>
+            <button
+              onClick={() => c2Meta.supportsBof && setForm(prev => ({ ...prev, mode: 'bof' }))}
+              disabled={!c2Meta.supportsBof}
+              title={c2Meta.supportsBof ? '' : `BOF execution is Adaptix-only — current agent is ${c2Meta.label}`}
+              style={{
+                flex: 1,
+                background: form.mode === 'bof' ? '#cc223322' : '#0e1016',
+                border: `1px solid ${form.mode === 'bof' ? '#cc223377' : '#2a2d35'}`,
+                borderRadius: 4, padding: '5px 8px',
+                cursor: c2Meta.supportsBof ? 'pointer' : 'not-allowed',
+                color: form.mode === 'bof' ? '#cc2233' : '#606570',
+                fontSize: 9, fontFamily: 'JetBrains Mono',
+                opacity: c2Meta.supportsBof ? 1 : 0.35,
+              }}
+            >BOF{c2Meta.supportsBof ? '' : ' (Adaptix only)'}</button>
           </div>
 
           {form.mode === 'command' && operationTemplates.length > 0 && (
