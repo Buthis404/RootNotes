@@ -1955,15 +1955,22 @@ async def perform_c2_command(
         result = await _adaptix_execute(cfg, agent_id, rendered_command, wait_for_output, timeout_seconds)
         summary = f"Executed via Adaptix on agent {agent_id}"
     output = result.get("output") or result.get("message") or result.get("error") or ""
+    # Strip the literal credential secret out of the stored command + output
+    # before it lands in the DB and gets broadcast to every operator. The real
+    # rendered_command was already handed to the connector above; it only
+    # exists in memory from this point on.
+    from ..core.secret_scrub import scrub_for_cred
+    safe_command = scrub_for_cred(rendered_command, cred)
+    safe_output = scrub_for_cred(output, cred)
     activity = models.HostActivity(
         id=new_id("ha"),
         pid=pid,
         host_id=host.id,
         title=title,
         activity_type="postex" if mode == "command" else "exploit",
-        command=rendered_command,
+        command=safe_command,
         summary=summary,
-        output=output,
+        output=safe_output,
         status="done",
         ts=ts_now(),
     )
