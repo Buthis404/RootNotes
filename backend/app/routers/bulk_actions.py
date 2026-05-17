@@ -12,7 +12,7 @@ from typing import List
 
 from .. import models
 from ..core.access import check_pid_access
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.events import bcast, log_event
 from ..core.job_tracker import start_job, finish_job
 from ..core.ssh_exec import run_ssh_command, run_ssh_command_streaming, is_transport_failure as _is_transport_failure_core
@@ -175,8 +175,8 @@ async def bulk_exec(
 
     selected_cred = None
     if body.credential_id:
-        membership = get_membership(db, pid, user.id) if user.role != "admin" else None
-        can_read_secret = user.role == "admin" or bool(membership and "credentials.read_secret" in get_permissions_for_role(membership.role))
+        membership = get_membership(db, pid, user.id) if not is_admin(user) else None
+        can_read_secret = is_admin(user) or bool(membership and "credentials.read_secret" in get_permissions_for_role(membership.role))
         if not can_read_secret:
             raise HTTPException(403, "Insufficient permissions to use credential secrets")
         selected_cred = db.query(models.Cred).filter(models.Cred.id == body.credential_id, models.Cred.pid == pid).first()

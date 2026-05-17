@@ -5,7 +5,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.utils import new_id
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 router = APIRouter(prefix="/api/host-activities", tags=["host-activities"])
@@ -16,7 +16,7 @@ def list_host_activities(pid: str | None = None, host_id: str | None = None, db:
     if pid:
         check_pid_access(db, pid, user, "command_outputs.read")
         q = db.query(models.HostActivity).filter(models.HostActivity.pid == pid)
-    elif user.role == "admin":
+    elif is_admin(user):
         q = db.query(models.HostActivity)
     else:
         member_pids = get_user_member_pids(db, user)

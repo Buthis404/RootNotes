@@ -6,7 +6,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, ts_now
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 
 router = APIRouter(tags=["attack-paths"])
@@ -17,7 +17,7 @@ def list_attack_paths(pid: str | None = None, db: Session = Depends(get_db), use
     if pid:
         check_pid_access(db, pid, user, "attack_paths.read")
         return db.query(models.AttackPath).filter(models.AttackPath.pid == pid).order_by(models.AttackPath.ts).all()
-    if user.role == "admin":
+    if is_admin(user):
         return db.query(models.AttackPath).order_by(models.AttackPath.ts).all()
     member_pids = get_user_member_pids(db, user)
     return db.query(models.AttackPath).filter(models.AttackPath.pid.in_(member_pids)).order_by(models.AttackPath.ts).all()
@@ -74,7 +74,7 @@ def list_attack_steps(path_id: str | None = None, pid: str | None = None, db: Se
     if pid:
         check_pid_access(db, pid, user, "attack_paths.read")
         return db.query(models.AttackStep).filter(models.AttackStep.pid == pid).order_by(models.AttackStep.step_order).all()
-    if user.role == "admin":
+    if is_admin(user):
         return db.query(models.AttackStep).order_by(models.AttackStep.step_order).all()
     member_pids = get_user_member_pids(db, user)
     return db.query(models.AttackStep).filter(models.AttackStep.pid.in_(member_pids)).order_by(models.AttackStep.step_order).all()

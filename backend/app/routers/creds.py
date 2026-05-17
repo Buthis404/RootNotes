@@ -5,7 +5,7 @@ from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
 from ..core.utils import new_id, normalize_domain, domains_match, ts_now
-from ..core.deps import get_current_user
+from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
 from ..core.permissions import get_membership, get_permissions_for_role
 from ..core.crypto import encrypt_str, decrypt_str
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/creds", tags=["creds"])
 
 
 def _can_read_secret(user: models.User, pid: str, db: Session) -> bool:
-    if user.role == "admin":
+    if is_admin(user):
         return True
     membership = get_membership(db, pid, user.id)
     if not membership:
@@ -64,7 +64,7 @@ def list_creds(
     if pid:
         check_pid_access(db, pid, user, "credentials.read")
         q = db.query(models.Cred).filter(models.Cred.pid == pid)
-    elif user.role == "admin":
+    elif is_admin(user):
         q = db.query(models.Cred)
     else:
         member_pids = get_user_member_pids(db, user)

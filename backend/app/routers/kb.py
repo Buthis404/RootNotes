@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas
 from ..core.access import check_pid_access, get_user_member_pids
-from ..core.deps import get_current_user, require_admin
+from ..core.deps import get_current_user, require_admin, is_admin
 from ..core.utils import new_id, ts_now
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ def _now() -> str:
 
 def _can_write_global(user: models.User) -> bool:
     """Global (pid=None) KB articles are admin-only for write."""
-    return user.role == "admin"
+    return is_admin(user)
 
 
 @router.get("", response_model=list[schemas.KBArticle])
@@ -178,7 +178,7 @@ def export_kb(
 ):
     if pid:
         check_pid_access(db, pid, user, "kb.export")
-    elif user.role != "admin":
+    elif not is_admin(user):
         raise HTTPException(403, "Global KB export requires global admin")
     q = db.query(models.KBArticle)
     if pid:
@@ -207,7 +207,7 @@ async def import_kb(
 ):
     if pid:
         check_pid_access(db, pid, user, "kb.create")
-    elif user.role != "admin":
+    elif not is_admin(user):
         raise HTTPException(403, "Global KB import requires global admin")
     raw = json.loads((await file.read()).decode())
     articles = raw if isinstance(raw, list) else raw.get("articles", [])
@@ -220,7 +220,7 @@ async def import_kb(
             skipped += 1
             continue
         target_pid = pid or item.get("pid")
-        if target_pid and target_pid != pid and user.role != "admin":
+        if target_pid and target_pid != pid and not is_admin(user):
             # Item carried a foreign pid the importer doesn't own
             if not any(target_pid == m for m in get_user_member_pids(db, user)):
                 skipped += 1
