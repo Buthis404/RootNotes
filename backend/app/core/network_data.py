@@ -166,6 +166,77 @@ def upsert_node(network_id: str, pid: str, d: dict, db: Session) -> None:
     row.extra_json = extra
 
 
+_HOST_TO_NODE_FIELDS = (
+    "status",
+    "role",
+    "os",
+    "is_attacker",
+    # label/ip/ports come from the host record but the network node is
+    # allowed to override (e.g. operator-renamed pivot). We only touch them
+    # if they currently match the previous host value — see sync_host_to_nodes.
+)
+
+
+def sync_host_to_nodes(host: "models.Host", db: Session, *, ts: str | None = None) -> list[dict]:
+    """Push relevant fields from a Host onto every NetworkNode mirroring it.
+
+    Returns the list of node payloads that actually changed (suitable for
+    bcast `network.node_updated`). x/y/manually_positioned are never touched —
+    a status update from the host must not move the node on the canvas.
+    Label/ip/ports are denormalised but the operator may have overridden them
+    on the map; we only refresh those fields when they look stale (empty or
+    obvious mirror of the host's prior value).
+    """
+    if host is None:
+        return []
+    nodes = db.query(models.NetworkNode).filter(models.NetworkNode.host_id == host.id).all()
+    if not nodes:
+        return []
+    updated_payloads: list[dict] = []
+    for node in nodes:
+        changed = False
+        # Strict mirrors: always overwrite — these have no real meaning beyond
+        # "what does the host look like right now".
+        if node.status != (host.status or ""):
+            node.status = host.status or "unknown"
+            changed = True
+        if node.role != (host.role or ""):
+            node.role = host.role or ""
+            changed = True
+        if node.os != (host.os or ""):
+            node.os = host.os or ""
+            changed = True
+        if node.is_attacker != bool(host.is_attacker):
+            node.is_attacker = bool(host.is_attacker)
+            changed = True
+        # Soft mirrors: only update if the operator hasn't customised them.
+        host_ip = host.ip or ""
+        if host_ip and not node.ip:
+            node.ip = host_ip
+            changed = True
+        host_ips = list(host.ips or []) if getattr(host, "ips", None) else ([host_ip] if host_ip else [])
+        node_ips = list(node.ips or [])
+        if host_ips and host_ips != node_ips and (not node_ips or all(ip in host_ips or ip == host_ip for ip in node_ips)):
+            node.ips = host_ips
+            changed = True
+        host_ports = list(host.ports or [])
+        node_ports = list(node.ports or [])
+        if host_ports and host_ports != node_ports and (not node_ports or set(node_ports).issubset(set(host_ports))):
+            node.ports = host_ports
+            changed = True
+        # label is intentionally NOT auto-synced — operators frequently
+        # rename map nodes to short call-signs that should outlive hostname
+        # rewrites coming from import or AD enumeration.
+        if changed:
+            node.version = (node.version or 0) + 1
+            if ts:
+                node.updated_at = ts
+            payload = _node_to_dict(node)
+            payload["network_id"] = node.network_id  # needed by frontend WS router
+            updated_payloads.append(payload)
+    return updated_payloads
+
+
 def delete_node(node_id: str, db: Session) -> None:
     row = db.query(models.NetworkNode).filter(models.NetworkNode.id == node_id).first()
     if row:

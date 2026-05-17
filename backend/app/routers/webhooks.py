@@ -232,6 +232,16 @@ async def receive_webhook(
         results["finding"] = "created"
         log_event(db, pid, None, "finding", "c2_finding", f"C2 finding: {title}", {"severity": severity})
 
+    # Mirror C2-beacon-driven host changes onto map nodes BEFORE the commit so
+    # version bumps land in the same transaction.
+    from ..core.network_data import sync_host_to_nodes as _sync_nodes
+    from ..core.utils import ts_now as _ts_now
+    node_payloads: list[dict] = []
+    if "host" in results:
+        host_obj_pre = db.query(models.Host).filter(models.Host.pid == pid, models.Host.ip == ip).first()
+        if host_obj_pre:
+            node_payloads = _sync_nodes(host_obj_pre, db, ts=_ts_now())
+
     db.commit()
 
     # Broadcast changes
@@ -239,6 +249,8 @@ async def receive_webhook(
         host_obj = db.query(models.Host).filter(models.Host.pid == pid, models.Host.ip == ip).first()
         if host_obj:
             bcast(pid, "host", "upsert", schemas.Host.model_validate(host_obj).model_dump())
+    for payload in node_payloads:
+        bcast(pid, "network", "node_updated", {"network_id": payload.pop("network_id", ""), "node": payload})
     if "cred" in results and results["cred"] == "created":
         cred_objs = db.query(models.Cred).filter(models.Cred.pid == pid, models.Cred.username == event.username).order_by(models.Cred.id.desc()).first()
         if cred_objs:

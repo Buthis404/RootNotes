@@ -9,6 +9,7 @@ from typing import List, Optional
 from ..database import get_db
 from .. import models, schemas
 from ..core.events import bcast, log_event
+from ..core.network_data import sync_host_to_nodes
 from ..core.utils import new_id, normalize_domain, ts_now
 from ..core.deps import get_current_user, is_admin
 from ..core.access import check_pid_access, check_object_access, get_user_member_pids
@@ -82,10 +83,15 @@ def update_host(hid: str, body: schemas.HostUpdate, request: Request, db: Sessio
             db, host.pid, getattr(request.state, "username", None), "host", "status",
             f"Host {host.ip} status → {host.status}", {"ip": host.ip, "old": old_status, "new": host.status},
         )
+    ts = ts_now()
+    node_payloads = sync_host_to_nodes(host, db, ts=ts)
     db.commit()
     db.refresh(host)
     h = schemas.Host.model_validate(host)
     bcast(host.pid, "host", "update", h.model_dump())
+    # Live-update mirrored network nodes (status badges, role icons, etc.)
+    for payload in node_payloads:
+        bcast(host.pid, "network", "node_updated", {"network_id": payload.pop("network_id", ""), "node": payload})
     return host
 
 
