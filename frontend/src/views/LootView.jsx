@@ -1,12 +1,36 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, downloadUrl } from '../api.js';
 import Icon from '../components/Icon.jsx';
 import { SearchBar } from '../components/UI.jsx';
 import { useProjectPermissions } from '../context/ProjectPermissions.jsx';
 
+// Filename helpers
+const _hasExt = (name) => typeof name === 'string' && /\.[a-z0-9]{1,8}$/i.test(name);
+const _extOf = (name) => {
+  if (typeof name !== 'string') return '';
+  const m = name.match(/\.([a-z0-9]{1,8})$/i);
+  return m ? m[1].toLowerCase() : '';
+};
+
+/** Build the final download filename without clobbering an existing extension. */
+function _downloadFilename(loot, isFileBlob) {
+  const fname = (loot.filename || '').trim();
+  if (fname) {
+    // Always honour the user-stored filename — it's the truth even when
+    // there's no public_url (e.g. a text-loot the operator named report.yaml).
+    return fname;
+  }
+  const sourceTail = (loot.source_path || '').split('/').pop() || '';
+  if (sourceTail && _hasExt(sourceTail)) return sourceTail;
+  // No filename and no extension hint — value-based loot is text, file is bin.
+  return isFileBlob ? 'loot.bin' : 'loot.txt';
+}
+
 async function downloadLoot(loot) {
   if (loot.public_url) {
-    // Fetch with auth token and trigger blob download
+    // Real file on disk — fetch with auth and trigger blob download.
+    // Backend sets Content-Disposition with the right filename already, but
+    // we override here so the operator sees a predictable name.
     const url = downloadUrl(loot.public_url);
     try {
       const resp = await fetch(url);
@@ -14,22 +38,65 @@ async function downloadLoot(loot) {
       const blob = await resp.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = loot.filename || 'loot';
+      a.download = _downloadFilename(loot, true);
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     } catch (e) {
       alert(`Download failed: ${e.message}`);
     }
   } else {
-    // No file — download value as .txt
+    // No file — serialize the value as bytes and download.
     const content = loot.value || loot.description || '';
     const blob = new Blob([content], { type: 'text/plain' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = (loot.filename || loot.source_path?.split('/').pop() || 'loot') + (loot.public_url ? '' : '.txt');
+    a.download = _downloadFilename(loot, false);
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }
+}
+
+// ── Preview classification ────────────────────────────────────────────
+const PREVIEW_EXT = {
+  image: new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico']),
+  pdf:   new Set(['pdf']),
+  text:  new Set([
+    'txt', 'log', 'md', 'json', 'xml', 'yaml', 'yml', 'csv', 'tsv',
+    'conf', 'cnf', 'cfg', 'ini', 'env', 'toml',
+    'sh', 'bash', 'zsh', 'ps1', 'py', 'js', 'ts', 'jsx', 'tsx',
+    'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'rb', 'php', 'sql',
+    'html', 'htm', 'css',
+  ]),
+  audio: new Set(['mp3', 'wav', 'ogg', 'flac', 'm4a']),
+  video: new Set(['mp4', 'webm', 'mov', 'mkv', 'avi']),
+};
+
+function _previewKind(loot) {
+  // For attached files: prefer content_type, fall back to extension.
+  if (loot.public_url) {
+    const ct = (loot.content_type || '').toLowerCase();
+    if (ct.startsWith('image/')) return 'image';
+    if (ct === 'application/pdf') return 'pdf';
+    if (ct.startsWith('text/')) return 'text';
+    if (ct.startsWith('audio/')) return 'audio';
+    if (ct.startsWith('video/')) return 'video';
+    if (ct === 'application/json' || ct === 'application/xml') return 'text';
+    const ext = _extOf(loot.filename);
+    if (PREVIEW_EXT.image.has(ext)) return 'image';
+    if (PREVIEW_EXT.pdf.has(ext))   return 'pdf';
+    if (PREVIEW_EXT.text.has(ext))  return 'text';
+    if (PREVIEW_EXT.audio.has(ext)) return 'audio';
+    if (PREVIEW_EXT.video.has(ext)) return 'video';
+    return 'binary';
+  }
+  // Value-based loot is always text.
+  if (loot.value) return 'text';
+  return 'none';
+}
+
+function _previewable(loot) {
+  const k = _previewKind(loot);
+  return k !== 'binary' && k !== 'none';
 }
 
 const LOOT_TYPES = {
@@ -42,6 +109,117 @@ const LOOT_TYPES = {
   config: { label: 'Config',  color: '#e8cc42' },
   other:  { label: 'Other',   color: '#606570' },
 };
+
+// ── Preview modal ─────────────────────────────────────────────────────
+function LootPreviewModal({ loot, onClose }) {
+  const kind = _previewKind(loot);
+  const [textContent, setTextContent] = useState(loot.public_url ? null : (loot.value || ''));
+  const [textError, setTextError] = useState('');
+
+  // Lock body scroll while open
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
+  // Close on Esc
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // For file-text previews, fetch the file body lazily.
+  useEffect(() => {
+    if (kind !== 'text' || !loot.public_url) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch(downloadUrl(loot.public_url));
+        if (!resp.ok) throw new Error(`${resp.status}`);
+        const text = await resp.text();
+        if (!cancelled) setTextContent(text);
+      } catch (e) {
+        if (!cancelled) setTextError(e.message || 'Failed to load');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [kind, loot.public_url]);
+
+  const fileUrl = loot.public_url ? downloadUrl(loot.public_url) : '';
+  const titleFile = loot.filename || loot.source_path || 'loot';
+
+  return (
+    <div onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.78)', zIndex: 5000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: '#0c0e13', border: '1px solid #2a2d35', borderRadius: 10, width: '100%', maxWidth: 1100, maxHeight: '92vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 10px 40px rgba(0,0,0,0.6)' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid #1e2029', flexShrink: 0 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: '#e0e4ec', fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={titleFile}>
+              {titleFile}
+            </div>
+            <div style={{ fontSize: 10, color: '#606570', fontFamily: 'JetBrains Mono', marginTop: 2 }}>
+              {kind} · {loot.content_type || (loot.public_url ? 'binary' : 'text/plain')}
+              {loot.file_size ? ` · ${_formatBytes(loot.file_size)}` : ''}
+            </div>
+          </div>
+          <button onClick={() => downloadLoot(loot)} title="Download"
+            style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Icon name="export" size={11} color="#9098a8" /> Download
+          </button>
+          <button onClick={onClose} title="Close (Esc)"
+            style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 8px', cursor: 'pointer', display: 'flex' }}>
+            <Icon name="close" size={11} color="#9098a8" />
+          </button>
+        </div>
+        {/* Body */}
+        <div style={{ flex: 1, overflow: 'auto', background: '#07080b', display: 'flex', alignItems: 'stretch', justifyContent: 'center' }}>
+          {kind === 'image' && (
+            <img src={fileUrl} alt={titleFile} style={{ maxWidth: '100%', maxHeight: '86vh', objectFit: 'contain', alignSelf: 'center', margin: 'auto', display: 'block' }} />
+          )}
+          {kind === 'pdf' && (
+            <iframe title={titleFile} src={fileUrl} style={{ width: '100%', height: '86vh', border: 'none', background: '#0a0c10' }} />
+          )}
+          {kind === 'text' && textContent != null && (
+            <pre style={{ width: '100%', margin: 0, padding: 16, color: '#c8cdd6', fontSize: 12, fontFamily: 'JetBrains Mono', whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflow: 'auto' }}>
+              {textContent}
+            </pre>
+          )}
+          {kind === 'text' && textContent == null && !textError && (
+            <div style={{ padding: 40, color: '#505560', fontSize: 12, fontFamily: 'JetBrains Mono' }}>Loading…</div>
+          )}
+          {kind === 'text' && textError && (
+            <div style={{ padding: 40, color: '#cc2233', fontSize: 12, fontFamily: 'JetBrains Mono' }}>Failed to load: {textError}</div>
+          )}
+          {kind === 'audio' && (
+            <audio controls src={fileUrl} style={{ alignSelf: 'center', margin: 'auto', width: '60%' }} />
+          )}
+          {kind === 'video' && (
+            <video controls src={fileUrl} style={{ maxWidth: '100%', maxHeight: '86vh', alignSelf: 'center', margin: 'auto' }} />
+          )}
+          {(kind === 'binary' || kind === 'none') && (
+            <div style={{ padding: 60, color: '#606570', fontSize: 12, fontFamily: 'JetBrains Mono', textAlign: 'center', alignSelf: 'center', margin: 'auto' }}>
+              <div style={{ fontSize: 36, marginBottom: 14 }}>📦</div>
+              <div style={{ marginBottom: 6, color: '#9098a8' }}>No inline preview available for this file type.</div>
+              <div>Use the Download button to retrieve the original.</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function _formatBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+}
 
 function TypeBadge({ type }) {
   const t = LOOT_TYPES[type] || LOOT_TYPES.other;
@@ -62,6 +240,7 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
   const [showAdd, setShowAdd] = useState(false);
   const [newLoot, setNewLoot] = useState(EMPTY);
   const [selectedId, setSelectedId] = useState(null);
+  const [previewLootId, setPreviewLootId] = useState(null);
   const [showValues, setShowValues] = useState({});
   const [copied, setCopied] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -261,6 +440,14 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                       <Icon name={isCopied ? 'check' : 'copy'} size={12} color="currentColor" />
                     </button>
                   )}
+                  {_previewable(loot) && (
+                    <button onClick={() => setPreviewLootId(loot.id)} title="Preview"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#404550', display: 'flex', padding: 2 }}
+                      onMouseEnter={e => e.currentTarget.style.color = '#c07af0'}
+                      onMouseLeave={e => e.currentTarget.style.color = '#404550'}>
+                      <Icon name="eye" size={12} color="currentColor" />
+                    </button>
+                  )}
                   <button onClick={() => downloadLoot(loot)} title="Download"
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: loot.public_url ? '#5b8af5' : '#404550', display: 'flex', padding: 2 }}
                     onMouseEnter={e => e.currentTarget.style.color = '#5b8af5'}
@@ -329,8 +516,13 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                   <input ref={editFileRef} type="file" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && uploadFileForLoot(selLoot.id, e.target.files[0])} />
                   <button onClick={() => editFileRef.current?.click()} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#9098a8', fontSize: 10, fontFamily: 'JetBrains Mono' }}>{uploading ? 'Uploading…' : 'Upload / replace'}</button>
+                  {_previewable(selLoot) && (
+                    <button onClick={() => setPreviewLootId(selLoot.id)} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: '#c07af0', fontSize: 10, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <Icon name="eye" size={11} color="#c07af0" /> Preview
+                    </button>
+                  )}
                   <button onClick={() => downloadLoot(selLoot)} style={{ background: '#1a1c22', border: '1px solid #2a2d35', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', color: selLoot.public_url ? '#5b8af5' : '#808590', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
-                    {selLoot.public_url ? 'Download file' : 'Download as .txt'}
+                    Download{selLoot.filename ? ` (${(_extOf(selLoot.filename) || (selLoot.public_url ? 'bin' : 'txt')).toUpperCase()})` : (selLoot.public_url ? '' : ' (TXT)')}
                   </button>
                 </div>
                 <div style={{ fontSize: 10, color: '#606570', marginTop: 6, fontFamily: 'JetBrains Mono' }}>{selLoot.filename ? `${selLoot.filename}${selLoot.file_size ? ` · ${selLoot.file_size} bytes` : ''}` : 'No file attached'}</div>
@@ -353,6 +545,12 @@ export default function LootView({ loots, hosts, onAdd, onUpdate, onDelete, sele
           </div>
         )}
       </div>
+      {/* Preview modal */}
+      {previewLootId && (() => {
+        const pl = loots.find(l => l.id === previewLootId);
+        if (!pl) return null;
+        return <LootPreviewModal loot={pl} onClose={() => setPreviewLootId(null)} />;
+      })()}
     </div>
   );
 }
