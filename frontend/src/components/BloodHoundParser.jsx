@@ -882,19 +882,19 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
             <div style={{ fontSize: 34, marginBottom: 12 }}>🩸</div>
             <div style={{ fontSize: 13, color: '#c8cdd6', fontWeight: 700, fontFamily: 'Space Grotesk', marginBottom: 8 }}>Drop SharpHound / BloodHound exports</div>
             <div style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono', lineHeight: 2 }}>
-              ZIP archive (SharpHound output) · или отдельные JSON файлы<br/>
+              ZIP archive (SharpHound output) · or individual JSON files<br/>
               computers · users · groups · domains
             </div>
             <input ref={fileInputRef} type="file" accept=".json,.zip" multiple style={{ display: 'none' }}
                    onChange={e => handleFiles(Array.from(e.target.files))} />
           </div>
           <div style={{ margin: '0 20px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-            <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>— или быстрый импорт на сервере —</div>
+            <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>— or fast server-side import —</div>
             <button disabled={serverImporting} onClick={() => serverFileRef.current?.click()}
               style={{ background: serverImporting ? '#1a1c22' : '#c07af014', border: '1px solid #c07af044', borderRadius: 5, padding: '7px 18px', cursor: serverImporting ? 'default' : 'pointer', color: '#c07af0', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
               {serverImporting ? '⏳ Importing…' : '⚡ Server Import (ZIP / JSON)'}
             </button>
-            <div style={{ fontSize: 8, color: '#303540', fontFamily: 'JetBrains Mono' }}>DA detection · ACL edges · attack graph edges — всё за один запрос</div>
+            <div style={{ fontSize: 8, color: '#303540', fontFamily: 'JetBrains Mono' }}>DA detection · ACL edges · attack graph edges — all in one request</div>
             <input ref={serverFileRef} type="file" accept=".json,.zip" style={{ display: 'none' }}
                    onChange={e => { const f = e.target.files[0]; if (f) doServerImport(f); }} />
           </div>
@@ -1027,9 +1027,9 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
                   <div>• Hosts: upsert by IP or hostname. Updates OS, domain, notes, tags, BH flags and inferred host role.</div>
                   <div>• Creds: creates missing AD creds, enriches notes with roles, flags, status, groups and metadata.</div>
                   <div>• Access: LA → local_admin · RDP → rdp · PSRemote → winrm · DCSync → domain_admin</div>
-                  <div>• Sessions: пишет заметку "Active session observed" в cred_host_notes</div>
-                  <div>• Existing roles сохраняются, новые добавляются</div>
-                  <div>• Network maps: рисует рёбра на всех картах сети где есть совпадающие ноды:</div>
+                  <div>• Sessions: writes "Active session observed" note into cred_host_notes</div>
+                  <div>• Existing roles are preserved; new ones are appended</div>
+                  <div>• Network maps: draws edges on every network map containing matching nodes:</div>
                   <div style={{ paddingLeft: 12 }}>session+LA → lateral · session+DCSync → exploit · delegation → tunnel · domain trust → tunnel</div>
                 </div>
               </div>

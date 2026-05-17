@@ -250,10 +250,10 @@ export default function NmapParser({ pid, onImport, onClose, accent }) {
           {!parsed ? (
             <>
               <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
-                Вставьте вывод сканера — формат определится автоматически
+                Paste scanner output — format is detected automatically
               </div>
               <textarea value={raw} onChange={e => setRaw(e.target.value)}
-                placeholder={`# Nmap XML / Grepable / Text\nnmap -sV -sC -T4 192.168.1.0/24 -oX out.xml\n\n# NetExec / CrackMapExec\nnxc smb 10.10.10.0/24\n\n# Advanced Port Scanner\nФайл → Сохранить как XML`}
+                placeholder={`# Nmap XML / Grepable / Text\nnmap -sV -sC -T4 192.168.1.0/24 -oX out.xml\n\n# NetExec / CrackMapExec\nnxc smb 10.10.10.0/24\n\n# Advanced Port Scanner\nFile → Save as XML`}
                 style={{ width: '100%', height: 280, background: '#07080b', border: '1px solid #2a2d35', borderRadius: 6, padding: '14px 16px', color: '#9098a8', fontSize: 11, fontFamily: 'JetBrains Mono', lineHeight: 1.6, resize: 'vertical', outline: 'none' }} />
             </>
           ) : (
