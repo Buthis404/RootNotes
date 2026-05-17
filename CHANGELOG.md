@@ -1,5 +1,43 @@
 # RootNotes — Changelog
 
+## v0.4.0 — 2026-05-17
+
+### Playbook depth (P4)
+- **DAG runner** — Playbook steps gain `depends_on: list[int]`. When any
+  step opts in, the run executes as a directed acyclic graph: ready
+  steps (deps satisfied) spawn concurrently via `asyncio.create_task`
+  and are joined with `asyncio.wait(FIRST_COMPLETED)`. Fan-out / fan-in
+  is implicit in the graph; classic linear playbooks (no `depends_on`
+  anywhere) keep using the existing `_run_sequence` path unchanged.
+- **Retry logic** — `retry_count` (0-10), `retry_delay_seconds`, and
+  `retry_on` (any of `failed`, `cancelled`, `timeout`) per step. Each
+  retry creates a new `Job` row appended to `PlaybookRun.jobs_json`
+  with `step_idx` + `attempt` so history is auditable.
+- **Preconditional steps** — `precondition: {step, result_key, operator,
+  value, negate}` evaluated against a prior step's `result_json` before
+  running. Skipped steps land in `step_states` as `skipped` and never
+  consume a job slot.
+- **Validation** — DFS cycle detector with reconstructed path
+  (`"#1 → #2 → #1"`), depends_on bounds + self-loop guard, and a
+  rejection of legacy `on_success: jump` / `on_failure: jump` once the
+  playbook is in DAG mode (jumps and DAGs are incompatible).
+- **Frontend** — Each step in the playbook editor gets a collapsible
+  "Advanced — DAG · Retry · Precondition" section: chip-style
+  `depends_on` picker, retry inputs, retry-on toggle, and a compact
+  precondition builder. Run view detects DAG runs, groups job attempts
+  by `step_idx`, renders a `↻N` badge for retried steps, displays
+  skipped steps with the `↷` marker, and tags the run with a "DAG" chip.
+
+### AI kill switch
+- New `ai_enabled` flag in `ai_config` (default `true` for back-compat).
+  Admin panel gains a prominent enable/disable checkbox with red-tinted
+  framing when off. Disabling immediately hides the floating AI chat
+  panel for every connected user and returns HTTP 503 from
+  `POST /projects/{pid}/ai/chat`; provider configuration is preserved.
+- Lightweight `GET /api/ai/status` endpoint lets the frontend gate UI
+  without leaking provider details; `rt:ai_status_changed` window event
+  triggers a re-fetch when an admin saves the config.
+
 ## v0.3.2 — 2026-05-17
 
 ### Frontend follow-ups for v0.3.1 backend work

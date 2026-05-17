@@ -360,7 +360,7 @@ const PROVIDER_DEFAULT_MODELS = {
 };
 
 function AISection({ accent }) {
-  const [config, setConfig] = useState({ providers: [], agent_mode: true, max_tool_calls: 10 });
+  const [config, setConfig] = useState({ providers: [], agent_mode: true, max_tool_calls: 10, ai_enabled: true });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
@@ -381,6 +381,7 @@ function AISection({ accent }) {
           providers: data.providers || [],
           agent_mode: data.agent_mode !== false,
           max_tool_calls: data.max_tool_calls || 10,
+          ai_enabled: data.ai_enabled !== false,
         });
       }
     }).catch(() => {}).finally(() => setLoading(false));
@@ -390,6 +391,7 @@ function AISection({ accent }) {
     setSaving(true); setMsg('');
     try {
       await api.saveAIConfig(config);
+      window.dispatchEvent(new Event('rt:ai_status_changed'));
       setMsg('Saved.');
     } catch (e) { setMsg(e.message || 'Save failed'); }
     finally { setSaving(false); }
@@ -434,6 +436,32 @@ function AISection({ accent }) {
     <div style={{ maxWidth: 720 }}>
       <div style={{ fontSize: 16, color: '#e0e4ec', fontWeight: 700, marginBottom: 4, fontFamily: 'Space Grotesk' }}>AI Configuration</div>
       <div style={{ fontSize: 11, color: '#606570', marginBottom: 20, fontFamily: 'JetBrains Mono' }}>Configure LLM providers and agent settings.</div>
+
+      {!loading && (
+        <div style={{ ...sectionBox, borderColor: config.ai_enabled ? '#1e2029' : '#3a1010', background: config.ai_enabled ? '#0d0f14' : '#130808' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={!!config.ai_enabled}
+              onChange={e => setConfig(prev => ({ ...prev, ai_enabled: e.target.checked }))}
+              style={{ width: 16, height: 16, accentColor: config.ai_enabled ? '#39d353' : '#cc2233', cursor: 'pointer' }}
+            />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: '#e0e4ec', fontWeight: 600 }}>
+                Enable AI features
+              </div>
+              <div style={{ fontSize: 10, color: '#606570', marginTop: 3, fontFamily: 'JetBrains Mono', lineHeight: 1.55 }}>
+                When disabled, the AI chat panel is hidden across the UI for all users and the
+                <code style={{ color: '#9098a8', background: '#0a0c10', padding: '0 4px', borderRadius: 2, margin: '0 4px' }}>POST /ai/chat</code>
+                endpoint returns 503. Provider configuration is preserved.
+              </div>
+            </div>
+            <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: config.ai_enabled ? '#39d353' : '#cc2233', background: config.ai_enabled ? '#39d35318' : '#cc223318', border: `1px solid ${config.ai_enabled ? '#39d35344' : '#cc223344'}`, borderRadius: 3, padding: '3px 8px' }}>
+              {config.ai_enabled ? 'ENABLED' : 'DISABLED'}
+            </span>
+          </label>
+        </div>
+      )}
 
       {loading && <div style={{ color: '#404550', fontSize: 12, fontFamily: 'JetBrains Mono' }}>Loading…</div>}
 
