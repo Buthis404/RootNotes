@@ -184,6 +184,12 @@ async def bulk_exec(
             raise HTTPException(404, "Credential not found")
         if not selected_cred.secret:
             raise HTTPException(400, "Credential has no secret")
+        log_event(
+            db, pid, getattr(user, "username", None), "audit", "secret_used_bulk_exec",
+            f"Credential secret used in bulk exec: {selected_cred.username}",
+            {"cred_id": selected_cred.id, "username": selected_cred.username, "host_count": len(body.host_ids)},
+        )
+        db.commit()
 
     ssh_configs = _resolve_exec_ssh_configs(
         db, pid,
@@ -707,6 +713,13 @@ async def validate_cred(
         raise HTTPException(404, "Credential not found")
     if not cred.secret:
         raise HTTPException(400, "Credential has no secret to validate")
+
+    log_event(
+        db, pid, getattr(user, "username", None), "audit", "secret_used_validate",
+        f"Credential secret used for validation: {cred.username}",
+        {"cred_id": cred.id, "username": cred.username, "host_count": len(body.host_ids or [])},
+    )
+    db.commit()
 
     if body.collection_id and not body.host_ids:
         coll = db.query(models.HostCollection).filter(
