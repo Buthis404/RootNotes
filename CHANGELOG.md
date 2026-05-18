@@ -1,5 +1,25 @@
 # RootNotes — Changelog
 
+## v0.6.1 — 2026-05-18
+
+### DonPAPI playbook recipe
+- DonPAPI gains a **queued execution path** — `donpapi:scan` joins
+  `_SUPPORTED_QUEUED_OPERATIONS` with a `_run_donpapi_job` runner that
+  mirrors the HTTP endpoint (SSH dispatch, stdout parse, auto-cred
+  ingest, auto-loot tarball) while staying P12-clean: secrets are
+  scrubbed from stored commands + broadcast output, and `cred_id`
+  resolution lets playbooks reference project credentials without
+  inlining plaintext.
+- New `donpapi:scan` **step template** with target/username/password/
+  nthash/domain/cred_id/extra_flags/fetch_loot/timeout fields, and a
+  matching `_job_spec_for_step` branch (validates that either
+  `cred_id` or `username + (password|nthash)` is supplied before
+  queuing).
+- New `donpapi-collect` **builtin playbook**: step 1 validates the
+  cred via NetExec SMB `--shares`, step 2 depends on step 1 and runs
+  the actual DonPAPI collection. Wire credentials in the run form,
+  point at one or more target IPs, and the playbook handles the rest.
+
 ## v0.5.0 — 2026-05-17
 
 ### Timeline rollback / recovery (P8)

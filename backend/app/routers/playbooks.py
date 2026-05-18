@@ -273,6 +273,25 @@ STEP_TEMPLATES = {
             {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
         ],
     },
+    "donpapi:scan": {
+        "id": "donpapi:scan",
+        "title": "DonPAPI Collect",
+        "connector_key": "donpapi",
+        "operation": "scan",
+        "description": "Dump DPAPI vaults / Wi-Fi / browser creds via DonPAPI. Use cred_id (preferred) or inline username + password/nthash.",
+        "fields": [
+            {"key": "target", "label": "Target (IP or comma-list)", "type": "text", "default": "", "runtime_fallback": True},
+            {"key": "username", "label": "Username", "type": "text", "default": ""},
+            {"key": "password", "label": "Password", "type": "text", "default": ""},
+            {"key": "nthash", "label": "NT hash", "type": "text", "default": ""},
+            {"key": "domain", "label": "Domain", "type": "text", "default": ""},
+            {"key": "cred_id", "label": "Cred id (preferred)", "type": "text", "default": ""},
+            {"key": "extra_flags", "label": "Extra flags", "type": "text", "default": ""},
+            {"key": "fetch_loot", "label": "Fetch loot tarball", "type": "boolean", "default": True},
+            {"key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 600},
+            {"key": "target_id", "label": "Attacker target id", "type": "text", "default": ""},
+        ],
+    },
     "httpx:scan": {
         "id": "httpx:scan",
         "title": "httpx Web Probe",
@@ -761,6 +780,27 @@ def _validate_playbook_payload(body: PlaybookBody, available_connectors: list[di
 
 
 BUILTIN_PLAYBOOKS = {
+    "donpapi-collect": {
+        "id": "donpapi-collect",
+        "title": "DonPAPI — DPAPI Collection",
+        "description": "Validate domain creds via NetExec SMB, then dump DPAPI vaults/Wi-Fi/browser creds with DonPAPI. Fill target + username + password (or hash) in the run form.",
+        "editable": False,
+        "steps": [
+            {
+                "title": "NetExec SMB — auth probe",
+                "connector_key": "netexec", "operation": "scan",
+                "params": {"protocol": "smb", "extra_flags": "--shares"},
+                "on_success": "next", "on_failure": "stop",
+            },
+            {
+                "title": "DonPAPI — collect",
+                "connector_key": "donpapi", "operation": "scan",
+                "params": {"fetch_loot": True, "timeout_seconds": 600},
+                "on_success": "stop", "on_failure": "stop",
+                "depends_on": [1],
+            },
+        ],
+    },
     "topology-refresh": {
         "id": "topology-refresh",
         "title": "Topology Refresh",
@@ -1280,6 +1320,44 @@ def _job_spec_for_step(pid: str, step: dict, body: PlaybookRunBody, created_by: 
                 "execution_mode": params.get("execution_mode") or "auto",
                 "timeout_seconds": int(params.get("timeout_seconds") or 45),
                 "activity_type": params.get("activity_type") or "postex",
+            },
+            "created_by": created_by,
+        }
+
+    if connector_key == "donpapi" and operation == "scan":
+        target = (params.get("target") or body.target or "").strip()
+        if not target:
+            raise HTTPException(400, "This playbook step requires target")
+        username = params.get("username") or body.username or ""
+        password = params.get("password") or body.password or ""
+        nthash = params.get("nthash") or params.get("hash") or body.hash or ""
+        domain = params.get("domain") or body.domain or ""
+        cred_id = params.get("cred_id") or ""
+        if not cred_id and not username:
+            raise HTTPException(400, "donpapi step requires cred_id or username")
+        if not cred_id and not (password or nthash):
+            raise HTTPException(400, "donpapi step requires password or nthash (or cred_id)")
+        timeout_seconds = int(params.get("timeout_seconds") or 600)
+        return {
+            "job_type": "donpapi",
+            "title": f"{title}: {target}",
+            "target": target,
+            "command": f"donpapi collect -t {target} ...",
+            "connector_key": "donpapi",
+            "operation": "scan",
+            "related_entity_type": "project",
+            "related_entity_id": pid,
+            "request_json": {
+                "target": target,
+                "username": username,
+                "domain": domain,
+                "cred_id": cred_id,
+                "password": password,
+                "nthash": nthash,
+                "extra_flags": params.get("extra_flags") or "",
+                "fetch_loot": bool(params.get("fetch_loot", True)),
+                "timeout_seconds": timeout_seconds,
+                "target_id": params.get("target_id") or body.target_id,
             },
             "created_by": created_by,
         }
