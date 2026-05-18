@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from .. import models
+from .deps import is_admin
 from .permissions import get_membership, get_permissions_for_role
 
 
