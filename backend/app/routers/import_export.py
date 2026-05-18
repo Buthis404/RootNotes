@@ -666,6 +666,7 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db),
 
     hosts_added = 0
     new_hosts = []
+    truly_new_host_ids: list[str] = []
     for h in body.hosts:
         h_data = h.model_dump()
         h_data["pid"] = pid
@@ -720,6 +721,7 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db),
                 existing_by_hostname[hn_upper] = host
             hosts_added += 1
             new_hosts.append(host)
+            truly_new_host_ids.append(host.id)
 
     new_creds = []
     creds_added = 0
@@ -740,5 +742,30 @@ def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db),
     for c in new_creds:
         db.refresh(c)
         bcast(pid, "cred", "create", schemas.Cred.model_validate(c).model_dump())
+
+    # Reversible Timeline event — operators can rollback the freshly-imported
+    # rows in one click. We only undo NEWLY CREATED entities (delete); we
+    # deliberately do NOT roll back enrichment applied to existing hosts —
+    # the merge semantics are non-trivial and a wrong rollback could lose
+    # legitimate operator edits made before the import.
+    new_cred_ids = [c.id for c in new_creds]
+    undo_ops = (
+        [{"entity": "host", "id": hid, "type": "delete"} for hid in truly_new_host_ids]
+        + [{"entity": "cred", "id": cid, "type": "delete"} for cid in new_cred_ids]
+    )
+    if undo_ops:
+        username = getattr(user, "username", None)
+        log_event(
+            db, pid, username, "audit", "bulk_import_completed",
+            f"Bulk import: {hosts_added} hosts + {creds_added} creds (source: {body.source or 'unspecified'})",
+            {
+                "hosts_added": hosts_added,
+                "creds_added": creds_added,
+                "source": body.source or "",
+                "reversible": True,
+                "undo": {"type": "batch", "operations": undo_ops[:1000]},
+            },
+        )
+        db.commit()
 
     return BatchImportResult(hosts_added=hosts_added, creds_added=creds_added)

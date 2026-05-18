@@ -1437,12 +1437,19 @@ def _run_smart_build(
     # overwritten. Done up-front so all downstream logic (DC detection, tier
     # classification, service-graph heuristics) sees the enriched roles.
     roles_assigned = 0
+    # Capture before-state per host so a reversible TimelineEvent can patch
+    # the role back if the operator hits Undo.
+    role_undo_ops: list[dict] = []
     if auto_assign_roles:
         for h in all_hosts:
             if (h.role or "").lower() not in ("", "unknown"):
                 continue
             inferred = _auto_assign_host_role(h)
             if inferred and inferred != (h.role or ""):
+                role_undo_ops.append({
+                    "entity": "host", "id": h.id, "type": "patch",
+                    "patch": {"role": h.role or ""},
+                })
                 h.role = inferred
                 roles_assigned += 1
         if roles_assigned:
@@ -2496,6 +2503,9 @@ def _run_smart_build(
         "auto_via_host_assigned": auto_via_count,
         "last_smart_build": build_ts,
         "dry_run": dry_run,
+        # Surface role-revert payload so the caller can write a reversible
+        # TimelineEvent. Not exposed to the API response (handler filters).
+        "_role_undo_ops": role_undo_ops,
     }
 
     if dry_run:
@@ -2574,6 +2584,30 @@ def topology_smart_build(
         err = result.get("error", "Smart build failed")
         finish_job(db, job, status="failed", error_output=err)
         raise HTTPException(404 if "not found" in err.lower() else 400, err)
+
+    # Pop the internal undo payload so it stays out of the HTTP response.
+    role_undo_ops = result.pop("_role_undo_ops", []) or []
+    if role_undo_ops and not body.dry_run:
+        log_event(
+            db, pid, username, "audit", "smart_build_completed",
+            f"Smart build: {result.get('roles_assigned', 0)} role(s) inferred, "
+            f"{result.get('edges_added', 0)} edges, {result.get('regions_added', 0)} regions",
+            {
+                "roles_assigned": result.get("roles_assigned", 0),
+                "edges_added": result.get("edges_added", 0),
+                "regions_added": result.get("regions_added", 0),
+                "tier_counts": result.get("tier_counts", {}),
+                "reversible": True,
+                "undo": {"type": "batch", "operations": role_undo_ops[:1000]},
+                "undo_note": (
+                    "Restores host.role for hosts that smart-build auto-inferred. "
+                    "Network nodes / edges / regions are NOT reverted — re-run "
+                    "smart-build without auto_assign_roles to regenerate the map."
+                ),
+            },
+        )
+        db.commit()
+
     finish_job(db, job, status="done", result=result)
     return {**result, "job_id": job.id}
 
