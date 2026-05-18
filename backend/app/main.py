@@ -476,6 +476,9 @@ async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Sessi
             try:
                 msg = json.loads(raw)
                 if msg.get("type") == "ping":
+                    # Refresh presence last_seen so lazy cleanup keeps this
+                    # connection in the online list.
+                    await manager.touch_presence(ws)
                     await ws.send_text('{"type":"pong"}')
                     continue
                 if msg.get("type") == "focus":

@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 
 _REDIS_URL = os.environ.get("REDIS_URL", "")
 
+# Presence entry is considered stale if not touched within this window.
+# Frontend pings every 25s (PING_INTERVAL in useSync.js); 90s gives ~3
+# missed pings before lazy-cleanup wipes the ghost from the online list.
+_PRESENCE_STALE_SECONDS = 90
+
 
 # ── Broadcast policy ──────────────────────────────────────────────────────────
 #
@@ -211,9 +216,27 @@ class ConnectionManager:
             try:
                 raw = await self._redis.hgetall(f"presence:{pid}")
                 result = []
-                for v in raw.values():
+                stale_fields: list[str] = []
+                import time as _time
+                cutoff = _time.time() - _PRESENCE_STALE_SECONDS
+                for conn_id, v in raw.items():
                     try:
-                        result.append(json.loads(v))
+                        item = json.loads(v)
+                    except Exception:
+                        stale_fields.append(conn_id)
+                        continue
+                    # Lazy cleanup: if an entry hasn't been touched in
+                    # _PRESENCE_STALE_SECONDS it's almost certainly a ghost
+                    # from a previous backend restart or an abrupt
+                    # disconnect that never triggered _presence_remove.
+                    last_seen = item.get("last_seen", 0)
+                    if last_seen and last_seen < cutoff:
+                        stale_fields.append(conn_id)
+                        continue
+                    result.append({k: v for k, v in item.items() if k != "last_seen"})
+                if stale_fields:
+                    try:
+                        await self._redis.hdel(f"presence:{pid}", *stale_fields)
                     except Exception:
                         pass
                 return result
@@ -232,7 +255,10 @@ class ConnectionManager:
     async def _presence_add(self, pid: str, conn_id: str, name: str, note_id: str | None):
         if self._redis:
             try:
-                payload = json.dumps({"name": name, "note_id": note_id})
+                import time as _time
+                payload = json.dumps({
+                    "name": name, "note_id": note_id, "last_seen": _time.time(),
+                })
                 await self._redis.hset(f"presence:{pid}", conn_id, payload)
                 await self._redis.expire(f"presence:{pid}", 3600)
             except Exception:
@@ -244,6 +270,13 @@ class ConnectionManager:
                 await self._redis.hdel(f"presence:{pid}", conn_id)
             except Exception:
                 pass
+
+    async def touch_presence(self, ws: WebSocket):
+        """Refresh last_seen on the keepalive ping — drives lazy cleanup."""
+        info = self._users.get(ws)
+        if not info:
+            return
+        await self._presence_add(info["pid"], info["conn_id"], info["name"], info.get("note_id"))
 
     # ── Broadcast ─────────────────────────────────────────────────────────────
 
