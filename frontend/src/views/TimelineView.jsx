@@ -59,6 +59,22 @@ export default function TimelineView({ selectedProject, accent }) {
   const [loading, setLoading] = useState(false);
   const [filterEntity, setFilterEntity] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
+  const [undoingId, setUndoingId] = useState(null);
+
+  const doUndo = useCallback(async (eventId) => {
+    if (!eventId) return;
+    setUndoingId(eventId);
+    try {
+      await api.undoTimelineEvent(eventId);
+      setEvents(prev => prev.map(e => e.id === eventId
+        ? { ...e, meta: { ...(e.meta || {}), undone_at: new Date().toISOString().slice(0, 19).replace('T', ' ') } }
+        : e));
+    } catch (e) {
+      alert(e.message || 'Undo failed');
+    } finally {
+      setUndoingId(null);
+    }
+  }, []);
 
   const toggleExpand = (id) => setExpanded(prev => {
     const next = new Set(prev);
@@ -145,6 +161,10 @@ export default function TimelineView({ selectedProject, accent }) {
                 : [];
               const hasRawMeta = isAudit && Object.keys(meta).length > 0;
               const isExpanded = expanded.has(evt.id);
+              const canUndo = !!meta.reversible && !meta.undone_at;
+              const undoLabel = meta.undone_at
+                ? `Undone ${meta.undone_by ? `by ${meta.undone_by}` : ''} ${(meta.undone_at || '').slice(11, 16)}`.trim()
+                : null;
               return (
                 <div key={evt.id} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid #0e1016', background: isAudit ? '#10100808' : 'transparent' }}>
                   {/* Entity icon */}
@@ -184,6 +204,19 @@ export default function TimelineView({ selectedProject, accent }) {
                   {/* Right side */}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
                     <span style={{ fontSize: 10, color: '#303540', fontFamily: 'JetBrains Mono' }}>{time}</span>
+                    {canUndo && (
+                      <button
+                        onClick={() => doUndo(evt.id)}
+                        disabled={undoingId === evt.id}
+                        title="Revert this change"
+                        style={{ fontSize: 9, fontFamily: 'JetBrains Mono', color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a44', borderRadius: 3, padding: '1px 7px', cursor: undoingId === evt.id ? 'wait' : 'pointer', opacity: undoingId === evt.id ? 0.5 : 1 }}
+                      >
+                        {undoingId === evt.id ? '...' : '↶ Undo'}
+                      </button>
+                    )}
+                    {undoLabel && (
+                      <span title={undoLabel} style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono' }}>↶ undone</span>
+                    )}
                     {evt.username && (
                       <span title={evt.username}
                         style={{ width: 20, height: 20, borderRadius: '50%', background: uc + '22', border: `1px solid ${uc}55`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: uc, fontFamily: 'JetBrains Mono' }}>
