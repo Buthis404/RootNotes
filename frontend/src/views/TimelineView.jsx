@@ -165,6 +165,8 @@ export default function TimelineView({ selectedProject, accent }) {
               const undoLabel = meta.undone_at
                 ? `Undone ${meta.undone_by ? `by ${meta.undone_by}` : ''} ${(meta.undone_at || '').slice(11, 16)}`.trim()
                 : null;
+              const undoOpsCount = meta.undo?.type === 'batch' ? (meta.undo.operations?.length || 0) : 0;
+              const undoButtonLabel = undoOpsCount > 0 ? `↶ Undo bulk (${undoOpsCount})` : '↶ Undo';
               return (
                 <div key={evt.id} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid #0e1016', background: isAudit ? '#10100808' : 'transparent' }}>
                   {/* Entity icon */}
@@ -211,7 +213,7 @@ export default function TimelineView({ selectedProject, accent }) {
                         title="Revert this change"
                         style={{ fontSize: 9, fontFamily: 'JetBrains Mono', color: '#f09a3a', background: '#f09a3a18', border: '1px solid #f09a3a44', borderRadius: 3, padding: '1px 7px', cursor: undoingId === evt.id ? 'wait' : 'pointer', opacity: undoingId === evt.id ? 0.5 : 1 }}
                       >
-                        {undoingId === evt.id ? '...' : '↶ Undo'}
+                        {undoingId === evt.id ? '...' : undoButtonLabel}
                       </button>
                     )}
                     {undoLabel && (
