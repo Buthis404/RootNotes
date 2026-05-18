@@ -1,5 +1,23 @@
 # RootNotes — Changelog
 
+## v0.5.0 — 2026-05-17
+
+### Timeline rollback / recovery (P8)
+- `PATCH /hosts/{id}` now writes its status-change `TimelineEvent`
+  with an `undo` payload in `meta` (`{entity, id, type=patch, patch}`)
+  and a `reversible: true` flag. Existing readers ignore the new
+  fields.
+- New `POST /api/timeline/{event_id}/undo`: applies the inverse patch
+  to the original entity, marks the source event with
+  `meta.undone_at` + `meta.undone_by` so it can't be replayed, and
+  writes a non-reversible `audit:timeline_undo` event for the audit
+  trail. Tight per-entity allow-list of patchable fields prevents a
+  forged event from flipping arbitrary columns.
+- `TimelineView` surfaces an inline **↶ Undo** button for any event
+  with `meta.reversible` and no `undone_at`; flips to **↶ undone**
+  (with tooltip showing who/when) after rollback. WS broadcasts the
+  patched host so other operators see the rollback live.
+
 ## v0.4.0 — 2026-05-17
 
 ### Playbook depth (P4)
