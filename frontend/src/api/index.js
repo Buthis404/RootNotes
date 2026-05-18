@@ -96,6 +96,7 @@ export const api = {
 
   // Timeline
   getTimeline: (pid, entity) => req('GET', `/timeline?pid=${pid}${entity ? `&entity=${entity}` : ''}`),
+  undoTimelineEvent: (eventId) => req('POST', `/timeline/${eventId}/undo`),
 
   // Objectives
   getObjectives:    (pid)       => req('GET',    `/objectives${pid ? `?pid=${pid}` : ''}`),
