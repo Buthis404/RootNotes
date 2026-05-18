@@ -79,9 +79,15 @@ def update_host(hid: str, body: schemas.HostUpdate, request: Request, db: Sessio
     for k, v in updates.items():
         setattr(host, k, v)
     if body.status is not None and body.status != old_status:
+        # Reversible event — Timeline UI surfaces an "Undo" button.
         log_event(
             db, host.pid, getattr(request.state, "username", None), "host", "status",
-            f"Host {host.ip} status → {host.status}", {"ip": host.ip, "old": old_status, "new": host.status},
+            f"Host {host.ip} status → {host.status}",
+            {
+                "ip": host.ip, "old": old_status, "new": host.status,
+                "reversible": True,
+                "undo": {"entity": "host", "id": host.id, "type": "patch", "patch": {"status": old_status}},
+            },
         )
     ts = ts_now()
     node_payloads = sync_host_to_nodes(host, db, ts=ts)
