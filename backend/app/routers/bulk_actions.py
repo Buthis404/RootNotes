@@ -216,6 +216,13 @@ async def bulk_exec(
     # bumped forward automatically on transport failures (host unreachable).
     current_cfg_idx = 0
 
+    # Undo snapshot — accumulator. We record:
+    #   - every HostActivity we create (delete on undo)
+    #   - host status BEFORE any promotion (patch back on undo)
+    #   - new creds discovered by enrichment (delete on undo)
+    undo_ops: list[dict] = []
+    host_status_before: dict[str, str] = {host.id: (host.status or "") for host in target_hosts}
+
     for host in target_hosts:
         target_ip = host.ip or host.hostname or "unknown"
         cred_domain = (selected_cred.domain or "").strip() if selected_cred else ""
@@ -265,6 +272,8 @@ async def bulk_exec(
         log_event(db, pid, exec_username, "host_activity", "create",
                   f"Bulk exec: {title}", {"host_id": host.id})
         db.commit()
+        # Track for batch undo — every activity we create can be deleted.
+        undo_ops.append({"entity": "host_activity", "id": activity.id, "type": "delete"})
 
         bcast(pid, "host_activity", "create", HASchema.model_validate(activity).model_dump())
 
@@ -343,6 +352,19 @@ async def bulk_exec(
         host_changes = _apply_host_enrichment(db, pid, host, enrichment)
         cred_changes = _apply_cred_enrichment(db, pid, enrichment)
 
+        # Batch-undo bookkeeping: if status was promoted, schedule a patch
+        # back to the pre-run value. Newly discovered creds get a delete op.
+        before_status = host_status_before.get(host.id, "")
+        if host.status != before_status:
+            undo_ops.append({
+                "entity": "host", "id": host.id, "type": "patch",
+                "patch": {"status": before_status},
+            })
+        for cred_row in cred_changes:
+            cid = cred_row.get("id") if isinstance(cred_row, dict) else None
+            if cid:
+                undo_ops.append({"entity": "cred", "id": cid, "type": "delete"})
+
         # Mirror host changes (status promotion, role inference, port pickup)
         # onto every network-map node that points at this host.
         from ..core.network_data import sync_host_to_nodes as _sync_nodes
@@ -388,6 +410,25 @@ async def bulk_exec(
 
     total_host_changes = sum(len(r.get("enrichment", {}).get("host_changes", [])) for r in results)
     total_new_creds    = sum(len(r.get("enrichment", {}).get("new_creds", []))    for r in results)
+
+    # Final reversible batch audit event — operators see "↶ Undo bulk" in
+    # Timeline that wipes all activities, restores statuses, deletes any
+    # creds that were auto-discovered from output.
+    if undo_ops:
+        log_event(
+            db, pid, exec_username, "audit", "bulk_exec_completed",
+            f"Bulk exec on {len(target_hosts)} host(s): {body.snippet_title or body.scan_type or 'run'}",
+            {
+                "host_count": len(target_hosts),
+                "ok_count": sum(1 for r in results if r.get("ok")),
+                "activities_created": sum(1 for op in undo_ops if op.get("entity") == "host_activity"),
+                "status_promotions": sum(1 for op in undo_ops if op.get("entity") == "host" and op.get("type") == "patch"),
+                "new_creds": sum(1 for op in undo_ops if op.get("entity") == "cred" and op.get("type") == "delete"),
+                "reversible": True,
+                "undo": {"type": "batch", "operations": undo_ops[:1000]},
+            },
+        )
+        db.commit()
     summary = {
         "total": len(results),
         "ok": sum(1 for item in results if item.get("ok")),
