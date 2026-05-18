@@ -1,5 +1,22 @@
 # RootNotes — Changelog
 
+## v0.6.2 — 2026-05-18
+
+### Playbook DAG graph preview
+- The playbook editor gains a **Graph preview** panel between the step-
+  template chips and the step cards. Renders an SVG layered layout:
+  steps with `depends_on` push to the right of their predecessors,
+  predecessors with shared children stack as parallel rows. The header
+  shows `(DAG)` vs `(linear)` and the layer count so the editor knows
+  at a glance whether the run will fan out.
+- Parallel siblings (multiple nodes in the same layer) get an accent
+  border so they read as "these run concurrently". Nodes carry `↻N`
+  for retry and `⛬` for preconditions, and curved Bézier edges with
+  arrowheads draw the dependency direction.
+- Linear playbooks (no `depends_on` anywhere) still render — they just
+  stack into one column with implicit prev→next edges, so the preview
+  is useful even before someone opts into DAG mode.
+
 ## v0.6.1 — 2026-05-18
 
 ### DonPAPI playbook recipe

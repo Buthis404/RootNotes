@@ -222,6 +222,126 @@ function PlaybookCard({ playbook, accent, selected, onSelect }) {
   );
 }
 
+// Compute Kahn-style layer assignment: layer(step) = max(layer(deps))+1.
+// Steps without depends_on fall back to "sequential" mode and stack into
+// layer = index, so a fully linear playbook still renders as one column.
+function computeDagLayout(steps) {
+  const n = steps.length;
+  const deps = steps.map(s => (s.depends_on || []).map(Number).filter(d => d >= 1 && d <= n).map(d => d - 1));
+  const hasAnyDep = deps.some(d => d.length > 0);
+  const layer = new Array(n).fill(0);
+  if (hasAnyDep) {
+    // Topological pass (steps are already in editor order; deps are 1-based
+    // predecessors). If a step has no deps, layer it at its index column to
+    // mirror execution order; if it has deps, push it right of all of them.
+    for (let i = 0; i < n; i++) {
+      if (deps[i].length === 0) {
+        layer[i] = 0;
+      } else {
+        layer[i] = Math.max(...deps[i].map(d => layer[d])) + 1;
+      }
+    }
+  } else {
+    for (let i = 0; i < n; i++) layer[i] = i;
+  }
+  const byLayer = {};
+  for (let i = 0; i < n; i++) {
+    (byLayer[layer[i]] ||= []).push(i);
+  }
+  return { layer, deps, byLayer, dagMode: hasAnyDep };
+}
+
+function DagPreview({ steps, accent }) {
+  const [open, setOpen] = useState(true);
+  if (!steps || steps.length === 0) return null;
+  const { layer, deps, byLayer, dagMode } = computeDagLayout(steps);
+
+  const COL_W = 170;
+  const ROW_H = 64;
+  const NODE_W = 150;
+  const NODE_H = 44;
+  const PAD_X = 16;
+  const PAD_Y = 16;
+
+  const layers = Object.keys(byLayer).map(Number).sort((a, b) => a - b);
+  const maxRow = Math.max(...layers.map(l => byLayer[l].length));
+  const width = PAD_X * 2 + layers.length * COL_W;
+  const height = PAD_Y * 2 + maxRow * ROW_H;
+
+  const pos = {};
+  for (const l of layers) {
+    byLayer[l].forEach((idx, row) => {
+      pos[idx] = {
+        x: PAD_X + l * COL_W,
+        y: PAD_Y + row * ROW_H + (maxRow - byLayer[l].length) * (ROW_H / 2),
+      };
+    });
+  }
+
+  return (
+    <div style={{ background: '#0a0c10', border: '1px solid #1e2029', borderRadius: 8, overflow: 'hidden' }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: '100%', background: 'transparent', border: 'none', borderBottom: open ? '1px solid #1e2029' : 'none', padding: '10px 14px', cursor: 'pointer', color: '#9098a8', fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ textTransform: 'uppercase', letterSpacing: '0.1em', fontSize: 9, color: '#404550' }}>
+          {open ? '▾' : '▸'} Graph preview {dagMode ? <span style={{ color: '#5b8af5', marginLeft: 6 }}>(DAG)</span> : <span style={{ color: '#606570', marginLeft: 6 }}>(linear)</span>}
+        </span>
+        <span style={{ fontSize: 9, color: '#505560' }}>{steps.length} step{steps.length === 1 ? '' : 's'} · {layers.length} layer{layers.length === 1 ? '' : 's'}</span>
+      </button>
+      {open && (
+        <div style={{ overflowX: 'auto', padding: 8 }}>
+          <svg width={width} height={height} style={{ display: 'block', minWidth: '100%' }}>
+            <defs>
+              <marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill={accent} opacity="0.6" />
+              </marker>
+            </defs>
+            {steps.map((_, idx) => {
+              const edges = dagMode
+                ? deps[idx]
+                : (idx > 0 ? [idx - 1] : []);
+              return edges.map(d => {
+                const a = pos[d], b = pos[idx];
+                if (!a || !b) return null;
+                const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
+                const x2 = b.x, y2 = b.y + NODE_H / 2;
+                const mx = (x1 + x2) / 2;
+                return (
+                  <path key={`${d}-${idx}`} d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
+                    stroke={accent} strokeOpacity="0.5" strokeWidth="1.5" fill="none" markerEnd="url(#dag-arrow)" />
+                );
+              });
+            })}
+            {steps.map((step, idx) => {
+              const p = pos[idx];
+              if (!p) return null;
+              const hasRetry = (Number(step.retry_count) || 0) > 0;
+              const hasPrecond = !!step.precondition;
+              const isParallel = dagMode && byLayer[layer[idx]].length > 1;
+              return (
+                <g key={idx} transform={`translate(${p.x}, ${p.y})`}>
+                  <rect width={NODE_W} height={NODE_H} rx="6" ry="6"
+                    fill="#13161f" stroke={isParallel ? accent : '#1e2230'} strokeWidth={isParallel ? 1.5 : 1} />
+                  <text x="8" y="16" fontSize="10" fontFamily="JetBrains Mono" fill="#606570">#{idx + 1}</text>
+                  <text x="26" y="16" fontSize="10" fontFamily="JetBrains Mono" fill="#e0e4ec">
+                    {(step.title || `${step.connector_key}:${step.operation}`).slice(0, 18)}
+                  </text>
+                  <text x="8" y="32" fontSize="9" fontFamily="JetBrains Mono" fill="#707580">
+                    {step.connector_key}:{step.operation}
+                  </text>
+                  {(hasRetry || hasPrecond) && (
+                    <text x={NODE_W - 8} y="32" fontSize="9" fontFamily="JetBrains Mono" fill="#5b8af5" textAnchor="end">
+                      {hasRetry ? `↻${step.retry_count}` : ''}{hasRetry && hasPrecond ? ' ' : ''}{hasPrecond ? '⛬' : ''}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdvancedStepFields({ step, stepIndex, stepCount, onChange }) {
   const dagEnabled = (step.depends_on?.length > 0) || (Number(step.retry_count) || 0) > 0 || !!step.precondition;
   const [open, setOpen] = useState(dagEnabled);
@@ -1151,6 +1271,7 @@ export default function PlaybooksView({ selectedProject, accent, onNavigate }) {
                     ))}
                   </div>
                 </div>
+                <DagPreview steps={editor.steps} accent={accent} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {editor.steps.map((step, idx) => (
                     <StepEditor
