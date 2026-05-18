@@ -254,6 +254,7 @@ export const api = {
   runNmapScan:    (pid, data) => req('POST', `/projects/${pid}/scans/nmap`,   data),
   runNucleiScan:  (pid, data) => req('POST', `/projects/${pid}/scans/nuclei`, data),
   runCmeScan:     (pid, data) => req('POST', `/projects/${pid}/scans/cme`,    data),
+  runDonpapiScan: (pid, data) => req('POST', `/projects/${pid}/scans/donpapi`, data),
 
   // Webhooks (C2)
   getProjectWebhook:        (pid)  => req('GET',  `/projects/${pid}/webhook`),

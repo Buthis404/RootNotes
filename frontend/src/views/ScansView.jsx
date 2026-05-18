@@ -7,6 +7,7 @@ const SCAN_TYPES = [
   { id: 'nmap',     label: 'Nmap',            icon: 'target',   color: '#5b8af5', desc: 'Port scan → auto-fill hosts & ports' },
   { id: 'nuclei',   label: 'Nuclei',          icon: 'bug',      color: '#e8574a', desc: 'Vuln templates → auto-create findings' },
   { id: 'cme',      label: 'CME / NetExec',   icon: 'hosts',    color: '#c07af0', desc: 'AD enum → auto-fill hosts & creds' },
+  { id: 'donpapi',  label: 'DonPAPI',         icon: 'key',      color: '#ffa726', desc: 'DPAPI dump → auto-harvest creds & loot artefacts' },
   { id: 'bulk',     label: 'Bulk Host Import',icon: 'plus',     color: '#f09a3a', desc: 'IP list or CIDR → batch add hosts' },
   { id: 'c2',       label: 'C2 Integrations', icon: 'bolt',     color: '#cc2233', desc: 'Adaptix / Mythic / Sliver → auto-sync sessions' },
   { id: 'sessions', label: 'Live Sessions',   icon: 'eye',      color: '#39d353', desc: 'All live agents across every C2 integration' },
@@ -267,6 +268,67 @@ function CmePanel({ pid, accent }) {
         style={{ background: running ? '#1a1c22' : '#c07af0', border: 'none', borderRadius: 5, padding: '8px 18px', color: '#fff', fontSize: 11, fontFamily: 'JetBrains Mono', cursor: running ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
         <Icon name="hosts" size={12} color="#fff" />
         {running ? 'Running...' : 'Run NetExec'}
+      </button>
+      <ResultBox result={result} error={error} />
+    </div>
+  );
+}
+
+// ── DonPAPI Panel ─────────────────────────────────────────────────────
+function DonpapiPanel({ pid, accent }) {
+  const [target, setTarget] = useState('');
+  const [username, setUsername] = useState('');
+  const [domain, setDomain] = useState('');
+  const [password, setPassword] = useState('');
+  const [nthash, setNthash] = useState('');
+  const [extra, setExtra] = useState('');
+  const [fetchLoot, setFetchLoot] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  const run = async () => {
+    if (!target.trim() || !username.trim() || (!password.trim() && !nthash.trim())) return;
+    setRunning(true); setResult(null); setError('');
+    try {
+      const r = await api.runDonpapiScan(pid, {
+        target: target.trim(), username: username.trim(), domain: domain.trim(),
+        password, nthash: nthash.trim(), extra_flags: extra, fetch_loot: fetchLoot,
+      });
+      const parts = [`Creds harvested: ${r.creds_created}`];
+      if (r.loot_id) parts.push(`Loot artefact: ${r.loot_id}`);
+      if (r.output_dir) parts.push(`Output dir on attacker box: ${r.output_dir}`);
+      setResult(parts.join('\n'));
+    } catch (e) {
+      setError(e.message || 'DonPAPI run failed');
+    }
+    setRunning(false);
+  };
+
+  return (
+    <div>
+      <FieldRow label="Target (IP or comma-list)">
+        <Input value={target} onChange={setTarget} placeholder="10.0.0.5" />
+      </FieldRow>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+        <FieldRow label="Username"><Input value={username} onChange={setUsername} placeholder="administrator" /></FieldRow>
+        <FieldRow label="Domain"><Input value={domain} onChange={setDomain} placeholder="CORP.LOCAL" /></FieldRow>
+        <FieldRow label="Password"><Input value={password} onChange={setPassword} placeholder="Password123!" /></FieldRow>
+        <FieldRow label="NT hash (alt to password)"><Input value={nthash} onChange={setNthash} placeholder="aad3b435...31d6cfe0" monospace /></FieldRow>
+      </div>
+      <FieldRow label="Extra donpapi flags">
+        <Input value={extra} onChange={setExtra} placeholder="--no-browser --no-vault" monospace />
+      </FieldRow>
+      <FieldRow label="Auto-fetch loot tarball">
+        <button onClick={() => setFetchLoot(v => !v)}
+          style={{ alignSelf: 'flex-start', background: fetchLoot ? `${accent}22` : '#1a1c22', border: `1px solid ${fetchLoot ? accent : '#2a2d35'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', color: fetchLoot ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+          {fetchLoot ? '✓ Fetch tarball' : 'Skip tarball'}
+        </button>
+      </FieldRow>
+      <button onClick={run} disabled={running || !target.trim() || !username.trim() || (!password.trim() && !nthash.trim())}
+        style={{ background: running ? '#1a1c22' : '#ffa726', border: 'none', borderRadius: 5, padding: '8px 18px', color: '#0a0c10', fontSize: 11, fontFamily: 'JetBrains Mono', cursor: running ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Icon name="key" size={12} color="#0a0c10" />
+        {running ? 'Running...' : 'Run DonPAPI'}
       </button>
       <ResultBox result={result} error={error} />
     </div>
@@ -1187,6 +1249,7 @@ export default function ScansView({ selectedProject, accent }) {
           {activeType === 'nmap'    && <NmapPanel    pid={selectedProject} accent={accent} />}
           {activeType === 'nuclei'  && <NucleiPanel  pid={selectedProject} accent={accent} />}
           {activeType === 'cme'     && <CmePanel     pid={selectedProject} accent={accent} />}
+          {activeType === 'donpapi' && <DonpapiPanel pid={selectedProject} accent={accent} />}
           {activeType === 'bulk'    && <BulkImportPanel pid={selectedProject} accent={accent} />}
           {activeType === 'c2'       && <C2Panel       pid={selectedProject} accent={accent} />}
           {activeType === 'sessions' && <SessionsPanel pid={selectedProject} accent={accent} />}
