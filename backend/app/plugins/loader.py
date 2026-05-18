@@ -93,6 +93,14 @@ def _register_builtin_modules():
                 supported_operations=["scan"],
                 creates_entities=["finding", "job"],
             ),
+            ToolConnector(
+                key="donpapi",
+                title="DonPAPI",
+                category="scan",
+                description="Dump DPAPI secrets (vaults, Wi-Fi, browser saved passwords, certs) from Windows hosts — runs from attacker box with domain credentials",
+                supported_operations=["scan"],
+                creates_entities=["cred", "loot", "host_activity", "job"],
+            ),
         ],
     )
     registry.register(nmap_module)

