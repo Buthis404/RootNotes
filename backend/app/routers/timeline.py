@@ -26,7 +26,68 @@ def get_timeline(pid: str, entity: str | None = None, limit: int = 200, db: Sess
 # can't be used to flip arbitrary columns.
 _UNDO_ALLOWED_PATCH_FIELDS: dict[str, set[str]] = {
     "host": {"status", "role", "hostname", "os", "is_attacker"},
+    "cred": {"username", "domain", "service"},
+    "finding": {"status", "severity"},
 }
+
+# Entity types whose newly-created rows can be undone by delete.
+_UNDO_DELETABLE_ENTITIES: set[str] = {
+    "host_activity",  # batch-created by bulk_exec
+    "cred",           # enriched creds picked up from bulk_exec output
+    "host",           # rare: newly discovered hosts during bulk_exec
+}
+
+# Soft cap on operations per batch — prevents pathological undo payloads from
+# bloating TimelineEvent.meta and timing out the rollback transaction.
+_BATCH_UNDO_MAX_OPERATIONS = 1000
+
+
+def _apply_undo_op(db: Session, pid: str, op: dict) -> dict:
+    """Apply one undo operation. Returns a small audit-trail entry."""
+    entity = (op.get("entity") or "").lower()
+    op_type = (op.get("type") or "").lower()
+    target_id = op.get("id")
+    if not target_id:
+        raise HTTPException(400, f"Undo op missing id: {op}")
+
+    model_map = {
+        "host": models.Host,
+        "host_activity": models.HostActivity,
+        "cred": models.Cred,
+        "finding": models.Finding,
+    }
+    model_cls = model_map.get(entity)
+    if not model_cls:
+        raise HTTPException(400, f"Undo op references unsupported entity {entity!r}")
+
+    if op_type == "delete":
+        if entity not in _UNDO_DELETABLE_ENTITIES:
+            raise HTTPException(400, f"Undo delete not allowed for {entity!r}")
+        row = db.query(model_cls).filter(model_cls.id == target_id, model_cls.pid == pid).first()
+        if row is not None:
+            db.delete(row)
+            bcast(pid, entity, "delete", {"id": target_id})
+            return {"entity": entity, "id": target_id, "action": "deleted"}
+        return {"entity": entity, "id": target_id, "action": "missing"}
+
+    if op_type == "patch":
+        allowed = _UNDO_ALLOWED_PATCH_FIELDS.get(entity)
+        if not allowed:
+            raise HTTPException(400, f"Undo patch not allowed for {entity!r}")
+        patch = op.get("patch") or {}
+        bad = [k for k in patch if k not in allowed]
+        if bad:
+            raise HTTPException(400, f"Undo patch forbidden fields for {entity!r}: {bad}")
+        row = db.query(model_cls).filter(model_cls.id == target_id, model_cls.pid == pid).first()
+        if row is None:
+            return {"entity": entity, "id": target_id, "action": "missing"}
+        before = {k: getattr(row, k) for k in patch.keys()}
+        for k, v in patch.items():
+            setattr(row, k, v)
+        bcast(pid, entity, "update", {"id": target_id, **{k: getattr(row, k) for k in patch.keys()}})
+        return {"entity": entity, "id": target_id, "action": "patched", "before": before, "patch": patch}
+
+    raise HTTPException(400, f"Unsupported undo op type: {op_type!r}")
 
 
 @router.post("/{event_id}/undo")
@@ -50,59 +111,41 @@ def undo_event(event_id: str, db: Session = Depends(get_db), user: models.User =
         raise HTTPException(400, "This event has already been undone")
 
     undo = meta.get("undo") or {}
-    entity = (undo.get("entity") or "").lower()
     undo_type = (undo.get("type") or "").lower()
-    target_id = undo.get("id")
-    patch = undo.get("patch") or {}
 
-    if undo_type != "patch":
+    if undo_type in ("patch", "delete"):
+        # Single-op undo (host status change, etc.)
+        applied = [_apply_undo_op(db, event.pid, undo)]
+    elif undo_type == "batch":
+        operations = undo.get("operations") or []
+        if not isinstance(operations, list) or not operations:
+            raise HTTPException(400, "Batch undo payload missing operations[]")
+        if len(operations) > _BATCH_UNDO_MAX_OPERATIONS:
+            raise HTTPException(400, f"Batch too large: {len(operations)} > {_BATCH_UNDO_MAX_OPERATIONS}")
+        applied = [_apply_undo_op(db, event.pid, op) for op in operations]
+    else:
         raise HTTPException(400, f"Unsupported undo type: {undo_type!r}")
-    if entity not in _UNDO_ALLOWED_PATCH_FIELDS:
-        raise HTTPException(400, f"Undo not supported for entity {entity!r}")
-    if not target_id or not isinstance(patch, dict) or not patch:
-        raise HTTPException(400, "Undo payload missing id / patch fields")
 
-    allowed = _UNDO_ALLOWED_PATCH_FIELDS[entity]
-    bad = [k for k in patch if k not in allowed]
-    if bad:
-        raise HTTPException(400, f"Undo patch carries forbidden fields: {bad}")
+    # Mark the source event as consumed so it can't be replayed
+    meta["undone_at"] = _now_str()
+    meta["undone_by"] = getattr(user, "username", "") or ""
+    event.meta = meta
 
-    if entity == "host":
-        host = db.query(models.Host).filter(
-            models.Host.id == target_id, models.Host.pid == event.pid
-        ).first()
-        if not host:
-            raise HTTPException(404, "Target host not found in project")
-        # Apply the patch
-        before = {k: getattr(host, k) for k in patch.keys()}
-        for k, v in patch.items():
-            setattr(host, k, v)
+    # New audit entry — intentionally NOT reversible
+    log_event(
+        db, event.pid, getattr(user, "username", None),
+        "audit", "timeline_undo",
+        f"Reverted {len(applied)} change(s) from event {event.id}",
+        {
+            "source_event_id": event.id, "undo_type": undo_type,
+            "operations_applied": len(applied),
+            "applied": applied[:50],  # cap echo in audit meta
+        },
+    )
+    db.commit()
+    bcast(event.pid, "timeline", "update", schemas.TimelineEvent.model_validate(event).model_dump())
 
-        # Mark the original event as consumed so it can't be replayed
-        meta["undone_at"] = _now_str()
-        meta["undone_by"] = getattr(user, "username", "") or ""
-        event.meta = meta
-
-        # New audit entry for the undo itself — intentionally NOT reversible
-        log_event(
-            db, event.pid, getattr(user, "username", None),
-            "audit", "timeline_undo",
-            f"Undid host status change on {host.ip or host.id}",
-            {
-                "source_event_id": event.id, "entity": entity,
-                "target_id": target_id, "applied_patch": patch, "before": before,
-            },
-        )
-        db.commit()
-        db.refresh(host)
-
-        # Broadcast updated entity
-        bcast(event.pid, "host", "update", schemas.Host.model_validate(host).model_dump())
-        bcast(event.pid, "timeline", "update", schemas.TimelineEvent.model_validate(event).model_dump())
-
-        return {"ok": True, "entity": entity, "id": target_id, "patch": patch}
-
-    raise HTTPException(400, f"Undo for entity {entity!r} reached the catch-all branch")
+    return {"ok": True, "undo_type": undo_type, "operations_applied": len(applied)}
 
 
 def _now_str() -> str:
