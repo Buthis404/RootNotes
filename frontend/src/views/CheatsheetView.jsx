@@ -1,16 +1,7 @@
-import { useState, useMemo } from 'react';
+import PropTypes from 'prop-types';
+import { useEffect, useState, useMemo } from 'react';
 import Icon from '../components/Icon.jsx';
-import { SNIPPETS } from '../constants.js';
-
-const CUSTOM_KEY = 'rt_custom_snippets_v1';
-
-function loadCustom() {
-  try { return JSON.parse(localStorage.getItem(CUSTOM_KEY) || '[]'); } catch { return []; }
-}
-
-function saveCustom(items) {
-  localStorage.setItem(CUSTOM_KEY, JSON.stringify(items));
-}
+import { api } from '../api.js';
 
 function extractVars(cmd) {
   const matches = cmd.match(/\{\{([A-Z_]+)\}\}/g) || [];
@@ -52,17 +43,94 @@ function applyCredToVars(cred, vars, setVals) {
   const updates = {};
   for (const v of vars) {
     const up = v.toUpperCase();
-    if (up.includes('USER')) updates[v] = cred.username;
-    else if (up.includes('PASS') || up.includes('SECRET') || up.includes('CRED')) updates[v] = cred.secret;
-    else if (up.includes('HASH') || up.includes('NT') || up.includes('LM')) updates[v] = cred.secret;
+    if (up.includes('USER')) { updates[v] = cred.username; }
+    else if (up.includes('PASS') || up.includes('SECRET') || up.includes('CRED')) { updates[v] = cred.secret; }
+    else if (up.includes('HASH') || up.includes('NT') || up.includes('LM')) { updates[v] = cred.secret; }
   }
   if (Object.keys(updates).length) setVals(prev => ({ ...prev, ...updates }));
 }
 
-function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
+function isWindowsHost(host) {
+  return host?.os === 'Windows' || String(host?.os || '').toLowerCase().includes('windows');
+}
+
+function _snippetText(snippet) {
+  return `${snippet.title || ''} ${snippet.category || ''} ${(snippet.tags || []).join(' ')} ${snippet.command || ''}`.toLowerCase();
+}
+
+function _scoreHostAdRelevance(host, snippet, vars) {
+  const domain = String(host.domain || '').trim();
+  const tags = new Set((host.tags || []).map(t => String(t).toLowerCase()));
+  const st = _snippetText(snippet);
+  let score = 0;
+  if (vars.some(v => ['DOMAIN', 'DC', 'DC_IP', 'CA', 'CA_IP'].includes(v.toUpperCase()))) score += domain ? 15 : 0;
+  if (st.includes('ad') || st.includes('kerberos') || st.includes('certipy') || st.includes('ldap')) score += domain ? 12 : 0;
+  if (tags.has('domain-controller') || tags.has('dc')) score += 10;
+  return score;
+}
+
+function _scoreHostPortRelevance(host, snippetText) {
+  const tags = (host.tags || []).map(t => String(t).toLowerCase());
+  const ports = host.ports || [];
+  let score = 0;
+  if (snippetText.includes('rdp')) score += tags.includes('workstation') || ports.includes('3389') ? 8 : 0;
+  if (snippetText.includes('ssh')) score += ports.includes('22') ? 8 : 0;
+  if (snippetText.includes('smb') || snippetText.includes('ntlm')) score += ports.includes('445') ? 8 : 0;
+  if (snippetText.includes('http') || snippetText.includes('web')) score += ports.some(p => ['80', '443', '8080', '8443'].includes(String(p))) ? 8 : 0;
+  return score;
+}
+
+function scoreHostForSnippet(host, snippet, vars) {
+  const domain = String(host.domain || '').trim();
+  const hostText = `${host.ip || ''} ${host.hostname || ''} ${domain} ${(host.services || []).join(' ')} ${(host.tags || []).join(' ')}`.toLowerCase();
+  const st = _snippetText(snippet);
+  let score = _scoreHostAdRelevance(host, snippet, vars);
+  score += _scoreHostPortRelevance(host, st);
+  if (isWindowsHost(host)) score += 2;
+  if (hostText.includes('dc')) score += 2;
+  return score;
+}
+
+function _scoreCredHostMatch(cred, selectedHost) {
+  if (!selectedHost) return 0;
+  let score = 0;
+  if ((cred.host_ids || []).includes(selectedHost.id) || cred.host === selectedHost.ip || cred.host === selectedHost.hostname) score += 10;
+  if (selectedHost.domain && cred.is_domain) score += 6;
+  return score;
+}
+
+function _scoreCredTypeMatch(cred, vars) {
+  let score = 0;
+  if (vars.some(v => ['HASH', 'NT', 'LM', 'NTLM'].some(k => v.toUpperCase().includes(k)))) score += ['hash', 'ntlm'].includes(cred.type) ? 8 : 0;
+  if (vars.some(v => ['PASS', 'PASSWORD', 'SECRET'].some(k => v.toUpperCase().includes(k)))) score += ['hash', 'ntlm'].includes(cred.type) ? 0 : 5;
+  return score;
+}
+
+function scoreCredForSnippet(cred, snippet, selectedHost, vars) {
+  let score = 0;
+  const st = _snippetText(snippet);
+  if (cred.secret) score += 8;
+  if (cred.cracked) score += 4;
+  if (cred.is_domain) score += 5;
+  score += _scoreCredHostMatch(cred, selectedHost);
+  if (st.includes('kerberos') || st.includes('ldap') || st.includes('certipy') || st.includes('ad')) score += cred.is_domain ? 6 : 0;
+  score += _scoreCredTypeMatch(cred, vars);
+  return score;
+}
+
+function VarModal({ snippet, accent, onClose, hosts = [], creds = [], selectedProject }) {
   const vars = useMemo(() => extractVars(snippet.command), [snippet.command]);
   const [vals, setVals] = useState({});
   const [copied, setCopied] = useState(false);
+  const [selectedHostId, setSelectedHostId] = useState('');
+  const [selectedCredId, setSelectedCredId] = useState('');
+  const [moduleEnabled, setModuleEnabled] = useState(false);
+  const [availableTargets, setAvailableTargets] = useState({ project_hosts: [], global_targets: [] });
+  const [execMode, setExecMode] = useState('auto');
+  const [attackerHostId, setAttackerHostId] = useState('');
+  const [attackerCredId, setAttackerCredId] = useState('');
+  const [globalTargetId, setGlobalTargetId] = useState('');
+  const [execState, setExecState] = useState({ running: false, error: '', result: null });
   const result = fillVars(snippet.command, vals);
 
   const hasHostVars = vars.some(v => varHint(v) === 'host');
@@ -76,6 +144,90 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
   };
 
   const sel = { background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 4, padding: '5px 8px', color: '#c8cdd6', fontSize: 11, fontFamily: 'JetBrains Mono', outline: 'none', width: '100%', cursor: 'pointer' };
+
+  const attackerHosts = useMemo(
+    () => hosts.filter(h => h.is_attacker || String(h.role || '').toLowerCase() === 'attacker'),
+    [hosts],
+  );
+
+  const projectAttackerOptions = useMemo(
+    () => availableTargets.project_hosts || [],
+    [availableTargets],
+  );
+
+  const globalAttackerOptions = useMemo(
+    () => availableTargets.global_targets || [],
+    [availableTargets],
+  );
+
+  const attackerCreds = useMemo(() => {
+    const selectedAttacker = attackerHosts.find(h => h.id === attackerHostId) || attackerHosts[0];
+    if (!selectedAttacker) return [];
+    return creds.filter(c => {
+      const matchesHost = (c.host_ids || []).includes(selectedAttacker.id) || c.host === selectedAttacker.ip || c.host === selectedAttacker.hostname;
+      const supportedType = ['plain', 'key'].includes(c.type);
+      const looksSsh = !c.service || String(c.service).toLowerCase() === 'ssh' || c.type === 'key';
+      return matchesHost && supportedType && looksSsh && !!c.secret;
+    });
+  }, [creds, attackerHosts, attackerHostId]);
+
+  useEffect(() => {
+    const bestHost = hosts.length ? [...hosts].sort((a, b) => scoreHostForSnippet(b, snippet, vars) - scoreHostForSnippet(a, snippet, vars))[0] : null;
+    if (bestHost && scoreHostForSnippet(bestHost, snippet, vars) > 0) {
+      setSelectedHostId(bestHost.id);
+      applyHostToVars(bestHost, vars, setVals);
+    }
+
+    const bestCred = creds.length ? [...creds].sort((a, b) => scoreCredForSnippet(b, snippet, bestHost, vars) - scoreCredForSnippet(a, snippet, bestHost, vars))[0] : null;
+    if (bestCred && scoreCredForSnippet(bestCred, snippet, bestHost, vars) > 0) {
+      setSelectedCredId(bestCred.id);
+      applyCredToVars(bestCred, vars, setVals);
+    }
+  }, [snippet, hosts, creds, vars]);
+
+  useEffect(() => {
+    api.listModules().then(({ modules }) => {
+      const mod = (modules || []).find(m => m.name === 'attacker_ssh');
+      setModuleEnabled(!!mod?.enabled);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    api.listAttackerExecutionTargets(selectedProject).then(setAvailableTargets).catch(() => {});
+  }, [selectedProject]);
+
+  useEffect(() => {
+    if (!attackerHostId && projectAttackerOptions[0]) setAttackerHostId(projectAttackerOptions[0].id);
+  }, [projectAttackerOptions, attackerHostId]);
+
+  useEffect(() => {
+    if (!globalTargetId && globalAttackerOptions[0]) setGlobalTargetId(globalAttackerOptions[0].id);
+  }, [globalAttackerOptions, globalTargetId]);
+
+  useEffect(() => {
+    if (!attackerCredId && attackerCreds[0]) setAttackerCredId(attackerCreds[0].id);
+    if (attackerCredId && !attackerCreds.some(c => c.id === attackerCredId)) setAttackerCredId('');
+  }, [attackerCreds, attackerCredId]);
+
+  const execute = async () => {
+    setExecState({ running: true, error: '', result: null });
+    try {
+      const data = await api.executeAttackerCommand(selectedProject, {
+        command: result,
+        snippet_title: snippet.title,
+        host_id: attackerHostId || null,
+        cred_id: attackerCredId || null,
+        target_id: globalTargetId || null,
+        execution_mode: execMode,
+        timeout_seconds: 45,
+        activity_type: 'postex',
+      });
+      setExecState({ running: false, error: '', result: data });
+    } catch (e) {
+      setExecState({ running: false, error: e.message || 'Execution failed', result: null });
+    }
+  };
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#000000bb', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}>
@@ -107,7 +259,8 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
               {hasHostVars && hosts.length > 0 && (
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Target host</div>
-                  <select style={sel} onChange={e => {
+                  <select style={sel} value={selectedHostId} onChange={e => {
+                    setSelectedHostId(e.target.value);
                     const h = hosts.find(h => h.id === e.target.value);
                     if (h) applyHostToVars(h, vars, setVals);
                   }}>
@@ -119,7 +272,8 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
               {hasCredVars && creds.length > 0 && (
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div style={{ fontSize: 9, color: '#404550', marginBottom: 4 }}>Credentials</div>
-                  <select style={sel} onChange={e => {
+                  <select style={sel} value={selectedCredId} onChange={e => {
+                    setSelectedCredId(e.target.value);
                     const c = creds.find(c => c.id === e.target.value);
                     if (c) applyCredToVars(c, vars, setVals);
                   }}>
@@ -153,11 +307,52 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
           <pre style={{ background: '#07080b', border: '1px solid #1e2029', borderRadius: 6, padding: '14px 16px', fontFamily: 'JetBrains Mono', fontSize: 12, color: '#c8cdd6', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>
             {result.split(/(\{\{[A-Z_]+\}\})/g).map((part, i) =>
               part.match(/^\{\{[A-Z_]+\}\}$/)
-                ? <span key={i} style={{ color: accent, background: accent + '22', borderRadius: 2, padding: '0 2px' }}>{part}</span>
-                : <span key={i}>{part}</span>
+                ? <span key={`var-${part}`} style={{ color: accent, background: accent + '22', borderRadius: 2, padding: '0 2px' }}>{part}</span>
+                : <span key={`txt-${part}`}>{part}</span>
             )}
           </pre>
         </div>
+
+        {moduleEnabled && selectedProject && (
+          <div style={{ marginBottom: 16, padding: '12px 14px', background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8 }}>
+            <div style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 10 }}>Exec via attacker</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <select style={sel} value={execMode} onChange={e => setExecMode(e.target.value)}>
+                <option value="auto">auto</option>
+                <option value="project">project</option>
+                <option value="global">global</option>
+              </select>
+              <select style={sel} value={attackerHostId} onChange={e => setAttackerHostId(e.target.value)} disabled={execMode === 'global'}>
+                <option value="">Attacker host...</option>
+                {projectAttackerOptions.map(h => <option key={h.id} value={h.id}>{h.name || h.host || h.id}</option>)}
+              </select>
+              {execMode === 'global'
+                ? <select style={sel} value={globalTargetId} onChange={e => setGlobalTargetId(e.target.value)}>
+                    <option value="">Global target...</option>
+                    {globalAttackerOptions.map(t => <option key={t.id} value={t.id}>{t.name} ({t.host})</option>)}
+                  </select>
+                : <select style={sel} value={attackerCredId} onChange={e => setAttackerCredId(e.target.value)} disabled={execMode !== 'project'}>
+                    <option value="">SSH credential...</option>
+                    {attackerCreds.map(c => <option key={c.id} value={c.id}>{c.username} [{c.type}]</option>)}
+                  </select>}
+            </div>
+            {!projectAttackerOptions.length && execMode !== 'global' && <div style={{ fontSize: 10, color: '#f09a3a', marginBottom: 8 }}>No attacker host is linked to this project. Global mode is still available.</div>}
+            {!globalAttackerOptions.length && execMode === 'global' && <div style={{ fontSize: 10, color: '#f09a3a', marginBottom: 8 }}>No global attacker target is assigned to this project.</div>}
+            {execState.error && <div style={{ fontSize: 10, color: '#cc2233', whiteSpace: 'pre-wrap', marginBottom: 8 }}>{execState.error}</div>}
+            {execState.result && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 10, color: execState.result.ok ? '#39d353' : '#f09a3a', fontFamily: 'JetBrains Mono', marginBottom: 6 }}>
+                  exit={execState.result.exit_code} · {execState.result.used_global_fallback ? 'global fallback' : 'project credential'}
+                </div>
+                <pre style={{ background: '#07080b', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px', fontFamily: 'JetBrains Mono', fontSize: 11, color: '#c8cdd6', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0 }}>{`STDOUT:\n${execState.result.stdout || ''}\n\nSTDERR:\n${execState.result.stderr || ''}`}</pre>
+              </div>
+            )}
+            <button onClick={execute} disabled={execState.running || (execMode !== 'global' && !attackerHostId) || (execMode === 'global' && !globalTargetId)}
+              style={{ background: execState.running ? '#1a1c22' : accent, border: 'none', borderRadius: 5, padding: '7px 16px', cursor: execState.running ? 'wait' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+              {execState.running ? 'Executing...' : 'Exec'}
+            </button>
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <button onClick={onClose} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Close</button>
@@ -172,16 +367,33 @@ function VarModal({ snippet, accent, onClose, hosts = [], creds = [] }) {
   );
 }
 
-function AddCustomModal({ accent, onAdd, onClose }) {
-  const [form, setForm] = useState({ title: '', category: 'Misc', command: '' });
+function AddCustomModal({ accent, item = null, onAdd, onClose }) {
+  const [form, setForm] = useState({ title: item?.title || '', category: item?.category || 'Misc', command: item?.command || '', tags: Array.isArray(item?.tags) ? item.tags.join(', ') : '', opsec: item?.opsec || '' });
+  const [state, setState] = useState({ saving: false, type: '', message: '' });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const inp = { background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#c8cdd6', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', width: '100%' };
+
+  const handleSave = async () => {
+    if (!form.title || !form.command) {
+      setState({ saving: false, type: 'error', message: 'Title and command are required' });
+      return;
+    }
+    setState({ saving: true, type: '', message: '' });
+    try {
+      await onAdd({ ...form, tags: form.tags.split(',').map(t => t.trim()).filter(Boolean) });
+      setState({ saving: false, type: 'success', message: item ? 'Snippet updated' : 'Snippet saved' });
+      setTimeout(() => onClose(), 300);
+    } catch (e) {
+      setState({ saving: false, type: 'error', message: e.message || 'Failed to save snippet' });
+    }
+  };
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#000000bb', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}>
       <div style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 12, padding: '28px 32px', width: 480, boxShadow: '0 24px 64px #00000099' }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 20 }}>Add snippet</div>
-        {[['Title', 'title', 'input'], ['Category', 'category', 'input'], ['Command', 'command', 'textarea']].map(([lbl, key, type]) => (
+        <div style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk', marginBottom: 20 }}>{item ? 'Edit snippet' : 'Add snippet'}</div>
+        {state.message && <div style={{ marginBottom: 14, fontSize: 10, color: state.type === 'error' ? '#cc2233' : '#39d353', fontFamily: 'JetBrains Mono' }}>{state.message}</div>}
+        {[['Title', 'title', 'input'], ['Category', 'category', 'input'], ['Tags (comma)', 'tags', 'input'], ['OPSEC note', 'opsec', 'textarea'], ['Command', 'command', 'textarea']].map(([lbl, key, type]) => (
           <div key={key} style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 9, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 5 }}>{lbl}</div>
             {type === 'textarea'
@@ -192,9 +404,9 @@ function AddCustomModal({ accent, onAdd, onClose }) {
         ))}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
           <button onClick={onClose} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 16px', cursor: 'pointer', color: '#606570', fontSize: 11, fontFamily: 'JetBrains Mono' }}>Cancel</button>
-          <button onClick={() => { if (form.title && form.command) { onAdd(form); onClose(); } }}
-            style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 18px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono' }}>
-            Save
+          <button onClick={handleSave}
+            style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 18px', cursor: state.saving ? 'wait' : 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', opacity: state.saving ? 0.7 : 1 }}>
+            {state.saving ? 'Saving...' : 'Save'}
           </button>
         </div>
       </div>
@@ -207,14 +419,20 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
   const [selectedCat, setSelectedCat] = useState(null);
   const [modalSnippet, setModalSnippet] = useState(null);
   const [showAddCustom, setShowAddCustom] = useState(false);
-  const [custom, setCustom] = useState(loadCustom);
+  const [editingCustom, setEditingCustom] = useState(null);
+  const [snippets, setSnippets] = useState([]);
+  const [importing, setImporting] = useState(false);
 
-  const allSnippets = [...SNIPPETS, ...custom.map(s => ({ ...s, id: `custom-${s.title}`, isCustom: true }))];
+  useEffect(() => {
+    api.listSnippets().then(items => setSnippets(items.map(s => ({ ...s, isCustom: !!s.is_custom || !!s.isCustom })))).catch(() => {});
+  }, []);
+
+  const allSnippets = snippets;
 
   const categories = useMemo(() => {
     const cats = [...new Set(allSnippets.map(s => s.category))];
     return cats;
-  }, [custom]);
+  }, [allSnippets]);
 
   const filtered = useMemo(() => {
     let list = selectedCat ? allSnippets.filter(s => s.category === selectedCat) : allSnippets;
@@ -223,24 +441,53 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
       list = list.filter(s => s.title.toLowerCase().includes(q) || s.command.toLowerCase().includes(q) || s.tags?.some(t => t.includes(q)) || s.category.toLowerCase().includes(q));
     }
     return list;
-  }, [search, selectedCat, custom]);
+  }, [search, selectedCat, allSnippets]);
 
   const grouped = useMemo(() => {
     const g = {};
-    for (const s of filtered) (g[s.category] = g[s.category] || []).push(s);
+    for (const s of filtered) {
+      if (!g[s.category]) g[s.category] = [];
+      g[s.category].push(s);
+    }
     return g;
   }, [filtered]);
 
-  const addCustom = (item) => {
-    const updated = [...custom, item];
-    setCustom(updated);
-    saveCustom(updated);
+  const addCustom = async (item) => {
+    const created = await api.createCustomSnippet(item);
+    setSnippets(prev => [{ ...created, isCustom: true }, ...prev]);
   };
 
-  const deleteCustom = (title) => {
-    const updated = custom.filter(s => s.title !== title);
-    setCustom(updated);
-    saveCustom(updated);
+  const updateCustom = async (item) => {
+    if (!editingCustom) return;
+    const updated = await api.updateCustomSnippet(editingCustom.id, item);
+    setSnippets(prev => prev.map(s => s.id === editingCustom.id ? { ...updated, isCustom: true } : s));
+    setEditingCustom(null);
+  };
+
+  const deleteCustom = async (id) => {
+    await api.deleteCustomSnippet(id);
+    setSnippets(prev => prev.filter(s => s.id !== id));
+  };
+
+  const exportSnippets = async () => {
+    const blob = await api.exportSnippets();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'snippets.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importSnippets = async (file) => {
+    setImporting(true);
+    try {
+      await api.importSnippets(file);
+      const items = await api.listSnippets();
+      setSnippets(items.map(s => ({ ...s, isCustom: !!s.is_custom || !!s.isCustom })));
+    } finally {
+      setImporting(false);
+    }
   };
 
   const quickCopy = (e, cmd) => {
@@ -252,14 +499,16 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
       {modalSnippet && <VarModal snippet={modalSnippet} accent={accent} onClose={() => setModalSnippet(null)}
         hosts={(hosts || []).filter(h => h.pid === selectedProject)}
-        creds={(creds || []).filter(c => c.pid === selectedProject)} />}
+        creds={(creds || []).filter(c => c.pid === selectedProject)}
+        selectedProject={selectedProject} />}
       {showAddCustom && <AddCustomModal accent={accent} onAdd={addCustom} onClose={() => setShowAddCustom(false)} />}
+      {editingCustom && <AddCustomModal accent={accent} item={editingCustom} onAdd={updateCustom} onClose={() => setEditingCustom(null)} />}
 
       {/* Category sidebar */}
       <div style={{ width: 160, background: '#0a0c10', borderRight: '1px solid #1e2029', overflowY: 'auto', flexShrink: 0 }}>
         <div style={{ padding: '12px 12px 6px', fontSize: 9, color: '#353840', textTransform: 'uppercase', letterSpacing: '0.14em' }}>Categories</div>
         <button onClick={() => setSelectedCat(null)}
-          style={{ width: '100%', padding: '8px 12px', background: !selectedCat ? `${accent}18` : 'transparent', borderLeft: !selectedCat ? `2px solid ${accent}` : '2px solid transparent', border: 'none', cursor: 'pointer', textAlign: 'left', color: !selectedCat ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+          style={{ width: '100%', padding: '8px 12px', background: selectedCat ? 'transparent' : `${accent}18`, borderLeft: selectedCat ? '2px solid transparent' : `2px solid ${accent}`, border: 'none', cursor: 'pointer', textAlign: 'left', color: selectedCat ? '#606570' : accent, fontSize: 10, fontFamily: 'JetBrains Mono' }}>
           All ({allSnippets.length})
         </button>
         {categories.map(cat => {
@@ -284,6 +533,14 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search commands..."
               style={{ width: '100%', background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 6, padding: '7px 10px 7px 32px', color: '#c8cdd6', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none' }} />
           </div>
+          <label style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 14px', cursor: importing ? 'wait' : 'pointer', color: '#808590', fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, opacity: importing ? 0.7 : 1 }}>
+            <Icon name="export" size={11} color="currentColor" /> {importing ? 'Importing...' : 'Import'}
+            <input type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && importSnippets(e.target.files[0])} disabled={importing} />
+          </label>
+          <button onClick={exportSnippets}
+            style={{ background: 'transparent', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 14px', cursor: 'pointer', color: '#808590', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+            <Icon name="export" size={11} color="currentColor" /> Export
+          </button>
           <button onClick={() => setShowAddCustom(true)}
             style={{ background: accent, border: 'none', borderRadius: 5, padding: '7px 14px', cursor: 'pointer', color: '#fff', fontSize: 11, fontWeight: 600, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
             <Icon name="plus" size={11} color="#fff" /> Custom snippet
@@ -303,12 +560,24 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
                 {snips.map(s => {
                   const vars = extractVars(s.command);
                   return (
-                    <div key={s.id} onClick={() => setModalSnippet(s)}
-                      style={{ background: s.opsec ? '#1a0d0a' : '#0d0f14', border: `1px solid ${s.opsec ? '#cc223333' : '#1e2029'}`, borderRadius: 8, padding: '10px 14px', cursor: 'pointer', transition: 'border-color .12s', position: 'relative' }}
+                    <button type="button" key={s.id} onClick={() => setModalSnippet(s)} onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setModalSnippet(s);
+                      }
+                    }}
+                      style={{ background: s.opsec ? '#1a0d0a' : '#0d0f14', border: `1px solid ${s.opsec ? '#cc223333' : '#1e2029'}`, borderRadius: 8, padding: '10px 14px', cursor: 'pointer', transition: 'border-color .12s', position: 'relative', width: '100%', textAlign: 'left', outline: 'none', color: 'inherit', font: 'inherit' }}
                       onMouseEnter={e => e.currentTarget.style.borderColor = s.opsec ? '#cc223366' : accent + '66'}
                       onMouseLeave={e => e.currentTarget.style.borderColor = s.opsec ? '#cc223333' : '#1e2029'}>
                       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 6, gap: 6 }}>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', lineHeight: 1.3 }}>{s.title}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: '#e0e4ec', fontFamily: 'Space Grotesk', lineHeight: 1.3 }}>{s.title}</span>
+                            {s.isCustom && (
+                              <span style={{ fontSize: 8, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>custom</span>
+                            )}
+                          </div>
+                        </div>
                         <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center' }}>
                           {s.opsec && (
                             <span title={`OPSEC: ${s.opsec}`} style={{ cursor: 'help', display: 'flex' }}>
@@ -316,13 +585,19 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
                             </span>
                           )}
                           {s.isCustom && (
-                            <button onClick={e => { e.stopPropagation(); deleteCustom(s.title); }}
+                            <button onClick={e => { e.stopPropagation(); setEditingCustom(s); }}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: accent, display: 'flex' }}>
+                              <Icon name="edit" size={11} color="currentColor" />
+                            </button>
+                          )}
+                          {s.isCustom && (
+                            <button onClick={e => { e.stopPropagation(); deleteCustom(s.id); }}
                               style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#cc2233', display: 'flex' }}>
                               <Icon name="trash" size={11} color="currentColor" />
                             </button>
                           )}
                           <button onClick={e => quickCopy(e, s.command)}
-                            style={{ background: 'none', border: `1px solid #2a2d35`, borderRadius: 3, cursor: 'pointer', padding: '2px 6px', fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 3 }}>
+                            style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 3, cursor: 'pointer', padding: '2px 6px', fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 3 }}>
                             <Icon name="copy" size={9} color="#505560" /> copy
                           </button>
                         </div>
@@ -339,10 +614,7 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
                           ))}
                         </div>
                       )}
-                      {s.isCustom && (
-                        <span style={{ position: 'absolute', top: 8, right: 8, fontSize: 8, color: '#39d353', background: '#39d35318', border: '1px solid #39d35333', borderRadius: 3, padding: '1px 5px', fontFamily: 'JetBrains Mono' }}>custom</span>
-                      )}
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -359,3 +631,26 @@ export default function CheatsheetView({ accent, hosts = [], creds = [], selecte
     </div>
   );
 }
+
+VarModal.propTypes = {
+  snippet: PropTypes.object,
+  accent: PropTypes.string,
+  onClose: PropTypes.func,
+  hosts: PropTypes.array,
+  creds: PropTypes.array,
+  selectedProject: PropTypes.object,
+};
+
+AddCustomModal.propTypes = {
+  accent: PropTypes.string,
+  item: PropTypes.object,
+  onAdd: PropTypes.func,
+  onClose: PropTypes.func,
+};
+
+CheatsheetView.propTypes = {
+  accent: PropTypes.string,
+  hosts: PropTypes.array,
+  creds: PropTypes.array,
+  selectedProject: PropTypes.object,
+};

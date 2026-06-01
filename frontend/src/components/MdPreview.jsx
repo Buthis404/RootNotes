@@ -1,7 +1,10 @@
 import { useState, useCallback } from 'react';
+import PropTypes from 'prop-types';
+import DOMPurify from 'dompurify';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js/lib/core';
+import { downloadUrl } from '../api.js';
 
 // Languages for syntax highlighting
 import langBash from 'highlight.js/lib/languages/bash';
@@ -94,15 +97,17 @@ function LightboxImage({ src, alt }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <img
+      <button type="button" onClick={() => setOpen(true)} style={{ background: 'transparent', border: 'none', padding: 0, display: 'block' }}>
+        <img
         src={src} alt={alt || ''}
-        onClick={() => setOpen(true)}
         onError={e => { e.target.style.border = '1px solid #cc2233'; e.target.title = 'Failed to load'; }}
         style={{ maxWidth: '100%', maxHeight: 520, objectFit: 'contain', borderRadius: 8, border: '1px solid #2a2d35', display: 'block', margin: '10px 0', cursor: 'zoom-in', background: '#0d0f14' }}
-      />
+        />
+      </button>
       {alt && <div style={{ fontSize: 10, color: '#505560', marginTop: -6, marginBottom: 10, fontStyle: 'italic' }}>{alt}</div>}
       {open && (
-        <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, background: '#000000cc', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, cursor: 'zoom-out', backdropFilter: 'blur(4px)' }}>
+        <div style={{ position: 'fixed', inset: 0, background: '#000000cc', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, cursor: 'zoom-out', backdropFilter: 'blur(4px)' }}>
+          <button type="button" aria-label="Close image preview" onClick={() => setOpen(false)} style={{ position: 'absolute', inset: 0, background: 'transparent', border: 'none', cursor: 'zoom-out' }} />
           <img src={src} alt={alt || ''} style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain', borderRadius: 8, boxShadow: '0 0 60px #00000088' }} />
         </div>
       )}
@@ -114,6 +119,7 @@ function VideoPlayer({ src, children }) {
   return (
     <div style={{ margin: '10px 0' }}>
       <video controls src={src} style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid #2a2d35', display: 'block', background: '#000' }}>
+        <track kind="captions" label="No captions available" />
         {children}
         Your browser does not support video. <a href={src} target="_blank" rel="noreferrer">Download</a>
       </video>
@@ -124,7 +130,9 @@ function VideoPlayer({ src, children }) {
 function AudioPlayer({ src }) {
   return (
     <div style={{ margin: '10px 0', background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 8, padding: '10px 14px' }}>
-      <audio controls src={src} style={{ width: '100%', height: 36 }} />
+      <audio controls src={src} style={{ width: '100%', height: 36 }}>
+        <track kind="captions" label="No captions available" />
+      </audio>
     </div>
   );
 }
@@ -152,10 +160,11 @@ function FileLink({ href, children, accent }) {
   const isCode = CODE_EXT.has(ext);
   const icons = { zip: '🗜', tar: '🗜', gz: '🗜', '7z': '🗜', rar: '🗜', exe: '⚙', dll: '⚙', bin: '⚙', iso: '💿', txt: '📝', doc: '📝', docx: '📝', xls: '📊', xlsx: '📊', csv: '📊', pptx: '📊' };
   const icon = isCode ? '📋' : (icons[ext] || '📎');
-  const label = typeof children === 'string' ? children : (Array.isArray(children) ? children.join('') : String(children || ext));
+  const childrenLabel = Array.isArray(children) ? children.join('') : String(children || ext);
+  const label = typeof children === 'string' ? children : childrenLabel;
   return (
     <a
-      href={href} download
+      href={downloadUrl(href)} download
       style={{ display: 'inline-flex', alignItems: 'center', gap: 7, background: '#0d0f14', border: '1px solid #2a2d35', borderRadius: 6, padding: '5px 12px', color: accent || '#6fc8f0', fontSize: 11, fontFamily: 'JetBrains Mono', textDecoration: 'none', margin: '4px 0', transition: 'border-color .12s' }}
       onMouseEnter={e => e.currentTarget.style.borderColor = accent || '#6fc8f0'}
       onMouseLeave={e => e.currentTarget.style.borderColor = '#2a2d35'}
@@ -200,7 +209,7 @@ function buildComponents(accent) {
           <CopyBtn text={code} accent={accent} />
           <pre style={{ background: '#0d0f14', border: '1px solid #1e2029', borderRadius: 8, padding: lang ? '32px 16px 14px' : '14px 16px', overflowX: 'auto', margin: 0, lineHeight: 1.65 }}>
             <code
-              dangerouslySetInnerHTML={{ __html: highlighted }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(highlighted) }}
               style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: '#c8cdd6' }}
             />
           </pre>
@@ -220,8 +229,8 @@ function buildComponents(accent) {
       if (VIDEO_EXT.has(ext)) return <VideoPlayer src={href}>{children}</VideoPlayer>;
       if (AUDIO_EXT.has(ext)) return <AudioPlayer src={href} />;
       if (ext === 'pdf') return <PdfEmbed src={href} text={typeof children === 'string' ? children : ''} />;
-      // Attachment file (from /uploads/...)
-      if (href && href.startsWith('/uploads/')) return <FileLink href={href} accent={accent}>{children}</FileLink>;
+      // Attachment file (from /api/uploads/... or legacy /uploads/...)
+      if (href && (href.startsWith('/api/uploads/') || href.startsWith('/uploads/'))) return <FileLink href={href} accent={accent}>{children}</FileLink>;
       // Regular link
       return (
         <a href={href} target="_blank" rel="noreferrer" style={{ color: accent, textDecoration: 'none', borderBottom: `1px solid ${accent}55`, paddingBottom: 1, transition: 'border-color .1s' }}
@@ -348,3 +357,38 @@ export default function MdPreview({ content = '', accent = '#cc2233' }) {
     </div>
   );
 }
+
+CopyBtn.propTypes = {
+  text: PropTypes.string,
+  accent: PropTypes.string,
+};
+
+LightboxImage.propTypes = {
+  src: PropTypes.string,
+  alt: PropTypes.string,
+};
+
+VideoPlayer.propTypes = {
+  src: PropTypes.string,
+  children: PropTypes.node,
+};
+
+AudioPlayer.propTypes = {
+  src: PropTypes.string,
+};
+
+PdfEmbed.propTypes = {
+  src: PropTypes.string,
+  text: PropTypes.string,
+};
+
+FileLink.propTypes = {
+  href: PropTypes.string,
+  children: PropTypes.node,
+  accent: PropTypes.string,
+};
+
+MdPreview.propTypes = {
+  content: PropTypes.string,
+  accent: PropTypes.string,
+};

@@ -1,9 +1,6 @@
+import PropTypes from 'prop-types';
+
 export default function Icon({ name, size = 14, color = 'currentColor', style = {} }) {
-  const P = (d, extra = {}) => (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.5" {...extra}>
-      <path d={d}/>
-    </svg>
-  );
   const icons = {
     projects: <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><rect x="1.5" y="1.5" width="6" height="6" rx="1.5"/><rect x="8.5" y="1.5" width="6" height="6" rx="1.5"/><rect x="1.5" y="8.5" width="6" height="6" rx="1.5"/><rect x="8.5" y="8.5" width="6" height="6" rx="1.5"/></svg>,
     notes:    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.5"><rect x="2" y="1.5" width="12" height="13" rx="1.5"/><line x1="5" y1="5.5" x2="11" y2="5.5"/><line x1="5" y1="8" x2="11" y2="8"/><line x1="5" y1="10.5" x2="8.5" y2="10.5"/></svg>,
@@ -51,6 +48,18 @@ export default function Icon({ name, size = 14, color = 'currentColor', style = 
     loot:       <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><path d="M3 6.5V13a1 1 0 001 1h8a1 1 0 001-1V6.5"/><path d="M1.5 3.5h13v3H1.5z"/><line x1="8" y1="6.5" x2="8" y2="14"/><path d="M5.5 3.5c0-1.5 5-1.5 5 0"/></svg>,
     scope:      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="3"/><line x1="8" y1="1.5" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="14.5"/><line x1="1.5" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="14.5" y2="8"/></svg>,
     package:    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><path d="M8 1.5L1.5 5v6L8 14.5l6.5-3.5V5z"/><line x1="8" y1="1.5" x2="8" y2="14.5"/><line x1="1.5" y1="5" x2="14.5" y2="5"/></svg>,
+    // ── Role / device-type icons ──────────────────────────────────────
+    monitor:    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><rect x="2" y="2" width="12" height="9" rx="1.5"/><line x1="8" y1="11" x2="8" y2="13.5"/><line x1="5" y1="13.5" x2="11" y2="13.5"/></svg>,
+    db:         <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><ellipse cx="8" cy="4.5" rx="5.5" ry="2"/><path d="M2.5 4.5v7c0 1.1 2.46 2 5.5 2s5.5-.9 5.5-2v-7"/><path d="M2.5 8c0 1.1 2.46 2 5.5 2s5.5-.9 5.5-2"/></svg>,
+    jump:       <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><circle cx="3.5" cy="12" r="2"/><circle cx="12.5" cy="4" r="2"/><path d="M5.5 11Q10 11 10 6" strokeDasharray="2 1.5"/><polyline points="8,3.5 10.5,6 7.5,7.5"/></svg>,
+    crown:      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><path d="M2 12 L3 6 L6.5 9.5 L8 4 L9.5 9.5 L13 6 L14 12Z"/><line x1="2" y1="13.5" x2="14" y2="13.5"/></svg>,
+    firewall:   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><path d="M8 1.5L2 5v4c0 3 2.7 5 6 5.5 3.3-.5 6-2.5 6-5.5V5z"/><path d="M6 9 L7.5 6.5 L7.5 9 L9.5 6.5"/></svg>,
+    router:     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/><line x1="8" y1="2" x2="8" y2="5.5"/><line x1="8" y1="10.5" x2="8" y2="14"/><line x1="2" y1="8" x2="5.5" y2="8"/><line x1="10.5" y1="8" x2="14" y2="8"/></svg>,
+    fileserver: <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><rect x="1.5" y="2" width="13" height="4" rx="1.5"/><rect x="1.5" y="10" width="13" height="4" rx="1.5"/><circle cx="4" cy="4" r=".8" fill={color} stroke="none"/><circle cx="4" cy="12" r=".8" fill={color} stroke="none"/><line x1="7" y1="4" x2="12" y2="4" strokeWidth="1"/><line x1="7" y1="12" x2="12" y2="12" strokeWidth="1"/></svg>,
+    external:   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><circle cx="8" cy="8" r="6.5"/><path d="M8 2c-2 2-3 3.5-3 6s1 4 3 6"/><path d="M8 2c2 2 3 3.5 3 6s-1 4-3 6"/><line x1="1.5" y1="8" x2="14.5" y2="8"/><line x1="2" y1="5.5" x2="14" y2="5.5"/><line x1="2" y1="10.5" x2="14" y2="10.5"/></svg>,
+    jobs:       <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><rect x="1.5" y="2" width="9" height="12" rx="1.5"/><line x1="4" y1="5.5" x2="8" y2="5.5"/><line x1="4" y1="8" x2="8" y2="8"/><line x1="4" y1="10.5" x2="6.5" y2="10.5"/><circle cx="12.5" cy="5.5" r="2" fill={color} fillOpacity="0.2"/><polyline points="11.5,5.5 12.5,4.5 13.5,5.5" strokeWidth="1.2"/><line x1="12.5" y1="4.5" x2="12.5" y2="8" strokeWidth="1.2"/></svg>,
+    graph:      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><circle cx="8" cy="2.5" r="1.5"/><circle cx="2.5" cy="13" r="1.5"/><circle cx="13.5" cy="13" r="1.5"/><circle cx="8" cy="8" r="1.5"/><line x1="8" y1="4" x2="8" y2="6.5"/><line x1="3.5" y1="12" x2="6.8" y2="8.8"/><line x1="12.5" y1="12" x2="9.2" y2="8.8"/><polyline points="8,3.5 11,6 13.5,11.5" strokeWidth="1.2"/></svg>,
+    book:       <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth="1.4"><path d="M3 2h7.5a1.5 1.5 0 011.5 1.5v9A1.5 1.5 0 0110.5 14H3V2z"/><line x1="3" y1="2" x2="3" y2="14"/><line x1="5.5" y1="5.5" x2="9.5" y2="5.5"/><line x1="5.5" y1="7.5" x2="9.5" y2="7.5"/><line x1="5.5" y1="9.5" x2="7.5" y2="9.5"/></svg>,
   };
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', ...style }}>
@@ -58,3 +67,10 @@ export default function Icon({ name, size = 14, color = 'currentColor', style = 
     </span>
   );
 }
+
+Icon.propTypes = {
+  name: PropTypes.string,
+  size: PropTypes.number,
+  color: PropTypes.string,
+  style: PropTypes.object,
+};

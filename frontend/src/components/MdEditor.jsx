@@ -1,4 +1,5 @@
 import { useRef, useCallback, useState } from 'react';
+import PropTypes from 'prop-types';
 import Icon from './Icon.jsx';
 import MdPreview from './MdPreview.jsx';
 
@@ -55,6 +56,7 @@ function ToolBtn({ item, onInsert }) {
     </button>
   );
 }
+ToolBtn.propTypes = { item: PropTypes.object, onInsert: PropTypes.func };
 
 function ViewToggle({ mode, setMode }) {
   const opts = [
@@ -70,7 +72,7 @@ function ViewToggle({ mode, setMode }) {
           onClick={() => setMode(o.id)}
           style={{
             background: mode === o.id ? '#1e2029' : 'transparent',
-            border: 'none', borderRight: o.id !== 'preview' ? '1px solid #2a2d35' : 'none',
+            border: 'none', borderRight: o.id === 'preview' ? 'none' : '1px solid #2a2d35',
             padding: '4px 12px', cursor: 'pointer',
             color: mode === o.id ? '#e0e4ec' : '#505560',
             fontSize: 10, fontFamily: 'JetBrains Mono', fontWeight: mode === o.id ? 600 : 400,
@@ -82,6 +84,57 @@ function ViewToggle({ mode, setMode }) {
       ))}
     </div>
   );
+}
+ViewToggle.propTypes = { mode: PropTypes.string, setMode: PropTypes.func };
+
+function handleEnterKey(e, value, insert, onChange) {
+  const ta = e.target;
+  const pos = ta.selectionStart;
+  const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+  const currentLine = value.slice(lineStart, pos);
+  const listMatch = currentLine.match(/^(\s*)([-*]|\d+\.) /);
+  const taskMatch = currentLine.match(/^(\s*)([-*]) \[[ x]\] /);
+  if (taskMatch) {
+    e.preventDefault();
+    insert('\n' + taskMatch[1] + taskMatch[2] + ' [ ] ');
+    return;
+  }
+  if (listMatch) {
+    if (currentLine.trim() === listMatch[0].trim()) {
+      e.preventDefault();
+      onChange(value.slice(0, lineStart) + '\n' + value.slice(pos));
+      requestAnimationFrame(() => { if (ta) { ta.selectionStart = ta.selectionEnd = lineStart + 1; } });
+      return;
+    }
+    e.preventDefault();
+    const next = listMatch[2].match(/\d+/) ? `${Number.parseInt(listMatch[2]) + 1}. ` : listMatch[2] + ' ';
+    insert('\n' + listMatch[1] + next);
+  }
+}
+
+function handleEnterKey(e, value, insert, onChange) {
+  const ta = e.target;
+  const pos = ta.selectionStart;
+  const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+  const currentLine = value.slice(lineStart, pos);
+  const listMatch = currentLine.match(/^(\s*)([-*]|\d+\.) /);
+  const taskMatch = currentLine.match(/^(\s*)([-*]) \[[ x]\] /);
+  if (taskMatch) {
+    e.preventDefault();
+    insert('\n' + taskMatch[1] + taskMatch[2] + ' [ ] ');
+    return;
+  }
+  if (listMatch) {
+    if (currentLine.trim() === listMatch[0].trim()) {
+      e.preventDefault();
+      onChange(value.slice(0, lineStart) + '\n' + value.slice(pos));
+      requestAnimationFrame(() => { if (ta) { ta.selectionStart = ta.selectionEnd = lineStart + 1; } });
+      return;
+    }
+    e.preventDefault();
+    const next = listMatch[2].match(/\d+/) ? `${parseInt(listMatch[2]) + 1}. ` : listMatch[2] + ' ';
+    insert('\n' + listMatch[1] + next);
+  }
 }
 
 export default function MdEditor({ value, onChange, accent, onUpload, uploading, onSave, onCancel, readOnly = false }) {
@@ -102,11 +155,6 @@ export default function MdEditor({ value, onChange, accent, onUpload, uploading,
       const lineStart = value.lastIndexOf('\n', start - 1) + 1;
       newText = value.slice(0, lineStart) + before + value.slice(lineStart);
       newStart = newEnd = start + before.length;
-    } else if (blockMode) {
-      // Wrap selection or insert block
-      newText = value.slice(0, start) + before + sel + after + value.slice(end);
-      newStart = start + before.length;
-      newEnd = newStart + sel.length;
     } else {
       newText = value.slice(0, start) + before + sel + after + value.slice(end);
       newStart = start + before.length;
@@ -128,30 +176,7 @@ export default function MdEditor({ value, onChange, accent, onUpload, uploading,
       insert('  ');
     }
     if (e.key === 'Enter') {
-      // Auto-continue lists
-      const ta = textRef.current;
-      const pos = ta.selectionStart;
-      const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
-      const currentLine = value.slice(lineStart, pos);
-      const listMatch = currentLine.match(/^(\s*)([-*]|\d+\.) /);
-      const taskMatch = currentLine.match(/^(\s*)([-*]) \[[ x]\] /);
-      if (taskMatch) {
-        e.preventDefault();
-        insert('\n' + taskMatch[1] + taskMatch[2] + ' [ ] ');
-        return;
-      }
-      if (listMatch) {
-        // If line is just the bullet, stop
-        if (currentLine.trim() === listMatch[0].trim()) {
-          e.preventDefault();
-          onChange(value.slice(0, lineStart) + '\n' + value.slice(pos));
-          requestAnimationFrame(() => { if (textRef.current) { textRef.current.selectionStart = textRef.current.selectionEnd = lineStart + 1; } });
-          return;
-        }
-        e.preventDefault();
-        const next = listMatch[2].match(/\d+/) ? `${parseInt(listMatch[2]) + 1}. ` : listMatch[2] + ' ';
-        insert('\n' + listMatch[1] + next);
-      }
+      handleEnterKey(e, value, insert, onChange);
     }
     if (e.ctrlKey || e.metaKey) {
       if (e.key === 'b') { e.preventDefault(); insert('**', '**'); }
@@ -184,8 +209,9 @@ export default function MdEditor({ value, onChange, accent, onUpload, uploading,
       <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px' }}>
         <MdPreview content={value} accent={accent} />
       </div>
-    );
-  }
+  );
+}
+MdEditor.propTypes = { value: PropTypes.string, onChange: PropTypes.func, accent: PropTypes.string, onUpload: PropTypes.func, uploading: PropTypes.bool, onSave: PropTypes.func, onCancel: PropTypes.func, readOnly: PropTypes.bool };
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
@@ -195,7 +221,7 @@ export default function MdEditor({ value, onChange, accent, onUpload, uploading,
         borderBottom: '1px solid #1e2029', background: '#080a0e', flexShrink: 0, flexWrap: 'wrap'
       }}>
         {TOOLS.map((group, gi) => (
-          <div key={gi} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <div key={group[0].id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             {gi > 0 && <div style={{ width: 1, height: 16, background: '#2a2d35', margin: '0 4px' }} />}
             {group.map(item => <ToolBtn key={item.id} item={item} onInsert={insert} />)}
           </div>

@@ -1,0 +1,29 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long — black handles this
+    "E402",  # module-level imports after setup code (logging must run before app imports)
+    "B008",  # do not perform function calls in default arguments (FastAPI Depends pattern)
+    "B904",  # raise ... from err — too noisy during migration
+    "B905",  # zip() without strict= — legacy code, not safety-critical
+    "UP042", # StrEnum — keep explicit str+Enum for compat with pydantic
+    "B023",  # function in loop captures loop variable — false positive, fn called same iteration
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

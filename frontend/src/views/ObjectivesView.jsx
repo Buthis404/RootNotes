@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import PropTypes from 'prop-types';
 import Icon from '../components/Icon.jsx';
 import { OBJECTIVE_CATEGORY, OBJECTIVE_STATUS } from '../constants.js';
 
@@ -93,6 +94,15 @@ function ObjectiveForm({ initial, hosts, pid, accent, onSave, onClose }) {
     </div>
   );
 }
+
+ObjectiveForm.propTypes = {
+  initial: PropTypes.object,
+  hosts: PropTypes.array,
+  pid: PropTypes.string,
+  accent: PropTypes.string,
+  onSave: PropTypes.func,
+  onClose: PropTypes.func,
+};
 
 export default function ObjectivesView({ objectives, hosts, onAdd, onUpdate, onDelete, selectedProject, accent, currentUser }) {
   const [form, setForm] = useState(null);
@@ -195,12 +205,12 @@ export default function ObjectivesView({ objectives, hosts, onAdd, onUpdate, onD
       {/* Filters */}
       <div style={{ padding: '10px 24px', borderBottom: '1px solid #1a1c22', background: '#0a0c10', display: 'flex', gap: 6, flexWrap: 'wrap', flexShrink: 0 }}>
         <button onClick={() => setFilterStatus(null)}
-          style={{ background: !filterStatus ? accent + '22' : 'transparent', border: `1px solid ${!filterStatus ? accent + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: !filterStatus ? accent : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+          style={{ background: filterStatus ? 'transparent' : accent + '22', border: `1px solid ${filterStatus ? '#2a2d35' : accent + '66'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: filterStatus ? '#606570' : accent, fontSize: 10, fontFamily: 'JetBrains Mono' }}>
           All
         </button>
         {STATUS_OPTS.map(s => {
           const st = OBJECTIVE_STATUS[s.value];
-          const active = filterStatus === s.value;
+          const active = filterStatus == s.value;
           return (
             <button key={s.value} onClick={() => setFilterStatus(active ? null : s.value)}
               style={{ background: active ? st.color + '22' : 'transparent', border: `1px solid ${active ? st.color + '66' : '#2a2d35'}`, borderRadius: 4, padding: '3px 10px', cursor: 'pointer', color: active ? st.color : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
@@ -210,7 +220,7 @@ export default function ObjectivesView({ objectives, hosts, onAdd, onUpdate, onD
         })}
         <div style={{ width: 1, background: '#2a2d35', margin: '0 4px' }} />
         {CAT_OPTS.map(c => {
-          const active = filterCat === c.value;
+          const active = filterCat == c.value;
           const cat = OBJECTIVE_CATEGORY[c.value];
           return (
             <button key={c.value} onClick={() => setFilterCat(active ? null : c.value)}
@@ -239,7 +249,7 @@ export default function ObjectivesView({ objectives, hosts, onAdd, onUpdate, onD
             const isCaptured = obj.status === 'captured' || obj.status === 'submitted';
 
             return (
-              <div key={obj.id}
+              <article key={obj.id}
                 style={{ background: isCaptured ? `${st.color}0a` : '#0d0f14', border: `1px solid ${isCaptured ? st.color + '44' : '#1e2029'}`, borderRadius: 10, padding: '14px 16px', position: 'relative', transition: 'border-color .15s' }}
                 onMouseEnter={e => !isCaptured && (e.currentTarget.style.borderColor = '#2a2d35')}
                 onMouseLeave={e => !isCaptured && (e.currentTarget.style.borderColor = '#1e2029')}>
@@ -318,7 +328,7 @@ export default function ObjectivesView({ objectives, hosts, onAdd, onUpdate, onD
                     </button>
                   )}
                 </div>
-              </div>
+              </article>
             );
           })}
         </div>
@@ -326,3 +336,14 @@ export default function ObjectivesView({ objectives, hosts, onAdd, onUpdate, onD
     </div>
   );
 }
+
+ObjectivesView.propTypes = {
+  objectives: PropTypes.array,
+  hosts: PropTypes.array,
+  onAdd: PropTypes.func,
+  onUpdate: PropTypes.func,
+  onDelete: PropTypes.func,
+  selectedProject: PropTypes.string,
+  accent: PropTypes.string,
+  currentUser: PropTypes.object,
+};

@@ -1,0 +1,131 @@
+"""
+Scheduled playbooks — cron-based automatic playbook execution.
+"""
+
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Annotated
+from sqlalchemy.orm import Session
+
+from .. import models, schemas
+from ..core.access import check_pid_access
+from ..core.cron_utils import next_run, validate_cron
+from ..core.deps import get_current_user
+from ..core.permissions import PERM_PLAYBOOKS_CREATE
+from ..core.utils import new_id, ts_now
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/api/scheduled-playbooks", tags=["scheduled-playbooks"],
+    responses={
+        400: {"description": "Bad request"},
+        404: {"description": "Not found"},
+    },
+)
+
+_MSG_SCHEDULE_NOT_FOUND = "Schedule not found"
+_bg_tasks: set = set()
+
+
+def _now() -> str:
+    return ts_now()
+
+
+@router.get("", response_model=list[schemas.ScheduledPlaybook])
+def list_schedules(
+    pid: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    check_pid_access(db, pid, user, "playbooks.read")
+    return db.query(models.ScheduledPlaybook).filter(models.ScheduledPlaybook.pid == pid).all()
+
+
+@router.post("", response_model=schemas.ScheduledPlaybook, status_code=201, responses={400: {"description": "Bad request"}})
+def create_schedule(
+    body: schemas.ScheduledPlaybookCreate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    check_pid_access(db, body.pid, user, PERM_PLAYBOOKS_CREATE)
+    if not validate_cron(body.cron_expr):
+        raise HTTPException(400, f"Invalid cron expression: {body.cron_expr!r}")
+    nr = next_run(body.cron_expr)
+    sched = models.ScheduledPlaybook(
+        id=new_id("sp"),
+        pid=body.pid,
+        playbook_id=body.playbook_id,
+        title=body.title,
+        cron_expr=body.cron_expr,
+        enabled=body.enabled,
+        body_json=body.body_json,
+        last_run_at="",
+        next_run_at=nr.strftime("%Y-%m-%d %H:%M:%S"),
+        created_by=getattr(request.state, "username", ""),
+        created_at=_now(),
+    )
+    db.add(sched)
+    db.commit()
+    db.refresh(sched)
+    return sched
+
+
+@router.patch("/{sid}", response_model=schemas.ScheduledPlaybook, responses={400: {"description": "Bad request"}, 404: {"description": "Not found"}})
+def update_schedule(
+    sid: str,
+    body: schemas.ScheduledPlaybookUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    sched = db.query(models.ScheduledPlaybook).filter(models.ScheduledPlaybook.id == sid).first()
+    if not sched:
+        raise HTTPException(404, _MSG_SCHEDULE_NOT_FOUND)
+    check_pid_access(db, sched.pid, user, PERM_PLAYBOOKS_CREATE)
+    if body.cron_expr is not None and not validate_cron(body.cron_expr):
+        raise HTTPException(400, f"Invalid cron expression: {body.cron_expr!r}")
+    for k, v in body.model_dump(exclude_none=True).items():
+        setattr(sched, k, v)
+    # Recompute next_run if cron changed or schedule re-enabled
+    if body.cron_expr is not None or body.enabled:
+        sched.next_run_at = next_run(sched.cron_expr).strftime("%Y-%m-%d %H:%M:%S")
+    db.commit()
+    db.refresh(sched)
+    return sched
+
+
+@router.delete("/{sid}", status_code=204, responses={404: {"description": "Not found"}})
+def delete_schedule(
+    sid: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    sched = db.query(models.ScheduledPlaybook).filter(models.ScheduledPlaybook.id == sid).first()
+    if not sched:
+        raise HTTPException(404, _MSG_SCHEDULE_NOT_FOUND)
+    check_pid_access(db, sched.pid, user, PERM_PLAYBOOKS_CREATE)
+    db.delete(sched)
+    db.commit()
+
+
+@router.post("/{sid}/trigger", status_code=202, responses={404: {"description": "Not found"}})
+async def trigger_schedule(
+    sid: str,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    """Manually fire a scheduled playbook immediately."""
+    sched = db.query(models.ScheduledPlaybook).filter(models.ScheduledPlaybook.id == sid).first()
+    if not sched:
+        raise HTTPException(404, _MSG_SCHEDULE_NOT_FOUND)
+    check_pid_access(db, sched.pid, user, PERM_PLAYBOOKS_CREATE)
+    from ..routers.playbooks import _launch_playbook_run
+
+    _launch_playbook_run(
+        pid=sched.pid,
+        playbook_id=sched.playbook_id,
+        body_dict=sched.body_json or {},
+        created_by=getattr(request.state, "username", "scheduler"),
+    )
+    return {"ok": True, "message": "Playbook triggered"}

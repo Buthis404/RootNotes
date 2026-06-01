@@ -1,14 +1,27 @@
+import PropTypes from 'prop-types';
 import { useEffect, useRef, useState } from 'react';
+import { toastError } from '../components/Toast.jsx';
 import Icon from '../components/Icon.jsx';
 import MdEditor from '../components/MdEditor.jsx';
 import { PhaseTag, Btn, SearchBar } from '../components/UI.jsx';
 import { PHASES, PHASE_COLORS } from '../constants.js';
 import { api } from '../api.js';
 
+function _buildPresenceMap(presence, username) {
+  const map = {};
+  for (const u of presence) {
+    if (u.note_id && u.name !== username) {
+      if (!map[u.note_id]) map[u.note_id] = [];
+      map[u.note_id].push(u.name);
+    }
+  }
+  return map;
+}
+
 // Deterministic color from username
 function userColor(name) {
   let h = 0;
-  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) & 0xffffff;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) & 0xffffff;
   return `hsl(${h % 360}, 60%, 55%)`;
 }
 
@@ -27,19 +40,19 @@ function PhaseDropdown({ value, onChange }) {
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(false);
-    window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
+    globalThis.addEventListener('click', close);
+    return () => globalThis.removeEventListener('click', close);
   }, [open]);
   return (
-    <div style={{ position: 'relative' }} onClick={e => e.stopPropagation()}>
-      <div onClick={() => setOpen(v => !v)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}>
+    <div style={{ position: 'relative' }}>
+      <button type="button" onClick={e => { e.stopPropagation(); setOpen(v => !v); }} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, background: 'transparent', border: 'none', padding: 0, outline: 'none', color: 'inherit', font: 'inherit' }}>
         <PhaseTag phase={value} small />
         <Icon name="chevron" size={10} color="#404550" />
-      </div>
+      </button>
       {open && (
         <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6, padding: 6, zIndex: 200, display: 'flex', flexDirection: 'column', gap: 3, minWidth: 120, boxShadow: '0 8px 24px #00000066' }}>
           {PHASES.map(ph => (
-            <button key={ph} onClick={() => { onChange(ph); setOpen(false); }} style={{ background: value === ph ? `${PHASE_COLORS[ph]}22` : 'transparent', border: `1px solid ${value === ph ? PHASE_COLORS[ph] + '66' : 'transparent'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', textAlign: 'left' }}>
+            <button key={ph} onClick={() => { onChange(ph); setOpen(false); }} style={{ background: value === ph ? `${PHASE_COLORS[ph]}22` : 'transparent', border: `1px solid ${value === ph ? PHASE_COLORS[ph] + '66' : 'transparent'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', textAlign: 'left', outline: 'none', color: 'inherit', font: 'inherit' }}>
               <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', fontWeight: 600, color: PHASE_COLORS[ph], textTransform: 'uppercase' }}>{ph}</span>
             </button>
           ))}
@@ -229,7 +242,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
         phase: editPhase,
         tags: editTags.split(',').map(t => t.trim()).filter(Boolean),
         ts,
-        client_version: forceVersion !== null ? forceVersion : baseVersion,
+        client_version: forceVersion === null ? baseVersion : forceVersion,
       });
       setEditing(false);
       setBaseVersion(null);
@@ -240,7 +253,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
       if (err.status === 409) {
         setConflictNote(err.serverNote);
       } else {
-        alert(`Save error: ${err.message}`);
+        toastError(`Save error: ${err.message}`);
       }
     }
   };
@@ -270,7 +283,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
         setEditing(true);
       }
     } catch (err) {
-      alert(`Upload error: ${err.message}`);
+      toastError(`Upload error: ${err.message}`);
     } finally {
       setUploading(false);
     }
@@ -288,13 +301,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
     for (const file of Array.from(e.dataTransfer.files)) await uploadAttachment(file);
   };
 
-  // Build presence map: note_id -> list of users (excluding self)
-  const presenceMap = {};
-  for (const u of presence) {
-    if (u.note_id && u.name !== username) {
-      (presenceMap[u.note_id] = presenceMap[u.note_id] || []).push(u.name);
-    }
-  }
+  const presenceMap = _buildPresenceMap(presence, username);
 
   // Other users editing the currently selected note
   const editingHere = selNote ? (presenceMap[selNote.id] || []) : [];
@@ -344,7 +351,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
           {PHASES.map(ph => {
             const cnt = notes.filter(n => n.pid === selectedProject && n.phase === ph).length;
             if (!cnt) return null;
-            const active = filterPhase === ph;
+            const active = filterPhase == ph;
             const c = PHASE_COLORS[ph];
             return (
               <button key={ph} onClick={() => setFilterPhase(active ? null : ph)} style={{ background: active ? `${c}22` : 'transparent', border: `1px solid ${active ? c + '88' : '#2a2d35'}`, borderRadius: 3, padding: '2px 6px', cursor: 'pointer', fontSize: 9, color: active ? c : '#505560', fontFamily: 'JetBrains Mono', fontWeight: 600, textTransform: 'uppercase' }}>
@@ -359,10 +366,11 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
             const active = note.id === selectedNote;
             const viewers = presenceMap[note.id] || [];
             return (
-              <div
+              <button
+                type="button"
                 key={note.id}
                 onClick={() => trySelectNote(note.id)}
-                style={{ padding: '11px 14px', cursor: 'pointer', background: active ? '#ffffff0a' : 'transparent', borderBottom: '1px solid #14161b', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', transition: 'background .1s' }}
+                style={{ padding: '11px 14px', cursor: 'pointer', background: active ? '#ffffff0a' : 'transparent', borderBottom: '1px solid #14161b', borderLeft: active ? `2px solid ${accent}` : '2px solid transparent', transition: 'background .1s', width: '100%', textAlign: 'left', borderTop: 'none', borderRight: 'none', outline: 'none', color: 'inherit', font: 'inherit' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <PhaseTag phase={note.phase} small />
@@ -384,7 +392,7 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
                     ))}
                   </div>
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
@@ -392,8 +400,11 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
 
       {/* ── Note content ── */}
       {selNote ? (
-        <div
-          style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative' }}
+          <div
+            role="application"
+            aria-label="Note editor"
+            tabIndex={-1}
+            style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative' }}
           onDrop={handleDrop}
           onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
           onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setIsDragging(false); }}
@@ -489,3 +500,50 @@ export default function NotesView({ notes, onAdd, onUpdate, onDelete, projects, 
     </div>
   );
 }
+
+UserDot.propTypes = {
+  name: PropTypes.string,
+  size: PropTypes.number,
+};
+
+PhaseDropdown.propTypes = {
+  value: PropTypes.string,
+  onChange: PropTypes.func,
+};
+
+AttachmentBar.propTypes = {
+  attachments: PropTypes.array,
+  uploading: PropTypes.bool,
+  accent: PropTypes.string,
+  onRemove: PropTypes.func,
+};
+
+UnsavedDialog.propTypes = {
+  accent: PropTypes.string,
+  onSave: PropTypes.func,
+  onDiscard: PropTypes.func,
+  onCancel: PropTypes.func,
+};
+
+ConflictDialog.propTypes = {
+  accent: PropTypes.string,
+  myContent: PropTypes.object,
+  serverNote: PropTypes.object,
+  onOverwrite: PropTypes.func,
+  onLoadServer: PropTypes.func,
+  onCancel: PropTypes.func,
+};
+
+NotesView.propTypes = {
+  notes: PropTypes.array,
+  onAdd: PropTypes.func,
+  onUpdate: PropTypes.func,
+  onDelete: PropTypes.func,
+  projects: PropTypes.array,
+  selectedProject: PropTypes.object,
+  accent: PropTypes.string,
+  fs: PropTypes.number,
+  presence: PropTypes.array,
+  onFocus: PropTypes.func,
+  username: PropTypes.string,
+};

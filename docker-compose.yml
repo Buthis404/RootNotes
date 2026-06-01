@@ -4,35 +4,89 @@ services:
     container_name: rtnotes_db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER:-rtnotes}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-rtnotes_secret}
-      POSTGRES_DB: ${DB_NAME:-rtnotes}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    # B6-6: FTS / search performance tuning.
+    # Tune for your host: work_mem governs per-sort-node RAM (affects tsvector
+    # ranking), maintenance_work_mem speeds up VACUUM and GIN index builds,
+    # parallel workers enable parallel seq-scans on large tables.
+    command: >
+      postgres
+      -c work_mem=16MB
+      -c maintenance_work_mem=64MB
+      -c max_parallel_workers_per_gather=2
+      -c autovacuum_vacuum_scale_factor=0.05
+      -c autovacuum_analyze_scale_factor=0.02
+      -c random_page_cost=1.1
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-rtnotes}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    container_name: rtnotes_redis
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no --maxmemory 128mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-change_me_redis_pw}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change_me_redis_pw}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 192M
 
   backend:
     build: ./backend
     container_name: rtnotes_backend
     restart: unless-stopped
+    dns:
+      - ${DNS_SERVER_1:-8.8.8.8}
+      - ${DNS_SERVER_2:-1.1.1.1}
     environment:
-      DATABASE_URL: postgresql://${DB_USER:-rtnotes}:${DB_PASSWORD:-rtnotes_secret}@db:5432/${DB_NAME:-rtnotes}
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change_me_redis_pw}@redis:6379/0
       UPLOAD_ROOT: /data/uploads
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      APP_ENV: ${APP_ENV:-dev}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-8}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
       - ./data/uploads:/data/uploads
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
 
   frontend:
     build: ./frontend
@@ -40,6 +94,17 @@ services:
     restart: unless-stopped
     expose:
       - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
 
   nginx:
     image: nginx:alpine
@@ -47,11 +112,103 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:80"
+      # Uncomment for HTTPS — run nginx/gen-certs.sh first, then swap nginx.conf → nginx-ssl.conf below
+      # - "${HTTPS_PORT:-3443}:443"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 64M
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # - ./nginx/nginx-ssl.conf:/etc/nginx/nginx.conf:ro  # swap this line to enable HTTPS
+      # - ./nginx/certs:/etc/nginx/certs:ro                # needed for HTTPS
     depends_on:
-      - backend
-      - frontend
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+  # ── Optional arq worker (B6-5 / B8-8) ────────────────────────────────────
+  # Enable to run CPU/IO-bound jobs (nmap, nuclei, donpapi …) outside the API
+  # process so the API stays responsive under heavy scan load.
+  #
+  # How to enable:
+  #   1. Uncomment this service block.
+  #   2. Add  WORKER_BACKEND=arq  to the backend service environment section.
+  #   3. docker compose build worker && docker compose up -d worker backend
+  #
+  # worker:
+  #   build: ./backend
+  #   container_name: rtnotes_worker
+  #   restart: unless-stopped
+  #   command: ["arq", "app.core.arq_worker.WorkerSettings"]
+  #   environment:
+  #     DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+  #     REDIS_URL: redis://:${REDIS_PASSWORD:-change_me_redis_pw}@redis:6379/0
+  #     UPLOAD_ROOT: /data/uploads
+  #     ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+  #     APP_ENV: ${APP_ENV:-dev}
+  #     WORKER_POOL_MAX_WORKERS: ${WORKER_POOL_MAX_WORKERS:-8}
+  #   volumes:
+  #     - ./data/uploads:/data/uploads
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "2.0"
+  #         memory: 512M
+
+  # ── Optional PgBouncer connection pooler (B6-4) ───────────────────────────
+  # Adds a transaction-mode connection pool in front of PostgreSQL.
+  # Reduces DB connection overhead when running multiple backend replicas or
+  # under heavy concurrent API load (200+ simultaneous requests).
+  #
+  # How to enable:
+  #   1. Uncomment this service block.
+  #   2. Change the backend DATABASE_URL above to:
+  #        postgresql://${DB_USER}:${DB_PASSWORD}@pgbouncer:5432/${DB_NAME}
+  #   3. docker compose up -d pgbouncer backend
+  #
+  # Notes:
+  #   - Uses transaction pooling mode — compatible with SQLAlchemy async.
+  #   - Default pool: 25 server connections, up to 200 client connections.
+  #   - PgBouncer runs on port 5432 internally; PostgreSQL is still on 5432
+  #     inside the `db` container (different hostname, no port conflict).
+  #   - Set PGBOUNCER_POOL_SIZE / PGBOUNCER_MAX_CLIENT_CONN in .env to tune.
+  #
+  # pgbouncer:
+  #   image: bitnami/pgbouncer:1
+  #   container_name: rtnotes_pgbouncer
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRESQL_HOST: db
+  #     POSTGRESQL_PORT: 5432
+  #     POSTGRESQL_USERNAME: ${DB_USER}
+  #     POSTGRESQL_PASSWORD: ${DB_PASSWORD}
+  #     POSTGRESQL_DATABASE: ${DB_NAME}
+  #     PGBOUNCER_AUTH_TYPE: scram-sha-256
+  #     PGBOUNCER_POOL_MODE: transaction
+  #     PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_POOL_SIZE:-25}
+  #     PGBOUNCER_MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-200}
+  #     PGBOUNCER_IGNORE_STARTUP_PARAMETERS: extra_float_digits
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${DB_USER}"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 10
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "0.25"
+  #         memory: 64M
 
 volumes:
   pgdata:

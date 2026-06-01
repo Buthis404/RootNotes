@@ -1,1509 +1,878 @@
-import uuid
+"""
+RootNotes — FastAPI application entry point.
+
+This file assembles the application from domain modules.
+Business logic lives in routers/, core/, and plugins/.
+"""
+
 import asyncio
 import json
 import os
-import re
-import io
-import zipfile
-import tempfile
-import secrets
-import string
 from contextlib import asynccontextmanager
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from pydantic import BaseModel
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+from datetime import UTC, datetime
 
-from . import models, schemas
-from .database import get_db, engine
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from typing import Annotated
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.orm import Session
+
+from .core.logging_setup import configure_logging, get_logger
+from .core.utils import ts_now, utcnow
+
+configure_logging()
+logger = get_logger(__name__)
+
+from . import models
+from .core.config import COOKIE_NAME, CORS_ORIGINS, UPLOAD_ROOT
+from .core.crypto import (
+    encrypt_str,
+    loot_value_is_sensitive,
+    note_content_is_confidential,
+    validate_encryption_config,
+)
+from .core.deps import decode_ws_token, is_admin
+from .core.enums import MemberRole, UserRole
+from .core.limiter import limiter
+from .core.security import decode_token, gen_password, hash_password
+from .core.token_blacklist import is_blacklisted
+from .core.utils import new_id
+from .database import SessionLocal, engine, get_db
+from .plugins.loader import initialize as init_plugins
+from .plugins.registry import registry
+from .plugins.state import list_modules as list_module_state
 from .ws import manager
 
-models.Base.metadata.create_all(bind=engine)
 
-UPLOAD_ROOT = Path(os.environ.get("UPLOAD_ROOT", "/data/uploads"))
-UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-SAFE_UPLOAD_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# ── Schema migrations via Alembic ─────────────────────────────────────
+def _run_migrations() -> None:
+    from pathlib import Path as _Path
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "redteam-notes-change-me-in-production")
-JWT_ALGO   = "HS256"
-JWT_EXPIRE_HOURS = 24 * 7   # 1 week
+    from alembic.config import Config
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-bearer  = HTTPBearer(auto_error=False)
+    from alembic import command
 
-_ALPHABET = string.ascii_letters + string.digits
-
-
-def _gen_password(length: int = 12) -> str:
-    return "".join(secrets.choice(_ALPHABET) for _ in range(length))
+    cfg = Config(str(_Path(__file__).resolve().parent.parent / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False))
+    cfg.set_main_option("script_location", str(_Path(__file__).resolve().parent.parent / "alembic"))
+    command.upgrade(cfg, "head")
+    logger.info("Alembic migrations applied")
 
 
+if os.environ.get("APP_ENV", "dev").lower() not in ("test", "testing"):
+    _run_migrations()
+
+
+def _fire_scheduled_playbook(sched, db, now) -> None:
+    from .core.cron_utils import next_run
+    from .routers.playbooks import _launch_playbook_run
+
+    run_id = _launch_playbook_run(
+        pid=sched.pid,
+        playbook_id=sched.playbook_id,
+        body_dict=sched.body_json or {},
+        created_by="scheduler",
+    )
+    sched.last_run_at = now.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        sched.next_run_at = next_run(sched.cron_expr, after=now).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        sched.next_run_at = ""
+    db.commit()
+    logger.info("[scheduler] Fired schedule %s → run %s", sched.id, run_id)
+
+
+# ── Scheduled playbooks background task ──────────────────────────────
+def _maybe_fire_sched(sched, db, now) -> None:
+    if not sched.next_run_at:
+        return
+    try:
+        nr = datetime.strptime(sched.next_run_at, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return
+    if now >= nr:
+        _fire_scheduled_playbook(sched, db, now)
+
+
+async def _scheduled_playbooks_loop():
+    """Check and fire scheduled playbooks every minute."""
+    await asyncio.sleep(60)  # let app fully start
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                now = utcnow().replace(second=0, microsecond=0)
+                scheds = (
+                    db.query(models.ScheduledPlaybook)
+                    .filter(models.ScheduledPlaybook.enabled)
+                    .all()
+                )
+                for sched in scheds:
+                    _maybe_fire_sched(sched, db, now)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[scheduler] loop error: %s", e)
+        await asyncio.sleep(60)
+
+
+def _c2_sync_is_due(cfg: dict, now) -> bool:
+    interval = int(cfg.get("sync_interval_minutes") or 0)
+    if interval <= 0:
+        return False
+    last_sync = cfg.get("last_sync")
+    if not last_sync:
+        return True
+    try:
+        last_dt = datetime.strptime(last_sync, "%Y-%m-%d %H:%M")
+        return (now - last_dt).total_seconds() / 60 >= interval
+    except Exception:
+        return True
+
+
+async def _c2_sync_one_integration(cfg: dict, db, _now) -> None:
+    from .routers.c2 import _do_project_sync
+
+    project_ids = cfg.get("project_ids") or []
+    if not project_ids:
+        project_ids = [p.id for p in db.query(models.Project).all()]
+    for pid in project_ids:
+        try:
+            await _do_project_sync(cfg, pid, db, iid=cfg.get("id"), created_by="auto-sync")
+            logger.info("[c2-auto-sync] %s → %s OK", cfg.get("name"), pid)
+        except Exception as e:
+            logger.warning("[c2-auto-sync] %s → %s failed: %s", cfg.get("name"), pid, e)
+
+
+# ── C2 auto-sync background task ─────────────────────────────────────
+async def _c2_auto_sync_loop():
+    """Periodically sync C2 integrations that have sync_interval_minutes > 0."""
+    await asyncio.sleep(30)  # initial delay to let app fully start
+    while True:
+        try:
+            from .routers.c2 import _load_integrations
+
+            db = SessionLocal()
+            try:
+                integrations = _load_integrations(db)
+                now = utcnow()
+                for cfg in integrations:
+                    if not cfg.get("enabled") or not _c2_sync_is_due(cfg, now):
+                        continue
+                    await _c2_sync_one_integration(cfg, db, now)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[c2-auto-sync] loop error: %s", e)
+        await asyncio.sleep(60)
+
+
+def _ensure_admin_user(db) -> None:
+    if db.query(models.User).count() != 0:
+        return
+    env_username = os.environ.get("ADMIN_USERNAME", "admin").strip() or "admin"
+    env_password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    password = env_password if env_password else gen_password()
+    admin = models.User(
+        id=new_id("u"),
+        username=env_username,
+        display_name=env_username,
+        password_hash=hash_password(password),
+        role=UserRole.ADMIN,
+        created_at=ts_now(),
+        active=True,
+    )
+    db.add(admin)
+    db.commit()
+    border = "=" * 54
+    logger.info(border)
+    logger.info("  RootNotes — first run")
+    logger.info("  Admin account created:")
+    logger.info("  Username: %s", env_username)
+    if not env_password:
+        logger.info("  Password: %s  (set ADMIN_PASSWORD env var to choose)", password)
+    else:
+        logger.info("  Password: (from ADMIN_PASSWORD env var)")
+    logger.info(border)
+
+
+def _migrate_plaintext_secrets(db) -> None:
+    plaintext_creds = [
+        c for c in db.query(models.Cred).all()
+        if c.secret and not c.secret.startswith(_ENC_PREFIX)
+    ]
+    if plaintext_creds:
+        for c in plaintext_creds:
+            c.secret = encrypt_str(c.secret)
+        db.commit()
+        logger.info("Migrated %d plaintext credential secrets to encrypted storage", len(plaintext_creds))
+
+    plaintext_notes = [
+        n for n in db.query(models.Note).all()
+        if n.content and note_content_is_confidential(n.tags or [])
+        and not n.content.startswith(_ENC_PREFIX)
+    ]
+    if plaintext_notes:
+        for note in plaintext_notes:
+            note.content = encrypt_str(note.content)
+        db.commit()
+        logger.info("Migrated %d confidential notes to encrypted storage", len(plaintext_notes))
+
+    plaintext_loot = [
+        loot for loot in db.query(models.Loot).all()
+        if loot.value
+        and loot_value_is_sensitive(loot.loot_type, loot.artifact_type, loot.filename, loot.storage_path, loot.public_url)
+        and not loot.value.startswith(_ENC_PREFIX)
+    ]
+    if plaintext_loot:
+        for loot in plaintext_loot:
+            loot.value = encrypt_str(loot.value)
+        db.commit()
+        logger.info("Migrated %d sensitive loot values to encrypted storage", len(plaintext_loot))
+
+
+def _backfill_project_owners(db) -> None:
+    admin_users = (
+        db.query(models.User)
+        .filter(models.User.role == UserRole.ADMIN.value, models.User.active)
+        .all()
+    )
+    if not admin_users:
+        return
+    first_admin = admin_users[0]
+    projects_without_owner = (
+        db.query(models.Project)
+        .filter(
+            ~models.Project.id.in_(
+                db.query(models.ProjectMember.project_id).filter(
+                    models.ProjectMember.role == MemberRole.OWNER,
+                    models.ProjectMember.is_active,
+                )
+            )
+        )
+        .all()
+    )
+    for project in projects_without_owner:
+        existing = (
+            db.query(models.ProjectMember)
+            .filter(
+                models.ProjectMember.project_id == project.id,
+                models.ProjectMember.user_id == first_admin.id,
+            )
+            .first()
+        )
+        if existing:
+            existing.role = MemberRole.OWNER
+            existing.is_active = True
+        else:
+            db.add(
+                models.ProjectMember(
+                    id=new_id("pm"),
+                    project_id=project.id,
+                    user_id=first_admin.id,
+                    role=MemberRole.OWNER,
+                    created_at=datetime.now(UTC).isoformat(),
+                    created_by=first_admin.id,
+                    is_active=True,
+                )
+            )
+    db.commit()
+
+
+# ── Lifespan: auto-create admin on first run ──────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Auto-create admin on first run (or when no users exist)
-    from .database import SessionLocal
+    _test_mode = os.environ.get("APP_ENV", "dev").lower() in ("test", "testing")
+
+    if _test_mode:
+        # Skip all DB/pool/Redis startup in test mode — tests supply their own session.
+        yield
+        return
+
+    validate_encryption_config()
+
     db = SessionLocal()
     try:
-        if db.query(models.User).count() == 0:
-            env_username = os.environ.get("ADMIN_USERNAME", "admin").strip() or "admin"
-            env_password = os.environ.get("ADMIN_PASSWORD", "").strip()
-            password = env_password if env_password else _gen_password()
-            admin = models.User(
-                id=new_id("u"),
-                username=env_username,
-                password_hash=pwd_ctx.hash(password),
-                role="admin",
-                created_at=datetime.utcnow().isoformat()[:16],
-                active=True,
-            )
-            db.add(admin)
-            db.commit()
-            border = "=" * 54
-            print(f"\n{border}", flush=True)
-            print("  RootNotes — first run", flush=True)
-            print("  Admin account created:", flush=True)
-            print(f"  Username: {env_username}", flush=True)
-            if not env_password:
-                print(f"  Password: {password}  (set ADMIN_PASSWORD env var to choose)", flush=True)
-            else:
-                print(f"  Password: (from ADMIN_PASSWORD env var)", flush=True)
-            print(f"{border}\n", flush=True)
+        _ensure_admin_user(db)
+        _migrate_plaintext_secrets(db)
+        _backfill_project_owners(db)
     finally:
         db.close()
-    yield
 
-# Lightweight schema migration for existing databases.
-with engine.begin() as conn:
-    conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '#07080b'"))
-    conn.execute(text("ALTER TABLE networks ADD COLUMN IF NOT EXISTS regions_json JSONB NOT NULL DEFAULT '[]'"))
-    conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS ips TEXT[] NOT NULL DEFAULT '{}'"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS note_attachments (id TEXT PRIMARY KEY, note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, filename TEXT NOT NULL, content_type TEXT NOT NULL DEFAULT 'application/octet-stream', file_size INTEGER NOT NULL DEFAULT 0, storage_path TEXT NOT NULL, public_url TEXT NOT NULL, ts TEXT NOT NULL)"))
-    conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0"))
-    conn.execute(text("ALTER TABLE creds ADD COLUMN IF NOT EXISTS host_ids TEXT[] NOT NULL DEFAULT '{}'"))
-    conn.execute(text("ALTER TABLE creds ADD COLUMN IF NOT EXISTS is_domain BOOLEAN NOT NULL DEFAULT FALSE"))
-    conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT ''"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, title TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'medium', cvss TEXT NOT NULL DEFAULT '', cve TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', proof TEXT NOT NULL DEFAULT '', recommendation TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', ts TEXT NOT NULL)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS checklist_items (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, phase TEXT NOT NULL, text TEXT NOT NULL, done BOOLEAN NOT NULL DEFAULT FALSE, order_idx INTEGER NOT NULL DEFAULT 0)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS timeline_events (id TEXT PRIMARY KEY, pid TEXT NOT NULL, username TEXT, entity TEXT NOT NULL, action TEXT NOT NULL, label TEXT NOT NULL, meta JSONB NOT NULL DEFAULT '{}', ts TEXT NOT NULL)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS objectives (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'flag', points INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'not_started', flag_value TEXT NOT NULL DEFAULT '', captured_by TEXT NOT NULL DEFAULT '', captured_at TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS attack_paths (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, name TEXT NOT NULL DEFAULT 'Attack Path', description TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS attack_steps (id TEXT PRIMARY KEY, path_id TEXT NOT NULL REFERENCES attack_paths(id) ON DELETE CASCADE, pid TEXT NOT NULL, step_order INTEGER NOT NULL DEFAULT 0, node_type TEXT NOT NULL DEFAULT 'host', label TEXT NOT NULL DEFAULT '', sublabel TEXT NOT NULL DEFAULT '', technique TEXT NOT NULL DEFAULT '', mitre_id TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS loots (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, host_id TEXT, loot_type TEXT NOT NULL DEFAULT 'file', value TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', source_path TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS scopes (id TEXT PRIMARY KEY, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, value TEXT NOT NULL, scope_type TEXT NOT NULL DEFAULT 'cidr', in_scope BOOLEAN NOT NULL DEFAULT TRUE, description TEXT NOT NULL DEFAULT '')"))
-    conn.execute(text("CREATE TABLE IF NOT EXISTS cred_host_notes (id TEXT PRIMARY KEY, cred_id TEXT NOT NULL REFERENCES creds(id) ON DELETE CASCADE, host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE, pid TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, notes TEXT NOT NULL DEFAULT '', access TEXT[] NOT NULL DEFAULT '{}')"))
-    conn.execute(text("ALTER TABLE cred_host_notes ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''"))
-    conn.execute(text("ALTER TABLE cred_host_notes ADD COLUMN IF NOT EXISTS access TEXT[] NOT NULL DEFAULT '{}'"))
+    init_plugins(app)
+
+    # ── arq pool (when WORKER_BACKEND=arq) ──────────────────────────────
+    _arq_pool = None
+    if os.environ.get("WORKER_BACKEND", "internal").lower() == "arq":
+        try:
+            from arq import create_pool as _arq_create_pool
+
+            from .core.arq_pool import set_arq_pool
+            from .core.arq_worker import _redis_settings_from_url
+
+            _arq_pool = await _arq_create_pool(_redis_settings_from_url())
+            set_arq_pool(_arq_pool)
+            logger.info("arq Redis pool initialised (WORKER_BACKEND=arq)")
+        except Exception as _arq_exc:
+            logger.error(
+                "Failed to initialise arq pool: %s — falling back to internal worker", _arq_exc
+            )
+
+    # Start worker pool + recovery
+    from .core.worker_pool import get_pool, startup_recovery
+
+    pool = get_pool()
+    pool.start()
+    recovery_db = SessionLocal()
+    try:
+        recovered = startup_recovery(recovery_db)
+        if recovered:
+            import logging
+
+            logging.getLogger(__name__).info("Recovered %d queued jobs on startup", recovered)
+    finally:
+        recovery_db.close()
+
+    # Start Redis pub/sub for WebSocket broadcast
+    await manager.startup()
+
+    # Start background tasks
+    task_c2 = asyncio.create_task(_c2_auto_sync_loop())
+    task_scheduler = asyncio.create_task(_scheduled_playbooks_loop())
+    yield
+    task_c2.cancel()
+    task_scheduler.cancel()
+    await pool.stop()
+    if _arq_pool is not None:
+        await _arq_pool.close()
+        logger.info("arq Redis pool closed")
+    await manager.shutdown()
+    await asyncio.gather(task_c2, task_scheduler, return_exceptions=True)
+
+
+# ── FastAPI app ───────────────────────────────────────────────────────
+_ENC_PREFIX = "__enc__:"
+_BEARER_PREFIX = "Bearer "
+
+
+def _iter_file(safe, start: int, end: int, chunk: int = 1024 * 1024):
+    with open(safe, "rb") as f:
+        f.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            data = f.read(min(chunk, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            yield data
+
+
+def _parse_range_header(header: str, file_size: int) -> tuple[int, int] | None:
+    """Return (start, end) for a valid Range header, or None for 416."""
+    try:
+        byte_range = header.replace("bytes=", "").strip()
+        start_str, end_str = byte_range.split("-")
+        start = int(start_str) if start_str else 0
+        end = int(end_str) if end_str else file_size - 1
+        end = min(end, file_size - 1)
+    except Exception:
+        return None
+    if start > end or start >= file_size:
+        return None
+    return start, end
+
+
+def _resolve_loot_meta(db, pid: str, disk_name: str, entity: str) -> tuple:
+    """Return (loot_rec, content_type, orig_filename) for a download."""
+    import mimetypes
+
+    loot_rec = None
+    orig_filename = disk_name
+    content_type = None
+    if entity == "loot":
+        loot_rec = (
+            db.query(models.Loot)
+            .filter(models.Loot.pid == pid, models.Loot.storage_path.like(f"%{disk_name}"))
+            .first()
+        )
+        if loot_rec:
+            content_type = loot_rec.content_type or None
+            orig_filename = loot_rec.filename or disk_name
+    if not content_type:
+        content_type = mimetypes.guess_type(orig_filename)[0] or "application/octet-stream"
+    return loot_rec, content_type, orig_filename
+
+
+async def _handle_ws_message(ws: WebSocket, pid: str, msg: dict) -> None:
+    if msg.get("type") == "ping":
+        await manager.touch_presence(ws)
+        await ws.send_text('{"type":"pong"}')
+        return
+    if msg.get("type") == "focus":
+        await manager.set_focus(ws, msg.get("note_id"))
+    elif msg.get("type") == "blur":
+        await manager.set_focus(ws, None)
+    await manager.broadcast_presence(pid)
 
 app = FastAPI(title="RootNotes API", lifespan=lifespan)
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
+# Authenticated file downloads — replaces the unauthenticated StaticFiles mount.
+# Token can be passed as ?token= query param for <a href> download links.
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
-# ── Auth helpers ──────────────────────────────────────────────────────
-_PUBLIC_PATHS = ("/api/auth/login", "/api/auth/setup", "/api/auth/status")
+# Gzip JSON responses ≥1KB. Hosts/jobs/timeline list endpoints often
+# return tens of KB of repetitive JSON keys — typical compression
+# ratio is 5-10x. minimum_size avoids overhead on tiny payloads.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Unified error contract: every error response is {code, message, details?, detail}
+from .core.errors import install_error_handlers  # noqa: E402
+
+install_error_handlers(app)
+
+# ── Auth middleware ───────────────────────────────────────────────────
+_PUBLIC_PATHS = ("/api/auth/login", "/api/auth/setup", "/api/auth/status", "/api/webhooks/")
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    # Allow public paths and non-API routes (static, WS handled separately)
     if not path.startswith("/api/") or path.startswith(_PUBLIC_PATHS):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    # Cookie auth (httpOnly, set by /api/auth/login)
+    if not auth.startswith(_BEARER_PREFIX):
+        cookie_token = request.cookies.get(COOKIE_NAME, "")
+        if cookie_token:
+            auth = f"Bearer {cookie_token}"
+    # SSE/EventSource can't set headers — allow token via query param for stream endpoints
+    if not auth.startswith(_BEARER_PREFIX):
+        qs_token = request.query_params.get("token", "")
+        if qs_token:
+            auth = f"Bearer {qs_token}"
+    if not auth.startswith(_BEARER_PREFIX):
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
-    try:
-        payload = jwt.decode(auth[7:], JWT_SECRET, algorithms=[JWT_ALGO])
-        request.state.uid      = payload["sub"]
-        request.state.username = payload.get("username", "")
-        request.state.role     = payload.get("role", "user")
-    except JWTError:
+    payload = decode_token(auth[7:])
+    if not payload:
         return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+    if await is_blacklisted(payload.get("jti", "")):
+        return JSONResponse({"detail": "Token has been revoked"}, status_code=401)
+    request.state.uid = payload["sub"]
+    request.state.username = payload.get("username", "")
+    request.state.role = payload.get("role", "user")
+    if request.state.role == UserRole.VIEWER and request.method not in ("GET", "HEAD", "OPTIONS"):
+        return JSONResponse({"detail": "Read-only account"}, status_code=403)
     return await call_next(request)
 
 
-def _make_token(user: models.User) -> str:
-    exp = datetime.utcnow() + timedelta(hours=JWT_EXPIRE_HOURS)
-    return jwt.encode({"sub": user.id, "username": user.username, "role": user.role, "exp": exp}, JWT_SECRET, algorithm=JWT_ALGO)
+# CORSMiddleware must be added last so it becomes the outermost layer,
+# handling OPTIONS preflight before auth_middleware can reject it.
+_cors_origins = CORS_ORIGINS if CORS_ORIGINS else ["*"]
+_cors_credentials = bool(CORS_ORIGINS)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=_cors_credentials,
+)
 
 
-def _token_response(user: models.User) -> dict:
-    return {"access_token": _make_token(user), "token_type": "bearer",
-            "user": schemas.UserOut.model_validate(user).model_dump()}
+# ── Authenticated file downloads ─────────────────────────────────────
+
+async def _authenticate_download_request(
+    request: Request, db: Session
+) -> tuple["models.User | None", "JSONResponse | None"]:
+    token = request.headers.get("Authorization", "")
+    if not token.startswith(_BEARER_PREFIX):
+        qs = request.query_params.get("token", "")
+        if qs:
+            token = f"Bearer {qs}"
+    if not token.startswith(_BEARER_PREFIX):
+        return None, JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    user_payload = decode_token(token[7:])
+    if not user_payload:
+        return None, JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+    if await is_blacklisted(user_payload.get("jti", "")):
+        return None, JSONResponse({"detail": "Token has been revoked"}, status_code=401)
+    user = db.query(models.User).filter(models.User.id == user_payload["sub"]).first()
+    if not user or not user.active:
+        return None, JSONResponse({"detail": "User not found"}, status_code=401)
+    return user, None
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.User:
-    uid = getattr(request.state, "uid", None)
-    if not uid:
-        raise HTTPException(401, "Not authenticated")
-    user = db.query(models.User).filter(models.User.id == uid, models.User.active == True).first()
-    if not user:
-        raise HTTPException(401, "User not found or inactive")
-    return user
-
-
-def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
-    if user.role != "admin":
-        raise HTTPException(403, "Admin access required")
-    return user
-
-
-def _decode_ws_token(token: str, db: Session) -> str:
-    """Verify WS token, return display name or raise."""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
-        uid = payload["sub"]
-    except JWTError:
+def _serve_encrypted_loot_file(loot_rec, safe, content_type: str, disposition: str):
+    if not (loot_rec and getattr(loot_rec, "file_encrypted", False)):
         return None
-    user = db.query(models.User).filter(models.User.id == uid, models.User.active == True).first()
-    return user.username if user else None
+    from cryptography.fernet import InvalidToken
 
+    from .core.crypto import decrypt_bytes as _decrypt_bytes
+    from fastapi.responses import Response
 
-def new_id(prefix: str) -> str:
-    return f"{prefix}{uuid.uuid4().hex[:8]}"
-
-
-def safe_upload_name(name: str) -> str:
-    base = Path(name or "attachment.bin").name
-    cleaned = SAFE_UPLOAD_RE.sub("_", base).strip("._")
-    return cleaned or "attachment.bin"
-
-
-def ensure_under_upload_root(path: Path) -> Path:
-    root = UPLOAD_ROOT.resolve()
-    resolved = path.resolve()
     try:
-        resolved.relative_to(root)
-    except ValueError:
-        raise HTTPException(400, "Invalid upload path")
-    return resolved
+        decrypted = _decrypt_bytes(safe.read_bytes())
+    except (InvalidToken, Exception) as _exc:
+        logger.error("Failed to decrypt loot file %s: %s", safe, _exc)
+        return JSONResponse({"detail": "File decryption failed"}, status_code=500)
+    return Response(
+        content=decrypted,
+        status_code=200,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition, "Content-Length": str(len(decrypted))},
+    )
 
 
-def log_event(db: Session, pid: str, username: str, entity: str, action: str, label: str, meta: dict = None):
-    db.add(models.TimelineEvent(
-        id=new_id("evt"), pid=pid, username=username,
-        entity=entity, action=action, label=label,
-        meta=meta or {}, ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-    ))
+def _serve_upload_range_response(safe, range_header: str, file_size: int, content_type: str, disposition: str):
+    from fastapi.responses import Response
+    from fastapi.responses import StreamingResponse as _SR
+
+    parsed = _parse_range_header(range_header, file_size)
+    if parsed is None:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+    start, end = parsed
+    return _SR(
+        _iter_file(safe, start, end),
+        status_code=206,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": disposition,
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(end - start + 1),
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
-def bcast(pid: str, entity: str, action: str, data: dict, ws=None):
-    """Fire-and-forget broadcast helper callable from sync endpoints."""
-    msg = {"pid": pid, "entity": entity, "action": action, "data": data}
+@app.get("/api/uploads/{pid}/{path:path}")
+async def download_upload(
+    pid: str,
+    path: str,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+):
+    user, err = await _authenticate_download_request(request, db)
+    if err:
+        return err
+
+    from .core.access import check_pid_access as _check
+    from .core.events import log_event as _log_event
+
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(manager.broadcast(pid, msg, exclude=ws))
-    except RuntimeError:
-        pass
+        entity = "loot" if path.startswith("loot/") else "note_attachment"
+        permission = "loot.read" if entity == "loot" else "notes.read"
+        _check(db, pid, user, permission)
+    except Exception:
+        return JSONResponse({"detail": "Access denied"}, status_code=403)
+
+    from .core.utils import ensure_under_upload_root
+
+    target = UPLOAD_ROOT / pid / path
+    try:
+        safe = ensure_under_upload_root(target)
+    except Exception:
+        return JSONResponse({"detail": "Invalid path"}, status_code=400)
+
+    if not safe.exists() or not safe.is_file():
+        return JSONResponse({"detail": "File not found"}, status_code=404)
+
+    _log_event(
+        db,
+        pid,
+        getattr(user, "username", None),
+        "audit",
+        "download_sensitive_file",
+        f"Downloaded {entity}: {safe.name}",
+        {"path": path, "entity": entity},
+    )
+    db.commit()
+
+    loot_rec, content_type, orig_filename = _resolve_loot_meta(db, pid, safe.name, entity)
+    disposition = f'attachment; filename="{orig_filename}"'
+
+    encrypted_resp = _serve_encrypted_loot_file(loot_rec, safe, content_type, disposition)
+    if encrypted_resp is not None:
+        return encrypted_resp
+
+    from fastapi.responses import StreamingResponse as _SR
+
+    file_size = safe.stat().st_size
+    range_header = request.headers.get("Range")
+    if range_header:
+        return _serve_upload_range_response(safe, range_header, file_size, content_type, disposition)
+
+    return _SR(
+        _iter_file(safe, 0, file_size - 1),
+        status_code=200,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": disposition,
+            "Content-Length": str(file_size),
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
-# ── Auth endpoints ────────────────────────────────────────────────────
-@app.get("/api/auth/status")
-def auth_status(db: Session = Depends(get_db)):
-    return {"initialized": db.query(models.User).count() > 0}
-
-
-@app.post("/api/auth/setup", status_code=201)
-def auth_setup(body: schemas.SetupRequest, db: Session = Depends(get_db)):
-    if db.query(models.User).count() > 0:
-        raise HTTPException(403, "Already initialized — use login")
-    user = models.User(id=new_id("u"), username=body.username.strip(),
-                       password_hash=pwd_ctx.hash(body.password),
-                       role="admin", created_at=datetime.utcnow().isoformat()[:16], active=True)
-    db.add(user); db.commit(); db.refresh(user)
-    return _token_response(user)
-
-
-@app.post("/api/auth/login")
-def auth_login(body: schemas.LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.username == body.username.strip(), models.User.active == True).first()
-    if not user or not pwd_ctx.verify(body.password, user.password_hash):
-        raise HTTPException(401, "Неверный логин или пароль")
-    return _token_response(user)
-
-
-@app.get("/api/auth/me")
-def auth_me(user: models.User = Depends(get_current_user)):
-    return schemas.UserOut.model_validate(user)
-
-
-# ── Admin endpoints ───────────────────────────────────────────────────
-@app.get("/api/admin/users")
-def admin_list_users(admin: models.User = Depends(require_admin), db: Session = Depends(get_db)):
-    return [schemas.UserOut.model_validate(u) for u in db.query(models.User).order_by(models.User.created_at).all()]
-
-
-@app.post("/api/admin/users", status_code=201)
-def admin_create_user(body: schemas.CreateUserRequest, admin: models.User = Depends(require_admin), db: Session = Depends(get_db)):
-    if db.query(models.User).filter(models.User.username == body.username.strip()).first():
-        raise HTTPException(409, "Пользователь с таким логином уже существует")
-    user = models.User(id=new_id("u"), username=body.username.strip(),
-                       password_hash=pwd_ctx.hash(body.password),
-                       role=body.role, created_at=datetime.utcnow().isoformat()[:16], active=True)
-    db.add(user); db.commit(); db.refresh(user)
-    return schemas.UserOut.model_validate(user)
-
-
-@app.patch("/api/admin/users/{uid}")
-def admin_update_user(uid: str, body: schemas.UpdateUserRequest, admin: models.User = Depends(require_admin), db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == uid).first()
-    if not user:
-        raise HTTPException(404, "User not found")
-    if body.role is not None:
-        if uid == admin.id and body.role != "admin":
-            raise HTTPException(400, "Нельзя снять с себя роль администратора")
-        user.role = body.role
-    if body.active is not None:
-        if uid == admin.id and not body.active:
-            raise HTTPException(400, "Нельзя деактивировать себя")
-        user.active = body.active
-    if body.password:
-        user.password_hash = pwd_ctx.hash(body.password)
-    db.commit(); db.refresh(user)
-    return schemas.UserOut.model_validate(user)
-
-
-@app.delete("/api/admin/users/{uid}", status_code=204)
-def admin_delete_user(uid: str, admin: models.User = Depends(require_admin), db: Session = Depends(get_db)):
-    if uid == admin.id:
-        raise HTTPException(400, "Нельзя удалить себя")
-    user = db.query(models.User).filter(models.User.id == uid).first()
-    if not user:
-        raise HTTPException(404, "User not found")
-    db.delete(user); db.commit()
-
-
-# ── WebSocket endpoint ────────────────────────────────────────────────
+# ── WebSocket ─────────────────────────────────────────────────────────
 @app.websocket("/ws/{pid}")
-async def websocket_endpoint(ws: WebSocket, pid: str, token: str = "", db: Session = Depends(get_db)):
-    username = _decode_ws_token(token, db)
-    if not username:
+async def websocket_endpoint(
+    ws: WebSocket,
+    pid: str,
+    db: Annotated[Session, Depends(get_db)],
+    token: str = "",
+):
+    # Accept token from query param or cookie
+    effective_token = token or ws.cookies.get(COOKIE_NAME, "")
+    user = decode_ws_token(effective_token, db)
+    if not user:
         await ws.close(code=4001)
         return
-    await manager.connect(ws, pid, username)
+    from .core.permissions import get_membership, get_permissions_for_role
+
+    is_global_admin = is_admin(user)
+    if is_global_admin:
+        # Global admins effectively have every project-level permission
+        permissions: frozenset[str] = frozenset()
+    else:
+        membership = get_membership(db, pid, user.id)
+        if not membership:
+            await ws.close(code=4003)
+            return
+        permissions = frozenset(get_permissions_for_role(membership.role))
+    await manager.connect(
+        ws, pid, user.username, permissions=permissions, is_global_admin=is_global_admin
+    )
     await manager.broadcast_presence(pid)
     try:
         while True:
             raw = await ws.receive_text()
             try:
-                msg = json.loads(raw)
-                if msg.get("type") == "focus":
-                    manager.set_focus(ws, msg.get("note_id"))
-                elif msg.get("type") == "blur":
-                    manager.set_focus(ws, None)
-                await manager.broadcast_presence(pid)
-            except Exception:
-                pass
+                await _handle_ws_message(ws, pid, json.loads(raw))
+            except Exception as e:
+                logger.warning("WebSocket message parse error for pid=%s: %s", pid, e)
     except WebSocketDisconnect:
-        manager.disconnect(ws, pid)
+        await manager.disconnect(ws, pid)
         await manager.broadcast_presence(pid)
 
 
-# ── Projects ─────────────────────────────────────────────────────────
-@app.get("/api/projects", response_model=list[schemas.Project])
-def list_projects(db: Session = Depends(get_db)):
-    return db.query(models.Project).all()
-
-
-@app.post("/api/projects", response_model=schemas.Project, status_code=201)
-def create_project(body: schemas.ProjectCreate, db: Session = Depends(get_db)):
-    project = models.Project(id=new_id("p"), **body.model_dump())
-    db.add(project)
-    db.commit()
-    db.refresh(project)
-    # Broadcast to all (no pid room yet, skip)
-    return project
-
-
-@app.patch("/api/projects/{pid}", response_model=schemas.Project)
-def update_project(pid: str, body: schemas.ProjectUpdate, db: Session = Depends(get_db)):
-    project = db.query(models.Project).filter(models.Project.id == pid).first()
-    if not project:
-        raise HTTPException(404, "Project not found")
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(project, k, v)
-    db.commit()
-    db.refresh(project)
-    p = schemas.Project.model_validate(project)
-    bcast(pid, "project", "update", p.model_dump())
-    return project
-
-
-@app.delete("/api/projects/{pid}", status_code=204)
-def delete_project(pid: str, db: Session = Depends(get_db)):
-    project = db.query(models.Project).filter(models.Project.id == pid).first()
-    if not project:
-        raise HTTPException(404, "Project not found")
-    db.delete(project)
-    db.commit()
-    bcast(pid, "project", "delete", {"id": pid})
-
-
-# ── Notes ────────────────────────────────────────────────────────────
-@app.get("/api/notes", response_model=list[schemas.Note])
-def list_notes(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Note)
-    if pid:
-        q = q.filter(models.Note.pid == pid)
-    return q.all()
-
-
-@app.post("/api/notes", response_model=schemas.Note, status_code=201)
-def create_note(body: schemas.NoteCreate, request: Request, db: Session = Depends(get_db)):
-    note = models.Note(id=new_id("n"), **body.model_dump())
-    db.add(note)
-    log_event(db, note.pid, getattr(request.state, 'username', None), 'note', 'create', f"Note created: «{note.title}»", {"id": note.id})
-    db.commit()
-    db.refresh(note)
-    n = schemas.Note.model_validate(note)
-    bcast(note.pid, "note", "create", n.model_dump())
-    return note
-
-
-@app.patch("/api/notes/{nid}", response_model=schemas.Note)
-def update_note(nid: str, body: schemas.NoteUpdate, request: Request, db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == nid).first()
-    if not note:
-        raise HTTPException(404, "Note not found")
-    if body.client_version is not None and body.client_version != note.version:
-        raise HTTPException(status_code=409, detail=schemas.Note.model_validate(note).model_dump())
-    old_title = note.title
-    patch = body.model_dump(exclude_none=True, exclude={"client_version"})
-    for k, v in patch.items():
-        setattr(note, k, v)
-    note.version += 1
-    if body.title is not None and body.title != old_title:
-        log_event(db, note.pid, getattr(request.state, 'username', None), 'note', 'update', f"Note renamed: «{old_title}» → «{note.title}»", {"id": note.id})
-    db.commit()
-    db.refresh(note)
-    n = schemas.Note.model_validate(note)
-    bcast(note.pid, "note", "update", n.model_dump())
-    return note
-
-
-@app.get("/api/notes/{nid}/attachments", response_model=list[schemas.NoteAttachment])
-def list_note_attachments(nid: str, db: Session = Depends(get_db)):
-    return db.query(models.NoteAttachment).filter(models.NoteAttachment.note_id == nid).all()
-
-
-@app.post("/api/notes/{nid}/attachments", response_model=schemas.NoteAttachment, status_code=201)
-async def upload_note_attachment(nid: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == nid).first()
-    if not note:
-        raise HTTPException(404, "Note not found")
-    safe_name = safe_upload_name(file.filename or "attachment.bin")
-    att_id = new_id("att")
-    ext = Path(safe_name).suffix
-    note_dir = UPLOAD_ROOT / note.pid / nid
-    note_dir.mkdir(parents=True, exist_ok=True)
-    disk_name = f"{att_id}{ext}"
-    disk_path = ensure_under_upload_root(note_dir / disk_name)
-    content = await file.read()
-    disk_path.write_bytes(content)
-    attachment = models.NoteAttachment(
-        id=att_id,
-        note_id=nid,
-        pid=note.pid,
-        filename=safe_name,
-        content_type=file.content_type or "application/octet-stream",
-        file_size=len(content),
-        storage_path=str(disk_path),
-        public_url=f"/uploads/{note.pid}/{nid}/{disk_name}",
-        ts=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-    )
-    db.add(attachment)
-    db.commit()
-    db.refresh(attachment)
-    bcast(note.pid, "note_attachment", "create", schemas.NoteAttachment.model_validate(attachment).model_dump())
-    return attachment
-
-
-@app.delete("/api/attachments/{aid}", status_code=204)
-def delete_attachment(aid: str, db: Session = Depends(get_db)):
-    attachment = db.query(models.NoteAttachment).filter(models.NoteAttachment.id == aid).first()
-    if not attachment:
-        raise HTTPException(404, "Attachment not found")
-    pid = attachment.pid
-    note_id = attachment.note_id
-    try:
-        ensure_under_upload_root(Path(attachment.storage_path)).unlink(missing_ok=True)
-    except Exception:
-        pass
-    db.delete(attachment)
-    db.commit()
-    bcast(pid, "note_attachment", "delete", {"id": aid, "note_id": note_id})
-
-
-@app.delete("/api/notes/{nid}", status_code=204)
-def delete_note(nid: str, request: Request, db: Session = Depends(get_db)):
-    note = db.query(models.Note).filter(models.Note.id == nid).first()
-    if not note:
-        raise HTTPException(404, "Note not found")
-    pid = note.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'note', 'delete', f"Note deleted: «{note.title}»")
-    db.delete(note)
-    db.commit()
-    bcast(pid, "note", "delete", {"id": nid})
-
-
-# ── Hosts ────────────────────────────────────────────────────────────
-@app.get("/api/hosts", response_model=list[schemas.Host])
-def list_hosts(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Host)
-    if pid:
-        q = q.filter(models.Host.pid == pid)
-    return [schemas.Host.model_validate(h) for h in q.all()]
-
-
-@app.post("/api/hosts", response_model=schemas.Host, status_code=201)
-def create_host(body: schemas.HostCreate, request: Request, db: Session = Depends(get_db)):
-    payload = body.model_dump()
-    host = models.Host(id=new_id("hst"), **payload)
-    db.add(host)
-    label = f"Host added: {host.ip}" + (f" ({host.hostname})" if host.hostname else "")
-    log_event(db, host.pid, getattr(request.state, 'username', None), 'host', 'create', label, {"ip": host.ip})
-    db.commit()
-    db.refresh(host)
-    h = schemas.Host.model_validate(host)
-    bcast(host.pid, "host", "create", h.model_dump())
-    return host
-
-
-@app.patch("/api/hosts/{hid}", response_model=schemas.Host)
-def update_host(hid: str, body: schemas.HostUpdate, request: Request, db: Session = Depends(get_db)):
-    host = db.query(models.Host).filter(models.Host.id == hid).first()
-    if not host:
-        raise HTTPException(404, "Host not found")
-    old_status = host.status
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(host, k, v)
-    if body.status is not None and body.status != old_status:
-        log_event(db, host.pid, getattr(request.state, 'username', None), 'host', 'status',
-                  f"Host {host.ip} status → {host.status}", {"ip": host.ip, "old": old_status, "new": host.status})
-    db.commit()
-    db.refresh(host)
-    h = schemas.Host.model_validate(host)
-    bcast(host.pid, "host", "update", h.model_dump())
-    return host
-
-
-@app.delete("/api/hosts/{hid}", status_code=204)
-def delete_host(hid: str, request: Request, db: Session = Depends(get_db)):
-    host = db.query(models.Host).filter(models.Host.id == hid).first()
-    if not host:
-        raise HTTPException(404, "Host not found")
-    pid = host.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'host', 'delete', f"Host deleted: {host.ip}", {"ip": host.ip})
-    db.delete(host)
-    db.commit()
-    bcast(pid, "host", "delete", {"id": hid})
-
-
-# ── Creds ────────────────────────────────────────────────────────────
-@app.get("/api/creds", response_model=list[schemas.Cred])
-def list_creds(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Cred)
-    if pid:
-        q = q.filter(models.Cred.pid == pid)
-    return q.all()
-
-
-@app.post("/api/creds", response_model=schemas.Cred, status_code=201)
-def create_cred(body: schemas.CredCreate, request: Request, db: Session = Depends(get_db)):
-    cred = models.Cred(id=new_id("c"), **body.model_dump())
-    db.add(cred)
-    label = f"Cred added: {cred.username}" + (f"@{cred.host}" if cred.host else "")
-    log_event(db, cred.pid, getattr(request.state, 'username', None), 'cred', 'create', label, {"username": cred.username})
-    db.commit()
-    db.refresh(cred)
-    c = schemas.Cred.model_validate(cred)
-    bcast(cred.pid, "cred", "create", c.model_dump())
-    return cred
-
-
-@app.patch("/api/creds/{cid}", response_model=schemas.Cred)
-def update_cred(cid: str, body: schemas.CredUpdate, request: Request, db: Session = Depends(get_db)):
-    cred = db.query(models.Cred).filter(models.Cred.id == cid).first()
-    if not cred:
-        raise HTTPException(404, "Cred not found")
-    old_cracked = cred.cracked
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(cred, k, v)
-    if body.cracked is not None and body.cracked and not old_cracked:
-        log_event(db, cred.pid, getattr(request.state, 'username', None), 'cred', 'cracked',
-                  f"Cred cracked: {cred.username}", {"username": cred.username})
-    db.commit()
-    db.refresh(cred)
-    c = schemas.Cred.model_validate(cred)
-    bcast(cred.pid, "cred", "update", c.model_dump())
-    return cred
-
-
-@app.delete("/api/creds/{cid}", status_code=204)
-def delete_cred(cid: str, request: Request, db: Session = Depends(get_db)):
-    cred = db.query(models.Cred).filter(models.Cred.id == cid).first()
-    if not cred:
-        raise HTTPException(404, "Cred not found")
-    pid = cred.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'cred', 'delete', f"Cred deleted: {cred.username}", {"username": cred.username})
-    db.delete(cred)
-    db.commit()
-    bcast(pid, "cred", "delete", {"id": cid})
-
-
-# ── Networks (multiple per project) ──────────────────────────────────
-@app.get("/api/networks", response_model=list[schemas.Network])
-def list_networks(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Network)
-    if pid:
-        q = q.filter(models.Network.pid == pid)
-    return [schemas.Network.from_orm_obj(n) for n in q.all()]
-
-
-@app.post("/api/networks", response_model=schemas.Network, status_code=201)
-def create_network(body: schemas.NetworkCreate, db: Session = Depends(get_db)):
-    net = models.Network(id=new_id("net"), pid=body.pid, name=body.name, background=body.background, regions_json=[], nodes_json=[], edges_json=[])
-    db.add(net)
-    db.commit()
-    db.refresh(net)
-    result = schemas.Network.from_orm_obj(net)
-    bcast(body.pid, "network", "create", result.model_dump())
-    return result
-
-
-@app.patch("/api/networks/{nid}", response_model=schemas.Network)
-def update_network(nid: str, body: schemas.NetworkUpdate, db: Session = Depends(get_db)):
-    net = db.query(models.Network).filter(models.Network.id == nid).first()
-    if not net:
-        raise HTTPException(404, "Network not found")
-    if body.name is not None:
-        net.name = body.name
-    if body.background is not None:
-        net.background = body.background
-    if body.regions is not None:
-        net.regions_json = body.regions
-    if body.nodes is not None:
-        net.nodes_json = body.nodes
-    if body.edges is not None:
-        net.edges_json = body.edges
-    db.commit()
-    db.refresh(net)
-    result = schemas.Network.from_orm_obj(net)
-    bcast(net.pid, "network", "update", result.model_dump())
-    return result
-
-
-@app.delete("/api/networks/{nid}", status_code=204)
-def delete_network(nid: str, db: Session = Depends(get_db)):
-    net = db.query(models.Network).filter(models.Network.id == nid).first()
-    if not net:
-        raise HTTPException(404, "Network not found")
-    pid = net.pid
-    db.delete(net)
-    db.commit()
-    bcast(pid, "network", "delete", {"id": nid})
-
-
+# ── Health & presence ─────────────────────────────────────────────────
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health():
+    import shutil
+
+    from .database import engine
+
+    checks = {}
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as e:
+        checks["db"] = f"error: {e}"
+
+    try:
+        import redis.asyncio as aioredis
+
+        _redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        r = aioredis.from_url(_redis_url)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+
+    try:
+        usage = shutil.disk_usage("/data/uploads")
+        free_pct = usage.free / usage.total * 100
+        checks["disk_free_pct"] = round(free_pct, 1)
+        checks["disk"] = "ok" if free_pct > 5 else "low"
+    except Exception as e:
+        checks["disk"] = f"error: {e}"
+
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic.script import ScriptDirectory
+
+        _root = _Path(__file__).resolve().parent.parent
+        cfg = AlembicConfig(str(_root / "alembic.ini"))
+        cfg.set_main_option("script_location", str(_root / "alembic"))
+        script = ScriptDirectory.from_config(cfg)
+        head = script.get_current_head()
+        from alembic.runtime.migration import MigrationContext
+
+        with engine.connect() as conn:
+            context = MigrationContext.configure(conn)
+            current = context.get_current_revision()
+        checks["migration"] = "ok" if current == head else f"pending ({current} → {head})"
+    except Exception:
+        checks["migration"] = "unknown"
+
+    ok = all(
+        v == "ok" or (isinstance(v, (int, float)) and v > 5)
+        for v in checks.values()
+    )
+    return {"status": "ok" if ok else "degraded", **checks}
 
 
 @app.get("/api/presence")
-def get_global_presence():
+async def get_global_presence():
     return {"online": manager.get_all_online()}
 
 
-# ── Findings ──────────────────────────────────────────────────────────
-@app.get("/api/findings", response_model=list[schemas.Finding])
-def list_findings(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Finding)
-    if pid:
-        q = q.filter(models.Finding.pid == pid)
-    return q.all()
-
-
-@app.post("/api/findings", response_model=schemas.Finding, status_code=201)
-def create_finding(body: schemas.FindingCreate, request: Request, db: Session = Depends(get_db)):
-    finding = models.Finding(id=new_id("f"), **body.model_dump())
-    db.add(finding)
-    log_event(db, finding.pid, getattr(request.state, 'username', None), 'finding', 'create',
-              f"Finding [{finding.severity.upper()}]: {finding.title}", {"severity": finding.severity})
-    db.commit()
-    db.refresh(finding)
-    f = schemas.Finding.model_validate(finding)
-    bcast(finding.pid, "finding", "create", f.model_dump())
-    return finding
-
-
-@app.patch("/api/findings/{fid}", response_model=schemas.Finding)
-def update_finding(fid: str, body: schemas.FindingUpdate, request: Request, db: Session = Depends(get_db)):
-    finding = db.query(models.Finding).filter(models.Finding.id == fid).first()
-    if not finding:
-        raise HTTPException(404, "Finding not found")
-    old_status = finding.status
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(finding, k, v)
-    if body.status is not None and body.status != old_status:
-        log_event(db, finding.pid, getattr(request.state, 'username', None), 'finding', 'status',
-                  f"Finding «{finding.title}» status → {finding.status}", {"old": old_status, "new": finding.status})
-    db.commit()
-    db.refresh(finding)
-    f = schemas.Finding.model_validate(finding)
-    bcast(finding.pid, "finding", "update", f.model_dump())
-    return finding
-
-
-@app.delete("/api/findings/{fid}", status_code=204)
-def delete_finding(fid: str, request: Request, db: Session = Depends(get_db)):
-    finding = db.query(models.Finding).filter(models.Finding.id == fid).first()
-    if not finding:
-        raise HTTPException(404, "Finding not found")
-    pid = finding.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'finding', 'delete', f"Finding deleted: «{finding.title}»")
-    db.delete(finding)
-    db.commit()
-    bcast(pid, "finding", "delete", {"id": fid})
-
-
-# ── Checklist ─────────────────────────────────────────────────────────
-@app.get("/api/checklist", response_model=list[schemas.ChecklistItem])
-def list_checklist(pid: str, phase: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.ChecklistItem).filter(models.ChecklistItem.pid == pid)
-    if phase:
-        q = q.filter(models.ChecklistItem.phase == phase)
-    return q.order_by(models.ChecklistItem.order_idx).all()
-
-
-@app.post("/api/checklist", response_model=list[schemas.ChecklistItem], status_code=201)
-def bulk_create_checklist(body: list[schemas.ChecklistItemCreate], db: Session = Depends(get_db)):
-    items = [models.ChecklistItem(id=new_id("cl"), **item.model_dump()) for item in body]
-    db.add_all(items)
-    db.commit()
-    for item in items:
-        db.refresh(item)
-    return items
-
-
-@app.patch("/api/checklist/{cid}", response_model=schemas.ChecklistItem)
-def update_checklist_item(cid: str, body: schemas.ChecklistItemUpdate, request: Request, db: Session = Depends(get_db)):
-    item = db.query(models.ChecklistItem).filter(models.ChecklistItem.id == cid).first()
-    if not item:
-        raise HTTPException(404, "Checklist item not found")
-    old_done = item.done
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(item, k, v)
-    if body.done is not None and body.done != old_done:
-        action = 'checked' if item.done else 'unchecked'
-        log_event(db, item.pid, getattr(request.state, 'username', None), 'checklist', action,
-                  f"Checklist [{item.phase}]: {item.text}", {"phase": item.phase})
-    db.commit()
-    db.refresh(item)
-    return item
-
-
-@app.delete("/api/checklist/{cid}", status_code=204)
-def delete_checklist_item(cid: str, db: Session = Depends(get_db)):
-    item = db.query(models.ChecklistItem).filter(models.ChecklistItem.id == cid).first()
-    if not item:
-        raise HTTPException(404, "Checklist item not found")
-    db.delete(item)
-    db.commit()
-
-
-# ── Timeline ──────────────────────────────────────────────────────────
-@app.get("/api/timeline", response_model=list[schemas.TimelineEvent])
-def get_timeline(pid: str, entity: str | None = None, limit: int = 200, db: Session = Depends(get_db)):
-    q = db.query(models.TimelineEvent).filter(models.TimelineEvent.pid == pid)
-    if entity:
-        q = q.filter(models.TimelineEvent.entity == entity)
-    return q.order_by(models.TimelineEvent.ts.desc()).limit(limit).all()
-
-
-# ── Objectives ────────────────────────────────────────────────────────
-@app.get("/api/objectives", response_model=list[schemas.Objective])
-def list_objectives(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Objective)
-    if pid:
-        q = q.filter(models.Objective.pid == pid)
-    return q.order_by(models.Objective.ts.desc()).all()
-
-@app.post("/api/objectives", response_model=schemas.Objective)
-def create_objective(body: schemas.ObjectiveCreate, request: Request, db: Session = Depends(get_db)):
-    obj = models.Objective(**body.model_dump(), id=new_id("obj"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
-    db.add(obj)
-    log_event(db, obj.pid, getattr(request.state, 'username', None), 'objective', 'create',
-              f"Objective added: {obj.title}", {"category": obj.category})
-    db.commit()
-    db.refresh(obj)
-    bcast(obj.pid, "objective", "create", schemas.Objective.model_validate(obj).model_dump())
-    return obj
-
-@app.patch("/api/objectives/{oid}", response_model=schemas.Objective)
-def update_objective(oid: str, body: schemas.ObjectiveUpdate, request: Request, db: Session = Depends(get_db)):
-    obj = db.query(models.Objective).filter(models.Objective.id == oid).first()
-    if not obj:
-        raise HTTPException(404)
-    old_status = obj.status
-    updates = body.model_dump(exclude_none=True)
-    for k, v in updates.items():
-        setattr(obj, k, v)
-    if body.status == "captured" and not obj.captured_at:
-        obj.captured_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-    if body.status is not None and body.status != old_status:
-        log_event(db, obj.pid, getattr(request.state, 'username', None), 'objective', 'status',
-                  f"Objective «{obj.title}» → {obj.status}", {"old": old_status, "new": obj.status})
-    db.commit()
-    db.refresh(obj)
-    bcast(obj.pid, "objective", "update", schemas.Objective.model_validate(obj).model_dump())
-    return obj
-
-@app.delete("/api/objectives/{oid}")
-def delete_objective(oid: str, request: Request, db: Session = Depends(get_db)):
-    obj = db.query(models.Objective).filter(models.Objective.id == oid).first()
-    if not obj:
-        raise HTTPException(404)
-    pid = obj.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'objective', 'delete',
-              f"Objective deleted: {obj.title}")
-    db.delete(obj)
-    db.commit()
-    bcast(pid, "objective", "delete", {"id": oid})
-    return {"ok": True}
-
-
-# ── Attack Paths ─────────────────────────────────────────────────────
-@app.get("/api/attack-paths", response_model=list[schemas.AttackPath])
-def list_attack_paths(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.AttackPath)
-    if pid:
-        q = q.filter(models.AttackPath.pid == pid)
-    return q.order_by(models.AttackPath.ts).all()
-
-@app.post("/api/attack-paths", response_model=schemas.AttackPath)
-def create_attack_path(body: schemas.AttackPathCreate, request: Request, db: Session = Depends(get_db)):
-    ap = models.AttackPath(**body.model_dump(), id=new_id("ap"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
-    db.add(ap)
-    log_event(db, ap.pid, getattr(request.state, 'username', None), 'attack_path', 'create',
-              f"Attack path created: {ap.name}")
-    db.commit()
-    db.refresh(ap)
-    bcast(ap.pid, "attack_path", "create", schemas.AttackPath.model_validate(ap).model_dump())
-    return ap
-
-@app.patch("/api/attack-paths/{ap_id}", response_model=schemas.AttackPath)
-def update_attack_path(ap_id: str, body: schemas.AttackPathUpdate, db: Session = Depends(get_db)):
-    ap = db.query(models.AttackPath).filter(models.AttackPath.id == ap_id).first()
-    if not ap:
-        raise HTTPException(404)
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(ap, k, v)
-    db.commit()
-    db.refresh(ap)
-    bcast(ap.pid, "attack_path", "update", schemas.AttackPath.model_validate(ap).model_dump())
-    return ap
-
-@app.delete("/api/attack-paths/{ap_id}")
-def delete_attack_path(ap_id: str, request: Request, db: Session = Depends(get_db)):
-    ap = db.query(models.AttackPath).filter(models.AttackPath.id == ap_id).first()
-    if not ap:
-        raise HTTPException(404)
-    pid = ap.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'attack_path', 'delete',
-              f"Attack path deleted: {ap.name}")
-    db.delete(ap)
-    db.commit()
-    bcast(pid, "attack_path", "delete", {"id": ap_id})
-    return {"ok": True}
-
-@app.get("/api/attack-steps", response_model=list[schemas.AttackStep])
-def list_attack_steps(path_id: str | None = None, pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.AttackStep)
-    if path_id:
-        q = q.filter(models.AttackStep.path_id == path_id)
-    elif pid:
-        q = q.filter(models.AttackStep.pid == pid)
-    return q.order_by(models.AttackStep.step_order).all()
-
-@app.post("/api/attack-steps", response_model=schemas.AttackStep)
-def create_attack_step(body: schemas.AttackStepCreate, db: Session = Depends(get_db)):
-    step = models.AttackStep(**body.model_dump(), id=new_id("as"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
-    db.add(step)
-    db.commit()
-    db.refresh(step)
-    bcast(step.pid, "attack_step", "create", schemas.AttackStep.model_validate(step).model_dump())
-    return step
-
-@app.patch("/api/attack-steps/{step_id}", response_model=schemas.AttackStep)
-def update_attack_step(step_id: str, body: schemas.AttackStepUpdate, db: Session = Depends(get_db)):
-    step = db.query(models.AttackStep).filter(models.AttackStep.id == step_id).first()
-    if not step:
-        raise HTTPException(404)
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(step, k, v)
-    db.commit()
-    db.refresh(step)
-    bcast(step.pid, "attack_step", "update", schemas.AttackStep.model_validate(step).model_dump())
-    return step
-
-@app.delete("/api/attack-steps/{step_id}")
-def delete_attack_step(step_id: str, db: Session = Depends(get_db)):
-    step = db.query(models.AttackStep).filter(models.AttackStep.id == step_id).first()
-    if not step:
-        raise HTTPException(404)
-    pid = step.pid
-    db.delete(step)
-    db.commit()
-    bcast(pid, "attack_step", "delete", {"id": step_id})
-    return {"ok": True}
-
-
-# ── Loot ─────────────────────────────────────────────────────────────
-@app.get("/api/loots", response_model=list[schemas.Loot])
-def list_loots(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Loot)
-    if pid:
-        q = q.filter(models.Loot.pid == pid)
-    return q.order_by(models.Loot.ts.desc()).all()
-
-@app.post("/api/loots", response_model=schemas.Loot, status_code=201)
-def create_loot(body: schemas.LootCreate, request: Request, db: Session = Depends(get_db)):
-    loot = models.Loot(**body.model_dump(), id=new_id("lt"), ts=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
-    db.add(loot)
-    log_event(db, loot.pid, getattr(request.state, 'username', None), 'loot', 'create',
-              f"Loot [{loot.loot_type}]: {(loot.value or loot.description or '')[:40]}")
-    db.commit()
-    db.refresh(loot)
-    bcast(loot.pid, "loot", "create", schemas.Loot.model_validate(loot).model_dump())
-    return loot
-
-@app.patch("/api/loots/{lid}", response_model=schemas.Loot)
-def update_loot(lid: str, body: schemas.LootUpdate, db: Session = Depends(get_db)):
-    loot = db.query(models.Loot).filter(models.Loot.id == lid).first()
-    if not loot:
-        raise HTTPException(404)
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(loot, k, v)
-    db.commit()
-    db.refresh(loot)
-    bcast(loot.pid, "loot", "update", schemas.Loot.model_validate(loot).model_dump())
-    return loot
-
-@app.delete("/api/loots/{lid}", status_code=204)
-def delete_loot(lid: str, request: Request, db: Session = Depends(get_db)):
-    loot = db.query(models.Loot).filter(models.Loot.id == lid).first()
-    if not loot:
-        raise HTTPException(404)
-    pid = loot.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'loot', 'delete',
-              f"Loot deleted: {(loot.value or loot.description or '')[:40]}")
-    db.delete(loot)
-    db.commit()
-    bcast(pid, "loot", "delete", {"id": lid})
-
-
-# ── Scope ─────────────────────────────────────────────────────────────
-@app.get("/api/scopes", response_model=list[schemas.Scope])
-def list_scopes(pid: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.Scope)
-    if pid:
-        q = q.filter(models.Scope.pid == pid)
-    return q.all()
-
-@app.post("/api/scopes", response_model=schemas.Scope, status_code=201)
-def create_scope(body: schemas.ScopeCreate, request: Request, db: Session = Depends(get_db)):
-    scope = models.Scope(**body.model_dump(), id=new_id("sc"))
-    db.add(scope)
-    log_event(db, scope.pid, getattr(request.state, 'username', None), 'scope', 'create',
-              f"Scope {'added' if scope.in_scope else 'excluded'}: {scope.value}", {"type": scope.scope_type})
-    db.commit()
-    db.refresh(scope)
-    bcast(scope.pid, "scope", "create", schemas.Scope.model_validate(scope).model_dump())
-    return scope
-
-@app.patch("/api/scopes/{sid}", response_model=schemas.Scope)
-def update_scope(sid: str, body: schemas.ScopeUpdate, db: Session = Depends(get_db)):
-    scope = db.query(models.Scope).filter(models.Scope.id == sid).first()
-    if not scope:
-        raise HTTPException(404)
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(scope, k, v)
-    db.commit()
-    db.refresh(scope)
-    bcast(scope.pid, "scope", "update", schemas.Scope.model_validate(scope).model_dump())
-    return scope
-
-@app.delete("/api/scopes/{sid}", status_code=204)
-def delete_scope(sid: str, request: Request, db: Session = Depends(get_db)):
-    scope = db.query(models.Scope).filter(models.Scope.id == sid).first()
-    if not scope:
-        raise HTTPException(404)
-    pid = scope.pid
-    log_event(db, pid, getattr(request.state, 'username', None), 'scope', 'delete',
-              f"Scope removed: {scope.value}")
-    db.delete(scope)
-    db.commit()
-    bcast(pid, "scope", "delete", {"id": sid})
-
-
-# ── CredHostNotes ─────────────────────────────────────────────────────
-@app.get("/api/cred-host-notes", response_model=list[schemas.CredHostNote])
-def list_cred_host_notes(pid: str | None = None, cred_id: str | None = None, host_id: str | None = None, db: Session = Depends(get_db)):
-    q = db.query(models.CredHostNote)
-    if pid:
-        q = q.filter(models.CredHostNote.pid == pid)
-    if cred_id:
-        q = q.filter(models.CredHostNote.cred_id == cred_id)
-    if host_id:
-        q = q.filter(models.CredHostNote.host_id == host_id)
-    return q.all()
-
-@app.post("/api/cred-host-notes", response_model=schemas.CredHostNote, status_code=201)
-def create_cred_host_note(body: schemas.CredHostNoteCreate, db: Session = Depends(get_db)):
-    existing = db.query(models.CredHostNote).filter(
-        models.CredHostNote.cred_id == body.cred_id,
-        models.CredHostNote.host_id == body.host_id
-    ).first()
-    if existing:
-        for k, v in body.model_dump(exclude={"cred_id", "host_id", "pid"}).items():
-            setattr(existing, k, v)
-        db.commit()
-        db.refresh(existing)
-        return existing
-    note = models.CredHostNote(id=new_id("chn"), **body.model_dump())
-    db.add(note)
-    db.commit()
-    db.refresh(note)
-    return note
-
-@app.patch("/api/cred-host-notes/{nid}", response_model=schemas.CredHostNote)
-def update_cred_host_note(nid: str, body: schemas.CredHostNoteUpdate, db: Session = Depends(get_db)):
-    note = db.query(models.CredHostNote).filter(models.CredHostNote.id == nid).first()
-    if not note:
-        raise HTTPException(404)
-    for k, v in body.model_dump(exclude_none=True).items():
-        setattr(note, k, v)
-    db.commit()
-    db.refresh(note)
-    return note
-
-@app.delete("/api/cred-host-notes/{nid}", status_code=204)
-def delete_cred_host_note(nid: str, db: Session = Depends(get_db)):
-    note = db.query(models.CredHostNote).filter(models.CredHostNote.id == nid).first()
-    if not note:
-        raise HTTPException(404)
-    db.delete(note)
-    db.commit()
-
-
-# ── Search ────────────────────────────────────────────────────────────
-@app.get("/api/search")
-def search(q: str = "", pid: str = "", limit: int = 30, db: Session = Depends(get_db)):
-    if not q or len(q) < 2:
-        return {"hosts": [], "creds": [], "notes": [], "findings": [], "loots": []}
-    ql = q.lower()
-
-    def match_host(h):
-        return ql in (f"{h.ip} {h.hostname} {h.notes} {' '.join(h.tags or [])}").lower()
-
-    def match_cred(c):
-        return ql in (f"{c.username} {c.service} {c.host} {c.notes}").lower()
-
-    def match_note(n):
-        return ql in (f"{n.title} {n.content[:500]} {' '.join(n.tags or [])}").lower()
-
-    def match_finding(f):
-        return ql in (f"{f.title} {f.description[:300]} {f.cve}").lower()
-
-    def match_loot(l):
-        return ql in (f"{l.value} {l.description} {l.source_path}").lower()
-
-    hq = db.query(models.Host)
-    cq = db.query(models.Cred)
-    nq = db.query(models.Note)
-    fq = db.query(models.Finding)
-    lq = db.query(models.Loot)
-    if pid:
-        hq = hq.filter(models.Host.pid == pid)
-        cq = cq.filter(models.Cred.pid == pid)
-        nq = nq.filter(models.Note.pid == pid)
-        fq = fq.filter(models.Finding.pid == pid)
-        lq = lq.filter(models.Loot.pid == pid)
-
-    hosts    = [schemas.Host.model_validate(h).model_dump() for h in hq.all() if match_host(h)][:limit]
-    creds    = [schemas.Cred.model_validate(c).model_dump() for c in cq.all() if match_cred(c)][:limit]
-    notes    = [schemas.Note.model_validate(n).model_dump() for n in nq.all() if match_note(n)][:limit]
-    findings = [schemas.Finding.model_validate(f).model_dump() for f in fq.all() if match_finding(f)][:limit]
-    loots    = [schemas.Loot.model_validate(l).model_dump() for l in lq.all() if match_loot(l)][:limit]
-    return {"hosts": hosts, "creds": creds, "notes": notes, "findings": findings, "loots": loots}
-
-
-# ── Export / Import ───────────────────────────────────────────────────
-
-@app.get("/api/export/{pid}")
-def export_project(pid: str, db: Session = Depends(get_db)):
-    project = db.query(models.Project).filter(models.Project.id == pid).first()
-    if not project:
-        raise HTTPException(404, "Project not found")
-
-    notes        = db.query(models.Note).filter(models.Note.pid == pid).all()
-    hosts        = db.query(models.Host).filter(models.Host.pid == pid).all()
-    creds        = db.query(models.Cred).filter(models.Cred.pid == pid).all()
-    networks     = db.query(models.Network).filter(models.Network.pid == pid).all()
-    attachments  = db.query(models.NoteAttachment).filter(models.NoteAttachment.pid == pid).all()
-    findings     = db.query(models.Finding).filter(models.Finding.pid == pid).all()
-    objectives   = db.query(models.Objective).filter(models.Objective.pid == pid).all()
-    attack_paths = db.query(models.AttackPath).filter(models.AttackPath.pid == pid).all()
-    attack_steps = db.query(models.AttackStep).filter(models.AttackStep.pid == pid).all()
-    loots        = db.query(models.Loot).filter(models.Loot.pid == pid).all()
-    scopes       = db.query(models.Scope).filter(models.Scope.pid == pid).all()
-    checklist    = db.query(models.ChecklistItem).filter(models.ChecklistItem.pid == pid).all()
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("project.json", json.dumps({
-            "id": project.id, "name": project.name, "ip": project.ip,
-            "os": project.os, "status": project.status,
-            "added": project.added, "description": project.description,
-        }, ensure_ascii=False))
-
-        zf.writestr("notes.json", json.dumps([{
-            "id": n.id, "title": n.title, "content": n.content,
-            "phase": n.phase, "tags": n.tags, "ts": n.ts, "starred": n.starred,
-        } for n in notes], ensure_ascii=False))
-
-        zf.writestr("hosts.json", json.dumps([{
-            "id": h.id, "ip": h.ip, "ips": h.ips, "hostname": h.hostname,
-            "os": h.os, "status": h.status, "ports": h.ports,
-            "services": h.services, "tags": h.tags, "notes": h.notes,
-        } for h in hosts], ensure_ascii=False))
-
-        zf.writestr("creds.json", json.dumps([{
-            "id": c.id, "host": c.host, "username": c.username,
-            "secret": c.secret, "type": c.type, "service": c.service,
-            "notes": c.notes, "cracked": c.cracked,
-            "host_ids": c.host_ids or [], "is_domain": c.is_domain,
-        } for c in creds], ensure_ascii=False))
-
-        nets_out = [schemas.Network.from_orm_obj(n).model_dump() for n in networks]
-        zf.writestr("networks.json", json.dumps(nets_out, ensure_ascii=False))
-
-        zf.writestr("findings.json", json.dumps([{
-            "id": f.id, "host_id": f.host_id, "title": f.title,
-            "severity": f.severity, "cvss": f.cvss, "cve": f.cve,
-            "description": f.description, "proof": f.proof,
-            "recommendation": f.recommendation, "status": f.status, "ts": f.ts,
-        } for f in findings], ensure_ascii=False))
-
-        zf.writestr("objectives.json", json.dumps([{
-            "id": o.id, "host_id": o.host_id, "title": o.title,
-            "description": o.description, "category": o.category,
-            "points": o.points, "status": o.status, "flag_value": o.flag_value,
-            "captured_by": o.captured_by, "captured_at": o.captured_at, "ts": o.ts,
-        } for o in objectives], ensure_ascii=False))
-
-        zf.writestr("attack_paths.json", json.dumps([{
-            "id": ap.id, "name": ap.name, "description": ap.description, "ts": ap.ts,
-        } for ap in attack_paths], ensure_ascii=False))
-
-        zf.writestr("attack_steps.json", json.dumps([{
-            "id": s.id, "path_id": s.path_id, "step_order": s.step_order,
-            "node_type": s.node_type, "label": s.label, "sublabel": s.sublabel,
-            "technique": s.technique, "mitre_id": s.mitre_id, "notes": s.notes, "ts": s.ts,
-        } for s in attack_steps], ensure_ascii=False))
-
-        zf.writestr("loots.json", json.dumps([{
-            "id": l.id, "host_id": l.host_id, "loot_type": l.loot_type,
-            "value": l.value, "description": l.description,
-            "source_path": l.source_path, "ts": l.ts,
-        } for l in loots], ensure_ascii=False))
-
-        zf.writestr("scopes.json", json.dumps([{
-            "id": s.id, "value": s.value, "scope_type": s.scope_type,
-            "in_scope": s.in_scope, "description": s.description,
-        } for s in scopes], ensure_ascii=False))
-
-        zf.writestr("checklist.json", json.dumps([{
-            "id": c.id, "phase": c.phase, "text": c.text,
-            "done": c.done, "order_idx": c.order_idx,
-        } for c in checklist], ensure_ascii=False))
-
-        atts_meta = []
-        for att in attachments:
-            ext = Path(att.filename).suffix
-            zip_entry = f"attachments/{att.id}{ext}"
-            atts_meta.append({
-                "id": att.id, "note_id": att.note_id, "filename": att.filename,
-                "content_type": att.content_type, "file_size": att.file_size,
-                "public_url": att.public_url, "ts": att.ts,
-                "zip_entry": zip_entry,
-            })
-            disk = Path(att.storage_path)
-            if disk.exists():
-                zf.write(disk, zip_entry)
-
-        zf.writestr("attachments.json", json.dumps(atts_meta, ensure_ascii=False))
-
-    buf.seek(0)
-    safe_name = re.sub(r"[^\w\-.]", "_", project.name)
-    filename = f"{safe_name}_export.zip"
-    return StreamingResponse(
-        buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.post("/api/import_project", status_code=201)
-async def import_project(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    raw = await file.read()
-    try:
-        buf = io.BytesIO(raw)
-        zf = zipfile.ZipFile(buf, "r")
-    except zipfile.BadZipFile:
-        raise HTTPException(400, "Файл не является корректным ZIP-архивом")
-
-    names = set(zf.namelist())
-
-    def read_json(entry):
-        return json.loads(zf.read(entry)) if entry in names else []
-
-    try:
-        project_data   = json.loads(zf.read("project.json"))
-        notes_data     = read_json("notes.json")
-        hosts_data     = read_json("hosts.json")
-        creds_data     = read_json("creds.json")
-        nets_data      = read_json("networks.json")
-        atts_data      = read_json("attachments.json")
-        findings_data  = read_json("findings.json")
-        obj_data       = read_json("objectives.json")
-        ap_data        = read_json("attack_paths.json")
-        as_data        = read_json("attack_steps.json")
-        loots_data     = read_json("loots.json")
-        scopes_data    = read_json("scopes.json")
-        checklist_data = read_json("checklist.json")
-    except Exception as e:
-        raise HTTPException(400, f"Ошибка чтения архива: {e}")
-
-    try:
-        # ── Create project ──────────────────────────────────────
-        new_pid = new_id("p")
-        project = models.Project(
-            id=new_pid,
-            name=project_data.get("name", "Imported") + " (импорт)",
-            ip=project_data.get("ip", ""),
-            os=project_data.get("os", "Unknown"),
-            status=project_data.get("status", "active"),
-            added=datetime.utcnow().strftime("%Y-%m-%d"),
-            description=project_data.get("description", ""),
-        )
-        db.add(project)
-        db.flush()
-
-        # ── Notes ───────────────────────────────────────────────
-        note_id_map: dict[str, str] = {}
-        note_objs: list[models.Note] = []
-        for n in notes_data:
-            new_nid = new_id("n")
-            note_id_map[n["id"]] = new_nid
-            obj = models.Note(
-                id=new_nid, pid=new_pid,
-                title=n.get("title", ""),
-                content=n.get("content", ""),
-                phase=n.get("phase", "recon"),
-                tags=n.get("tags", []),
-                ts=n.get("ts", ""),
-                starred=n.get("starred", False),
-            )
-            db.add(obj)
-            note_objs.append(obj)
-        db.flush()
-
-        # ── Attachments ─────────────────────────────────────────
-        url_map: dict[str, str] = {}
-        for att in atts_data:
-            old_nid = att.get("note_id", "")
-            new_nid = note_id_map.get(old_nid)
-            if not new_nid:
-                continue
-            zip_entry = att.get("zip_entry") or f"attachments/{att['id']}{Path(att['filename']).suffix}"
-            if zip_entry not in names:
-                continue
-            new_att_id = new_id("att")
-            ext = Path(att["filename"]).suffix
-            note_dir = UPLOAD_ROOT / new_pid / new_nid
-            note_dir.mkdir(parents=True, exist_ok=True)
-            disk_name = f"{new_att_id}{ext}"
-            disk_path = ensure_under_upload_root(note_dir / disk_name)
-            disk_path.write_bytes(zf.read(zip_entry))
-            new_url = f"/uploads/{new_pid}/{new_nid}/{disk_name}"
-            url_map[att["public_url"]] = new_url
-            db.add(models.NoteAttachment(
-                id=new_att_id, note_id=new_nid, pid=new_pid,
-                filename=att.get("filename", disk_name),
-                content_type=att.get("content_type", "application/octet-stream"),
-                file_size=att.get("file_size", 0),
-                storage_path=str(disk_path),
-                public_url=new_url,
-                ts=att.get("ts", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
-            ))
-
-        for obj in note_objs:
-            content = obj.content or ""
-            for old_url, new_url in url_map.items():
-                content = content.replace(old_url, new_url)
-            obj.content = content
-
-        # ── Hosts (build id map for relations) ──────────────────
-        host_id_map: dict[str, str] = {}
-        for h in hosts_data:
-            new_hid = new_id("hst")
-            host_id_map[h["id"]] = new_hid
-            db.add(models.Host(
-                id=new_hid, pid=new_pid,
-                ip=h.get("ip", ""), ips=h.get("ips", []),
-                hostname=h.get("hostname", ""),
-                os=h.get("os", "Unknown"),
-                status=h.get("status", "unknown"),
-                ports=h.get("ports", []), services=h.get("services", []),
-                tags=h.get("tags", []), notes=h.get("notes", ""),
-            ))
-
-        # ── Creds (remap host_ids) ──────────────────────────────
-        for c in creds_data:
-            old_hids = c.get("host_ids") or []
-            new_hids = [host_id_map[hid] for hid in old_hids if hid in host_id_map]
-            db.add(models.Cred(
-                id=new_id("c"), pid=new_pid,
-                host=c.get("host", ""), username=c.get("username", ""),
-                secret=c.get("secret", ""), type=c.get("type", "plain"),
-                service=c.get("service", ""), notes=c.get("notes", ""),
-                cracked=c.get("cracked", False),
-                host_ids=new_hids, is_domain=c.get("is_domain", False),
-            ))
-
-        # ── Networks ─────────────────────────────────────────────
-        for net in nets_data:
-            db.add(models.Network(
-                id=new_id("net"), pid=new_pid,
-                name=net.get("name", "Network"),
-                background=net.get("background", "#07080b"),
-                regions_json=net.get("regions", []),
-                nodes_json=net.get("nodes", []),
-                edges_json=net.get("edges", []),
-            ))
-
-        # ── Findings (remap host_id) ─────────────────────────────
-        for f in findings_data:
-            old_hid = f.get("host_id")
-            db.add(models.Finding(
-                id=new_id("f"), pid=new_pid,
-                host_id=host_id_map.get(old_hid) if old_hid else None,
-                title=f.get("title", ""), severity=f.get("severity", "medium"),
-                cvss=f.get("cvss", ""), cve=f.get("cve", ""),
-                description=f.get("description", ""), proof=f.get("proof", ""),
-                recommendation=f.get("recommendation", ""),
-                status=f.get("status", "open"), ts=f.get("ts", ""),
-            ))
-
-        # ── Objectives (remap host_id) ───────────────────────────
-        for o in obj_data:
-            old_hid = o.get("host_id")
-            db.add(models.Objective(
-                id=new_id("obj"), pid=new_pid,
-                host_id=host_id_map.get(old_hid) if old_hid else None,
-                title=o.get("title", ""), description=o.get("description", ""),
-                category=o.get("category", "flag"), points=o.get("points", 0),
-                status=o.get("status", "not_started"),
-                flag_value=o.get("flag_value", ""),
-                captured_by=o.get("captured_by", ""),
-                captured_at=o.get("captured_at", ""),
-                ts=o.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
-            ))
-
-        # ── Attack Paths + Steps (build path id map) ─────────────
-        path_id_map: dict[str, str] = {}
-        for ap in ap_data:
-            new_apid = new_id("ap")
-            path_id_map[ap["id"]] = new_apid
-            db.add(models.AttackPath(
-                id=new_apid, pid=new_pid,
-                name=ap.get("name", "Attack Path"),
-                description=ap.get("description", ""),
-                ts=ap.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
-            ))
-        db.flush()
-
-        for s in as_data:
-            old_pid_ref = s.get("path_id", "")
-            new_path_id = path_id_map.get(old_pid_ref)
-            if not new_path_id:
-                continue
-            db.add(models.AttackStep(
-                id=new_id("as"), path_id=new_path_id, pid=new_pid,
-                step_order=s.get("step_order", 0),
-                node_type=s.get("node_type", "host"),
-                label=s.get("label", ""), sublabel=s.get("sublabel", ""),
-                technique=s.get("technique", ""), mitre_id=s.get("mitre_id", ""),
-                notes=s.get("notes", ""),
-                ts=s.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
-            ))
-
-        # ── Loot (remap host_id) ─────────────────────────────────
-        for l in loots_data:
-            old_hid = l.get("host_id")
-            db.add(models.Loot(
-                id=new_id("lt"), pid=new_pid,
-                host_id=host_id_map.get(old_hid) if old_hid else None,
-                loot_type=l.get("loot_type", "file"),
-                value=l.get("value", ""),
-                description=l.get("description", ""),
-                source_path=l.get("source_path", ""),
-                ts=l.get("ts", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")),
-            ))
-
-        # ── Scope ─────────────────────────────────────────────────
-        for s in scopes_data:
-            db.add(models.Scope(
-                id=new_id("sc"), pid=new_pid,
-                value=s.get("value", ""),
-                scope_type=s.get("scope_type", "cidr"),
-                in_scope=s.get("in_scope", True),
-                description=s.get("description", ""),
-            ))
-
-        # ── Checklist ─────────────────────────────────────────────
-        for c in checklist_data:
-            db.add(models.ChecklistItem(
-                id=new_id("cl"), pid=new_pid,
-                phase=c.get("phase", "recon"),
-                text=c.get("text", ""),
-                done=c.get("done", False),
-                order_idx=c.get("order_idx", 0),
-            ))
-
-        db.commit()
-        zf.close()
-        return {"project_id": new_pid, "name": project.name}
-
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(500, f"Ошибка импорта: {e}")
-
-
-# ── Batch import ──────────────────────────────────────────────────────
-class BatchImportBody(BaseModel):
-    hosts: List[schemas.HostCreate] = []
-    creds: List[schemas.CredCreate] = []
-
-
-class BatchImportResult(BaseModel):
-    hosts_added: int
-    creds_added: int
-
-
-@app.post("/api/import/{pid}", response_model=BatchImportResult, status_code=201)
-def batch_import(pid: str, body: BatchImportBody, db: Session = Depends(get_db)):
-    project = db.query(models.Project).filter(models.Project.id == pid).first()
-    if not project:
-        raise HTTPException(404, "Project not found")
-
-    all_hosts = db.query(models.Host).filter(models.Host.pid == pid).all()
-    existing_by_ip       = {h.ip: h       for h in all_hosts if h.ip}
-    existing_by_hostname = {(h.hostname or '').upper(): h for h in all_hosts if h.hostname}
-
-    status_rank = {'unknown': 0, 'alive': 1, 'scanned': 2, 'access': 3, 'pwned': 4, 'owned': 5}
-
-    hosts_added = 0
-    new_hosts = []
-    for h in body.hosts:
-        h_data = h.model_dump()
-        h_data['pid'] = pid
-
-        ip       = h_data.get('ip', '')
-        hn_upper = (h_data.get('hostname') or '').upper()
-
-        # Match existing host: by IP first, then by hostname
-        existing = existing_by_ip.get(ip) or (existing_by_hostname.get(hn_upper) if hn_upper else None)
-
-        if existing:
-            # Merge ports / services / tags
-            existing.ports    = list(set((existing.ports    or []) + h_data.get('ports',    [])))
-            existing.services = list(set((existing.services or []) + h_data.get('services', [])))
-            existing.tags     = list(set((existing.tags     or []) + h_data.get('tags',     [])))
-
-            # Fill missing fields
-            if h_data.get('hostname') and not existing.hostname:
-                existing.hostname = h_data['hostname']
-            if h_data.get('domain') and not existing.domain:
-                existing.domain = h_data['domain']
-
-            # Update IP if we now have a real one and existing is missing / was a hostname placeholder
-            if h_data.get('ip') and (not existing.ip or existing.ip == existing.hostname):
-                existing.ip = h_data['ip']
-                existing_by_ip[existing.ip] = existing
-
-            # Update OS: prefer more specific (longer) string
-            incoming_os = h_data.get('os', '')
-            if incoming_os and incoming_os not in ('Unknown', '') and (
-                existing.os in ('Unknown', '', None) or
-                len(incoming_os) > len(existing.os or '')
-            ):
-                existing.os = incoming_os
-
-            # Merge notes (append BH info if not already present)
-            if h_data.get('notes'):
-                if not existing.notes:
-                    existing.notes = h_data['notes']
-                elif h_data['notes'] not in existing.notes:
-                    existing.notes = existing.notes.rstrip() + '\n' + h_data['notes']
-
-            # Raise status if new data indicates higher compromise level
-            if status_rank.get(h_data.get('status', 'unknown'), 0) > status_rank.get(existing.status, 0):
-                existing.status = h_data['status']
-
-            new_hosts.append(existing)
-        else:
-            host = models.Host(id=new_id("hst"), **h_data)
-            db.add(host)
-            existing_by_ip[ip] = host
-            if hn_upper:
-                existing_by_hostname[hn_upper] = host
-            hosts_added += 1
-            new_hosts.append(host)
-
-    new_creds = []
-    creds_added = 0
-    for c in body.creds:
-        c_data = c.model_dump()
-        c_data['pid'] = pid
-        cred = models.Cred(id=new_id("c"), **c_data)
-        db.add(cred)
-        creds_added += 1
-        new_creds.append(cred)
-
-    db.commit()
-
-    # Broadcast all new/updated hosts and creds
-    for h in new_hosts:
-        db.refresh(h)
-        bcast(pid, "host", "upsert", schemas.Host.model_validate(h).model_dump())
-    for c in new_creds:
-        db.refresh(c)
-        bcast(pid, "cred", "create", schemas.Cred.model_validate(c).model_dump())
-
-    return BatchImportResult(hosts_added=hosts_added, creds_added=creds_added)
+# ── Modules endpoint ──────────────────────────────────────────────────
+@app.get("/api/modules")
+def list_modules():
+    return {"modules": list_module_state()}
+
+
+@app.get("/api/connectors")
+def list_connectors():
+    return {"connectors": registry.list_connectors()}
+
+
+# ── Include all domain routers ────────────────────────────────────────
+from .routers import (
+    activities,
+    admin,
+    ai,
+    attack_graph,
+    attack_paths,
+    attacker_exec,
+    auth,
+    bulk_actions,
+    c2,
+    checklist,
+    collections,
+    cred_host_notes,
+    creds,
+    domains,
+    export,
+    findings,
+    hosts,
+    import_bloodhound,
+    import_export,
+    import_scanners,
+    jobs,
+    kb,
+    loots,
+    members,
+    mitre,
+    network_map,
+    networks,
+    notes,
+    notifications,
+    objectives,
+    pivots,
+    playbooks,
+    project_templates,
+    projects,
+    report,
+    scans,
+    scheduled_playbooks,
+    scopes,
+    search,
+    system_modules,
+    templates,
+    timeline,
+    topology,
+    webhooks,
+)
+from .routers import audit as audit_router
+
+app.include_router(auth.router)
+app.include_router(admin.router)
+app.include_router(system_modules.router)
+app.include_router(audit_router.router)
+app.include_router(projects.router)
+app.include_router(members.router)
+app.include_router(hosts.router)
+app.include_router(creds.router)
+app.include_router(domains.router)
+app.include_router(notes.router)
+app.include_router(networks.router)
+app.include_router(network_map.router)
+app.include_router(findings.router)
+app.include_router(checklist.router)
+app.include_router(timeline.router)
+app.include_router(objectives.router)
+app.include_router(activities.router)
+app.include_router(attack_paths.router)
+app.include_router(loots.router)
+app.include_router(scopes.router)
+app.include_router(cred_host_notes.router)
+app.include_router(search.router)
+app.include_router(templates.router)
+app.include_router(import_export.router)
+app.include_router(topology.router)
+app.include_router(attacker_exec.router)
+app.include_router(export.router)
+app.include_router(project_templates.router)
+app.include_router(scans.router)
+app.include_router(webhooks.router)
+app.include_router(c2.router)
+app.include_router(jobs.router)
+app.include_router(bulk_actions.router)
+app.include_router(playbooks.router)
+app.include_router(notifications.router)
+app.include_router(scheduled_playbooks.router)
+app.include_router(ai.router)
+app.include_router(import_scanners.router)
+app.include_router(attack_graph.router)
+app.include_router(kb.router)
+app.include_router(collections.router)
+app.include_router(pivots.router)
+app.include_router(import_bloodhound.router)
+app.include_router(mitre.router)
+app.include_router(report.router)
+
+
+@app.get("/api/worker/status", tags=["worker"])
+async def worker_status(db: Annotated[Session, Depends(get_db)]):
+    from . import models as _models
+    from .core.worker_pool import get_pool
+
+    pool = get_pool()
+    queued_db = db.query(_models.Job).filter(_models.Job.status == "queued").count()
+    running_db = db.query(_models.Job).filter(_models.Job.status == "running").count()
+
+    backend = os.environ.get("WORKER_BACKEND", "internal").lower()
+    if backend == "arq":
+        from .core.arq_pool import get_arq_pool
+        from .core.arq_worker import ARQ_QUEUE_NAME
+
+        arq_pool = get_arq_pool()
+        arq_queue_size = 0
+        if arq_pool is not None:
+            try:
+                arq_queue_size = await arq_pool.zcard(ARQ_QUEUE_NAME)
+            except Exception:
+                arq_queue_size = -1
+        return {
+            "backend": "arq",
+            "arq_queue_size": arq_queue_size,
+            "relay_queue_size": pool.queue_size,
+            "queued_in_db": queued_db,
+            "running_in_db": running_db,
+        }
+
+    return {
+        "backend": "internal",
+        "max_workers": pool._max_workers,
+        "max_per_project": pool._max_per_project,
+        "active": pool.active_count,
+        "active_jobs": pool.active_jobs,
+        "per_project": pool.per_project_counts,
+        "queue_size": pool.queue_size,
+        "queued_in_db": queued_db,
+        "running_in_db": running_db,
+    }

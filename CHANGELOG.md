@@ -1,0 +1,1139 @@
+# RootNotes — Changelog
+
+---
+> **Upgrade policy** — see [README § Upgrade notes](README.md#upgrade-notes) for the full policy.
+> Entries marked **⚠ DATA** contain migrations that delete or irreversibly transform existing rows.
+> Always back up before upgrading to a **⚠ DATA** release.
+---
+
+## v0.9.0 — 2026-05-28
+
+Quality and test coverage batch. Deep frontend refactoring, full SonarQube
+sweep to zero across all severity levels, AI provider expansion, and a
+complete backend test suite that brings coverage from 0% to 74%.
+
+### Tests
+- Built the project's first automated test suite from scratch: **3 192 tests
+  passing, 0 failures, 74% coverage** across routers, models, auth, worker
+  pool, scan modules, and job runner/writeback pipelines.
+- Resolved all fixture-stacking conflicts in `conftest.py`; the suite now runs
+  cleanly under `pytest` with no errors or warnings.
+- Added 98 focused unit tests for `job_runner` and `writeback` modules
+  (`feature/tests-job-runner-writeback`).
+
+### Quality / SonarQube — full sweep to zero
+- **CRITICAL (11)** — all resolved: unsafe regex, hardcoded secrets, SQL
+  injection vectors, missing CSRF checks.
+- **Security hotspots (26)** — all resolved: cookie flags, CORS wildcards,
+  cleartext logging.
+- **MAJOR (972 → 0)** — resolved across three waves: accessibility roles,
+  missing PropTypes (`S6774`) on every component, dead code, complex
+  functions (`S3776`), async/await misuse.
+- **MINOR / INFO (438)** — resolved in bulk: `S1192` string literals,
+  template literals, ternary normalisation, redundant braces.
+- Final SonarQube state: **0 bugs, 0 vulnerabilities, 0 hotspots, 0 CRITICAL,
+  0 MAJOR** on the full project scan path.
+
+### Features
+- **litellm provider** — added litellm as a selectable AI backend with a
+  dedicated provider editing UI; supports any litellm-compatible model string.
+- **Attacker Transport Service** — extracted a unified `AttackerTransport`
+  abstraction that normalises SSH, C2 beacon, and direct-exec transport paths
+  behind one interface.
+
+### Frontend refactoring
+- **NetworkView** split from 2 320 → 295 lines into three focused modules:
+  `NetworkCanvas`, `NetworkInspector`, and `NetworkToolbar`.
+- **PlaybooksView** split from 2 342 → 663 lines; DAG visualisation, step
+  editor, and playbook list are now independent components.
+- **ScansView** decomposed: C2 panel, webhook form, and pivot components
+  extracted into separate files.
+- Fixed `Symbol.iterator` crash in `NetworkInspector` (nodes_json→nodes
+  prop normalisation); restored correct `useEffect` and import chains after
+  the split.
+
+### AI / backend fixes
+- Graceful fallback to no-tools mode when the LLM returns HTTP 500 on
+  function-calling requests (avoids hard crash in AI chat).
+- Handled empty API key and `reasoning_content` model responses that
+  previously surfaced as unhandled exceptions.
+- Increased nginx upstream timeout for `/api/ai/` to 180 s to
+  accommodate slower reasoning models.
+
+## v0.8.0 — 2026-05-25
+
+Stabilisation and release-alignment pass across security, runtime hygiene,
+frontend accessibility, and repository documentation. This release does not
+change the deployment model, but it makes the current stack cleaner to ship,
+scan, and operate.
+
+### Quality / SonarQube
+- Cleared the remaining `S6819` frontend accessibility wave by replacing
+  ARIA/button-emulation patterns with real buttons and overlay dismiss
+  controls.
+- Reduced a large `S6774` cluster by adding explicit prop validation to the
+  heaviest local React helper components and view subpanels.
+- Kept `bugs`, `vulnerabilities`, and `security_hotspots` at zero on the
+  current project scan path.
+
+### Frontend
+- Fixed a broken JSX regression in `BloodHoundParser` introduced during the
+  accessibility cleanup.
+- Tightened several dense operational views (`CredsView`, `LootView`,
+  `MitreView`, `PlaybooksView`, and related panels) so the production build,
+  lint, and type-check path stay clean after the Sonar cleanup wave.
+
+### Runtime / deployment
+- Added scanner artefacts to `.gitignore` (`.scannerwork/`, `.sonar/`) so
+  local analysis output no longer risks leaking into commits.
+- Added a repository-level `sonar-project.properties` with source scoping and
+  exclusions aligned to the current Docker/dev layout.
+- Revalidated the full Docker Compose stack from scratch: fresh build,
+  successful container startup, healthy backend/frontend/db/redis services,
+  and working `/health` plus frontend root responses through nginx.
+
+### Documentation
+- Updated `README.md`, `SECURITY.md`, `ARCHITECTURE.md`, and `MODULES.md` to
+  match the real state of the codebase: Alembic-backed schema management,
+  package-based `models/` and `schemas/`, `AppChrome` frontend shell,
+  project-scoped RBAC roles, Fernet key generation, and current Docker/runtime
+  verification flow.
+
+## v0.7.0 — 2026-05-18
+
+Performance batch. Targeted hot-path optimisations across the DB layer,
+WebSocket fanout, queued-job concurrency, and the heaviest frontend
+views. No behavioural changes — same endpoints, same UI, same data.
+
+### Database — index coverage and query shapes
+- **Migration 007** — composite btree indexes on the WHERE/ORDER BY
+  shapes that list endpoints actually use:
+  `jobs (pid, status)` / `(pid, created_at DESC)` /
+  `(pid, connector_key)` / `(related_entity_type, related_entity_id)`;
+  `host_activities (host_id, ts DESC)` and `(pid, ts DESC)`;
+  `hosts (pid, status)`; `findings (pid, status)`.
+- **Migration 008** — `GIN(request_json jsonb_path_ops)` and
+  `GIN(result_json jsonb_path_ops)` on `jobs`. The playbook-run lookup
+  filter switched from `request_json['key'].astext == X` to
+  `request_json @> {...}` so it actually uses the index — query plan
+  goes from Seq Scan to Bitmap Index Scan.
+
+### Backend — N+1 collapse and concurrency
+- `playbooks._aggregate_run_results` fires on every DAG step
+  transition; was running one `Job.id == jid` query per item in the
+  completed-jobs list. Single `Job.id.in_(...)` batch instead.
+- `writeback._writeback_nmap_tags` pwned-IP loop collapsed to a single
+  `Host.ip.in_(pwned_ips)` query.
+- Worker pool bumped from 5 → 8 workers and 2 → 3 per-project. Both
+  values now tunable via `WORKER_POOL_MAX_WORKERS` /
+  `WORKER_POOL_MAX_PER_PROJECT` env vars.
+
+### Backend — list endpoints
+- `/api/timeline` and `/api/projects/{pid}/jobs` accept `offset=N`
+  (default 0); `limit` clamped to `[1, 1000]`. Both endpoints set
+  `X-Total-Count` + `Access-Control-Expose-Headers` so the frontend
+  can wire up infinite-scroll without a second round-trip. Response
+  body shape unchanged — fully backward compatible.
+
+### WebSocket — broadcast coalescing
+- New `events.bcast_batch(pid, [(entity, action, data), …])` wraps
+  many per-row broadcasts into one `{type:'batch', events:[…]}`
+  envelope. Frontend `applySyncEvent` unwraps the batch and dispatches
+  each sub-event through the existing handlers — no protocol break.
+- Applied at three hotspots:
+  - `import_export.batch_import` — a 1000-row import now fires one WS
+    message instead of 1000.
+  - `_run_cme_job` — NetExec sweeps that pwn many accounts.
+  - `_run_nuclei_job` — Nuclei runs producing many findings.
+
+### Backend — transport
+- `GZipMiddleware` enabled for JSON responses ≥1 KB. Hosts/jobs/
+  timeline list endpoints compress 5-10× — the biggest single network
+  byte reduction on the hot path.
+
+### Frontend — polling
+- Polling intervals re-schedule based on WebSocket state. `useSync`
+  publishes a global `isWsConnected()` flag plus an `rt:ws-state`
+  window event. When the WS is up, push-based updates already arrive
+  via WebSocket, so polling drops to a slow fallback:
+  - `JobsView`: 3 s → 30 s
+  - `PlaybooksView` run-jobs poll: 2 s → 20 s
+  - `ScansView`: 15 s → 60 s
+
+### Frontend — render budget
+- `NodeShape` (the per-host SVG icon on the network map) wrapped in
+  `React.memo`. Cuts SVG path re-renders by ~99% on large maps where
+  most nodes are idle while operators are panning or selecting.
+- Big list views — `HostsView`, `JobsView`, `CredsView`, `FindingsView`
+  — got the same treatment: project-scoped projections / filter
+  chains / sort steps moved into `useMemo` on their actual reactive
+  deps; search inputs run through `useDeferredValue` so a burst of
+  keystrokes collapses into one filter pass.
+- `TimelineView` caps the DOM at 500 events with a "Show N older"
+  expansion button. `filtered` / `visible` / `groups` / `entityCounts`
+  all memoised. Long engagements no longer freeze the tab.
+
+### Documentation
+- `README.md` expanded the deployment section: prerequisites, secret
+  generation (`openssl rand -hex 32`), `.env` walkthrough, verify
+  step, upgrade flow with backup reminder, troubleshooting table for
+  the recurring sharp edges (502 after rebuild → nginx restart, JWT
+  rotate, encryption key loss, WS through proxy, missing attacker_ssh).
+- Full env-var table now lists every supported variable with a
+  "required for prod" column. `WORKER_POOL_MAX_*` added to `.env.example`.
+
+## v0.6.3 — 2026-05-18
+
+### Live DAG in run-view
+- New `<LiveDagGraph>` component reuses the editor's Kahn-style layer
+  layout, but each node is colored by the live step status from
+  `run.jobs_json` + `run.result_json.step_states`. Status states map to
+  the existing `RUN_STATUS` palette: queued = dashed grey outline,
+  running = thick orange border with glyph `●`, done = green `✓`,
+  failed = red `✗`, skipped = blue `↷`. The status badge sits in a
+  small circle on the left of each node.
+- Edges flowing INTO a running/done step pick up the downstream
+  status color at 0.7 opacity (the path of execution lights up); idle
+  edges stay at 0.35 opacity in the accent color. Retry attempts on a
+  node surface as `↻N` in the corner.
+- Renders only for DAG runs (steps with `depends_on` or
+  `result_json.dag_mode = true`), above the existing Steps list, so
+  linear playbooks are unaffected.
+
+## v0.6.2 — 2026-05-18
+
+### Playbook DAG graph preview
+- The playbook editor gains a **Graph preview** panel between the step-
+  template chips and the step cards. Renders an SVG layered layout:
+  steps with `depends_on` push to the right of their predecessors,
+  predecessors with shared children stack as parallel rows. The header
+  shows `(DAG)` vs `(linear)` and the layer count so the editor knows
+  at a glance whether the run will fan out.
+- Parallel siblings (multiple nodes in the same layer) get an accent
+  border so they read as "these run concurrently". Nodes carry `↻N`
+  for retry and `⛬` for preconditions, and curved Bézier edges with
+  arrowheads draw the dependency direction.
+- Linear playbooks (no `depends_on` anywhere) still render — they just
+  stack into one column with implicit prev→next edges, so the preview
+  is useful even before someone opts into DAG mode.
+
+## v0.6.1 — 2026-05-18
+
+### DonPAPI playbook recipe
+- DonPAPI gains a **queued execution path** — `donpapi:scan` joins
+  `_SUPPORTED_QUEUED_OPERATIONS` with a `_run_donpapi_job` runner that
+  mirrors the HTTP endpoint (SSH dispatch, stdout parse, auto-cred
+  ingest, auto-loot tarball) while staying P12-clean: secrets are
+  scrubbed from stored commands + broadcast output, and `cred_id`
+  resolution lets playbooks reference project credentials without
+  inlining plaintext.
+- New `donpapi:scan` **step template** with target/username/password/
+  nthash/domain/cred_id/extra_flags/fetch_loot/timeout fields, and a
+  matching `_job_spec_for_step` branch (validates that either
+  `cred_id` or `username + (password|nthash)` is supplied before
+  queuing).
+- New `donpapi-collect` **builtin playbook**: step 1 validates the
+  cred via NetExec SMB `--shares`, step 2 depends on step 1 and runs
+  the actual DonPAPI collection. Wire credentials in the run form,
+  point at one or more target IPs, and the playbook handles the rest.
+
+## v0.6.0.1 — 2026-05-18
+
+### WS presence — ghost session purge (hotfix)
+- Presence hash entries now carry a `last_seen` timestamp; `get_presence`
+  filters out entries older than `_PRESENCE_STALE_SECONDS = 90` and
+  HDELs them in the same pass. WS endpoint touches presence on every
+  client ping. Fixes ghost sessions that accumulated across backend
+  rebuilds and made the UI lag.
+
+## v0.6.0 — 2026-05-17
+
+### DonPAPI connector
+- New `donpapi` ToolConnector + HTTP endpoint
+  `POST /api/projects/{pid}/scans/donpapi`. SSH-dispatches DonPAPI
+  on the attacker box, parses stdout for cleartext credentials
+  (URL/Login/Password and Wi-Fi blocks), auto-creates dedup'd Cred
+  rows, attaches a HostActivity to the target host, and pulls the
+  output directory back as a tarball Loot via `tar -czf - | base64`
+  over the existing SSH channel.
+- P12-clean: stored command + broadcast output run through
+  `scrub_secret` for both password and NT hash; raw secrets never
+  hit `request_json` or audit log.
+- Frontend: `DonpapiPanel` in ScansView with target / user / domain /
+  password|nthash / extra_flags / fetch_loot toggles.
+
+## v0.5.3 — 2026-05-17
+
+### P8 batch undo — batch_import + smart-build
+- `topology._run_smart_build` captures `role_undo_ops` for every host
+  it auto-classified, surfaces them via `_role_undo_ops`, and the
+  router writes an `audit:smart_build_completed` reversible
+  TimelineEvent so the operator can flip every just-assigned role
+  back in one click.
+- `import_export.batch_import` tracks `truly_new_host_ids` +
+  `new_cred_ids` (distinguishing newly-created vs already-present
+  rows) and writes an `audit:bulk_import_completed` reversible event
+  containing the full delete-list.
+
+## v0.5.2 — 2026-05-17
+
+### Hotfix — restore is_admin import
+- B5-1 sed pass missed `backend/app/core/access.py`; `check_pid_access`
+  was raising `NameError: is_admin` on every project-scoped endpoint
+  (KB, C2, Attack Graph, scans). Added the missing
+  `from .deps import is_admin` import.
+
+## v0.5.1 — 2026-05-17
+
+### P8 batch undo — bulk_exec
+- `bulk_actions` now snapshots host status before each step and
+  accumulates `undo_ops`. The final
+  `audit:bulk_exec_completed` TimelineEvent carries
+  `meta.undo = {type: "batch", operations: [...]}` so the operator
+  can roll the whole run back — created activities deleted, host
+  statuses restored, newly added creds removed — in one click.
+- `_BATCH_UNDO_MAX_OPERATIONS = 1000` caps replay size.
+
+## v0.5.0 — 2026-05-17
+
+### Timeline rollback / recovery (P8)
+- `PATCH /hosts/{id}` now writes its status-change `TimelineEvent`
+  with an `undo` payload in `meta` (`{entity, id, type=patch, patch}`)
+  and a `reversible: true` flag. Existing readers ignore the new
+  fields.
+- New `POST /api/timeline/{event_id}/undo`: applies the inverse patch
+  to the original entity, marks the source event with
+  `meta.undone_at` + `meta.undone_by` so it can't be replayed, and
+  writes a non-reversible `audit:timeline_undo` event for the audit
+  trail. Tight per-entity allow-list of patchable fields prevents a
+  forged event from flipping arbitrary columns.
+- `TimelineView` surfaces an inline **↶ Undo** button for any event
+  with `meta.reversible` and no `undone_at`; flips to **↶ undone**
+  (with tooltip showing who/when) after rollback. WS broadcasts the
+  patched host so other operators see the rollback live.
+
+## v0.4.9 — 2026-05-17
+
+### B3 follow-up — race-safe upserts in C2 sync + scan ingest
+- C2 webhook beacon sync and scan-result ingest paths switched to
+  `try_insert_or_get(db, new_row, requery)` — wraps the insert in a
+  `db.begin_nested()` SAVEPOINT and falls back to a re-query on
+  IntegrityError so concurrent webhooks no longer race-duplicate
+  hosts/creds.
+
+## v0.4.8 — 2026-05-17  ⚠ DATA
+
+> **⚠ DATA migration** — migration `006` auto-deduplicates `creds` rows,
+> permanently deleting duplicates (keeps the oldest by id). If two cred
+> records were intentionally distinct despite identical
+> `(pid, username, domain, host)` tuples, they will be merged.
+> **Back up before upgrading.**
+
+### B3 — data stability (partial unique indexes)
+- New migration `006_data_stability_unique.py`: dedup existing
+  `creds` rows by `(pid, username, COALESCE(domain,''), COALESCE(host,''))`
+  via a CTE that keeps the smallest id and repoints
+  `cred_host_notes`, then adds two partial unique indexes —
+  `uq_hosts_pid_ip` (excluding empty IPs) and
+  `uq_creds_pid_user_domain_host` (excluding empty usernames).
+- `db_upsert.upsert_host_by_ip` uses `pg_insert(...).on_conflict_do_update`
+  for atomic webhook host writes; `try_insert_or_get` provides the
+  generic race-safe insert helper.
+
+## v0.4.7 — 2026-05-17
+
+### P5 — host → network-node mirror sync
+- `network_data.sync_host_to_nodes(host, db)` mirrors strict
+  attributes (status/role/os/is_attacker) and soft attributes
+  (ip/ports) from `Host` rows into network-graph nodes without ever
+  touching `x`/`y`/`manually_positioned`. Host PATCH/create writes
+  trigger the sync and broadcast a node-delta over WS so the
+  operational graph updates live.
+
+## v0.4.6 — 2026-05-17
+
+### P12 — secret hygiene
+- New `core/secret_scrub.scrub_secret(text, secret)` with
+  `REDACTED = "***REDACTED***"` and `_MIN_SCRUBBABLE_LEN = 4` guard.
+  Stored job commands, broadcast WS payloads, and audit-log lines
+  now run through it for password / hash arguments.
+- Per-entity redact rules + recursive `scrub_keys` walk over WS
+  policy payloads so secrets never leak into other operators'
+  browsers.
+
+## v0.4.5 — 2026-05-17
+
+### B5-1 — central enums + is_admin helper
+- New `core/enums.py` with 6 str Enums: `UserRole`, `MemberRole`,
+  `Severity`, `HostStatus`, `FindingStatus`, `JobStatus`. Each
+  exposes `.values()` for validation and `.coerce()` for safe input
+  normalization; `JobStatus.terminal()` lists run-end states.
+- `core/deps.is_admin(user)` replaces ad-hoc `user.role == "admin"`
+  checks across the codebase.
+
+## v0.4.4 — 2026-05-17
+
+### C2 host-actions multi-framework UI
+- Host-actions panel renders per-framework live actions (Adaptix
+  today; ready for Sliver / Mythic) and labels the source so the
+  operator knows which beacon is responding.
+
+## v0.4.3 — 2026-05-17
+
+### Adaptix stale agents reported dead
+- Adaptix connector now marks agents that miss their callback
+  window as `dead`. Stops the host-actions panel from showing live
+  controls for beacons that never come back.
+
+## v0.4.2 — 2026-05-17
+
+### Host-actions hides dead agents
+- The per-host Live Actions panel filters out `dead` agents so the
+  operator only sees beacons that can actually execute. Mirrors the
+  v0.4.1 filter on the C2 Live Sessions tab.
+
+## v0.4.1 — 2026-05-17
+
+### C2 Live Sessions — filter dead agents
+- C2 Live Sessions tab no longer shows dead beacons in the running-
+  agents list. Cleans up the dashboard after long engagements
+  where webhook-tracked sessions accumulated.
+
+## v0.4.0 — 2026-05-17
+
+### Playbook depth (P4)
+- **DAG runner** — Playbook steps gain `depends_on: list[int]`. When any
+  step opts in, the run executes as a directed acyclic graph: ready
+  steps (deps satisfied) spawn concurrently via `asyncio.create_task`
+  and are joined with `asyncio.wait(FIRST_COMPLETED)`. Fan-out / fan-in
+  is implicit in the graph; classic linear playbooks (no `depends_on`
+  anywhere) keep using the existing `_run_sequence` path unchanged.
+- **Retry logic** — `retry_count` (0-10), `retry_delay_seconds`, and
+  `retry_on` (any of `failed`, `cancelled`, `timeout`) per step. Each
+  retry creates a new `Job` row appended to `PlaybookRun.jobs_json`
+  with `step_idx` + `attempt` so history is auditable.
+- **Preconditional steps** — `precondition: {step, result_key, operator,
+  value, negate}` evaluated against a prior step's `result_json` before
+  running. Skipped steps land in `step_states` as `skipped` and never
+  consume a job slot.
+- **Validation** — DFS cycle detector with reconstructed path
+  (`"#1 → #2 → #1"`), depends_on bounds + self-loop guard, and a
+  rejection of legacy `on_success: jump` / `on_failure: jump` once the
+  playbook is in DAG mode (jumps and DAGs are incompatible).
+- **Frontend** — Each step in the playbook editor gets a collapsible
+  "Advanced — DAG · Retry · Precondition" section: chip-style
+  `depends_on` picker, retry inputs, retry-on toggle, and a compact
+  precondition builder. Run view detects DAG runs, groups job attempts
+  by `step_idx`, renders a `↻N` badge for retried steps, displays
+  skipped steps with the `↷` marker, and tags the run with a "DAG" chip.
+
+### AI kill switch
+- New `ai_enabled` flag in `ai_config` (default `true` for back-compat).
+  Admin panel gains a prominent enable/disable checkbox with red-tinted
+  framing when off. Disabling immediately hides the floating AI chat
+  panel for every connected user and returns HTTP 503 from
+  `POST /projects/{pid}/ai/chat`; provider configuration is preserved.
+- Lightweight `GET /api/ai/status` endpoint lets the frontend gate UI
+  without leaking provider details; `rt:ai_status_changed` window event
+  triggers a re-fetch when an admin saves the config.
+
+## v0.3.2 — 2026-05-17
+
+### Frontend follow-ups for v0.3.1 backend work
+- **C2 panel respects project-owner self-service** — `ScansView`'s
+  C2 panel now reads project role; non-admin project owners can
+  register Adaptix/Mythic/Sliver integrations scoped to their own
+  project. "All projects" toggle locked for non-admins; Edit/Delete
+  hidden for integrations the user can't manage; informative
+  "managed globally" / "read-only" labels instead of broken buttons.
+- **Audit log structured rendering** — Timeline view gets a dedicated
+  Audit filter chip + shield icon; audit-specific verbs labelled
+  ("Secret → C2 exec", "Export with secrets", …); inline meta chips
+  (`count=5`, `c2_type=mythic`, `host_count=12`) under each event;
+  expandable raw-JSON view per row.
+
+### Unified error contract (B5-3)
+- New `app/core/errors.py` — `AppError(code, message, status, details)`
+  plus FastAPI exception handlers that wrap every error response into
+  `{code, message, details?, detail}`. `code` is a stable machine
+  identifier (`insufficient_permissions`, `cred_not_found`,
+  `validation_failed`, …); `detail` mirrors `message` for backwards
+  compat with the old `{detail}` shape.
+- Migrated the highest-traffic gates to explicit codes — `deps.py`,
+  `core/access.py`, `routers/creds.py`. The remaining 340+ existing
+  `HTTPException(...)` call sites keep working unchanged and inherit
+  status-derived codes (`bad_request` / `forbidden` / `not_found` / …).
+- Frontend `api/client.js` reads `code` and `details` onto the thrown
+  Error object — replaces brittle string-matching like
+  `e.message.includes('admin')`.
+
+### Live C2 Sessions panel
+- New first-class tab inside Scans → "Live Sessions" — single view
+  showing every live agent across every configured C2 integration
+  (Adaptix / Mythic / Sliver) in one place.
+- Per-integration health chips (alive / total counters, error
+  banners), filters (free-text, framework, privilege tier, alive-only),
+  auto-refresh (15s), manual refresh with last-fetch timestamp.
+- Sortable table with framework badges and red/amber/blue privilege
+  tier chips; dead rows muted.
+
+### Loot polish
+- **Fixed download filename clobbering** — value-only loots no longer
+  get `.txt` blindly appended to a name that already has an extension
+  (e.g. `report.yaml` was saving as `report.yaml.txt`).
+- **New inline preview modal** — eye-icon button on every previewable
+  loot row + detail panel; supports image / pdf / text (lazy-fetched) /
+  audio / video with native players, plus a fallback for unsupported
+  binaries. Escape / outside click closes.
+- Detail-panel download button shows the actual format
+  ("Download (PDF)", "Download (YAML)", …).
+
+## v0.3.1 — 2026-05-17
+
+### RBAC closures
+- **Knowledge Base** — `kb.*` permissions added to ROLE_PERMISSIONS; every
+  endpoint in `kb.py` now properly gated. Global articles remain admin-only
+  to write; project-scoped articles follow the project role.
+- **WebSocket broadcast filter** — per-recipient policy in `_local_broadcast`:
+  drops events for users without the entity read permission; redacts
+  sensitive fields (e.g. `cred.secret`) to `""` for users without the
+  secondary permission. Global admins bypass. Plain entities fall through
+  unchanged for backwards compatibility.
+- **Audit log coverage** — `read_credential_secrets` event extended to
+  the host-actions panel; new events `secret_used_bulk_exec`,
+  `secret_used_validate`, `secret_used_c2_exec`, `export_with_secrets`.
+- **Permission namespaces** — `playbooks.*`, `jobs.*`, `pivots.*`,
+  `webhooks.*`, `scans.*` added. Fixed dead-string bugs in
+  scheduled_playbooks.py, webhooks.py, domains.py, scans.py where
+  checks gated against non-existent permission strings.
+- **C2 project-owner self-service** — project owners can register C2
+  integrations (Adaptix / Mythic / Sliver) scoped to their projects.
+  Global integrations remain admin-only.
+
+### Pivots
+- **ligolo/chisel parser enrichment** — mode / direction / proxy_type /
+  server / forwards / target_host / interface extracted from `ps`
+  args; new `ss -tnlp` section in the SSH probe populates live
+  listen ports. Parsed fields stored as JSON `#params: {…}` trailer
+  in `notes` (no DB migration).
+- **Attacker target role flags** — every SSH target has `is_operator`
+  (run scans/exec) and `runs_pivot` (chisel/ligolo lives here).
+  Scan/exec endpoints filter operator-capable targets only; the
+  pivot collector filters pivot-capable targets only. Defaults
+  both-true.
+- **Project-scope collect isolation** — `/api/pivots/collect` decides
+  per observation whether routing info falls inside the current
+  project's CIDR scopes. Out-of-scope dropped by default
+  (`strict_scope_filter`); ambiguous (socks-only / hostname target)
+  kept by default (`keep_ambiguous`). Solves the data-leak when
+  one ligolo box serves several projects.
+
+### Docs
+- New top-level `SECURITY.md` — protected assets, threat boundaries,
+  encryption, RBAC, audit log, pre-deployment checklist.
+- New top-level `THREAT_MODEL.md` — STRIDE-style actor matrix and
+  seven specific attack scenarios.
+
+## v0.3.0 — 2026-05-16
+
+### C2 integrations
+- **Mythic** added with Adaptix parity: GraphQL sync (callbacks +
+  credentials), live agents, execute via `createTask` mutation,
+  beacon/session task history. Auth via apitoken header or
+  username/password → JWT. Live-validated against Mythic 3.4.0.
+- **Sliver** rewritten on native gRPC via `sliver-py` (the previous
+  HTTP connector was fictitious — Sliver has no public REST API in
+  OSS). Single "Operator Config (JSON)" field, sessions + beacons,
+  execute, beacon task history.
+- **Cobalt Strike** removed (was a fictitious REST API stub).
+- **Metasploit** added in v0.2.x then removed (operational complexity
+  too high for current engagement profile).
+
+### Topology / Smart Build
+- Pivot through junction devices (VPN-GW etc.) with via_host_id
+  auto-Scope; multi-hop session routing; key-host filter to reduce
+  visual noise; P6.5 auto-pivot block.
+
+### Access / permissions
+- Unified `_evaluate()` shared across `check_pid_access`,
+  `check_object_access`, `user_has_permission`. `permissions.py`
+  reduced to a pure data layer.
+
+### Network view
+- Route semantics on edges: transport + kind chips, transport colour
+  legend, verify/unverify-edge from the context menu.
+
+### Frontend reliability
+- `lazyWithReload` auto-recovers when the user has a stale chunk hash
+  after a frontend rebuild — no more red-screen on dynamic import.
+
+## Unreleased
+
+### Smart Build — Attacker traffic routing + region read-after-write fix
+
+Two-part change so the network map shows the actual traffic path from the
+attacker into target scopes (e.g. `Attacker → GW_EXTERNAL → VPN-GW → SDOTSON`
+in the Bootcamp project).
+
+**Fix: region read-after-write inside Smart Build**
+
+After `replace_regions(...)` (which does `delete(synchronize_session=False)`
++ `add()`), the very next `get_regions(network.id, db)` call returned `[]`
+because SA hadn't flushed the in-flight session. As a consequence:
+- `region_by_cidr` was empty
+- `entry_region` / `anchor_region` were `None`
+- The attacker uplink edge (`Attacker → entry-gateway`) was silently
+  skipped on every build
+
+Added an explicit `db.flush()` right after `replace_regions(...)` so the
+following `get_regions` sees the freshly upserted rows.
+
+**Auto-infer scope.via_host_id when no host matches the gateway**
+
+For non-entry scopes that don't have `via_host_id` set and whose
+`gateway_ip` doesn't match any host (single-homed or otherwise), Smart
+Build now picks a junction host (`role` ∈ `router / firewall /
+network_device / pivot / jump_host`, or `tags` ∩ `{router, firewall,
+gateway, vpn, pivot}`, or hostname `VPN-*` / `GW-*` / `FW-*` / `ROUTER-*` /
+`EDGE-*` / `PROXY-*`) outside the scope to serve as a pivot. Preference
+is given to junction hosts in the entry scope.
+
+`auto_via_host_assigned` counter returned in the result. In Bootcamp this
+is 0 because VPN-GW is **multi-homed** (`ips=[10.124.1.253, 10.154.17.1]`)
+— the existing multi-IP gateway match already covers it. The new logic
+kicks in when the operator declared a `gateway_ip` for a scope but never
+created a host for it.
+
+Effect on Bootcamp (`p105ca8e7`):
+
+| Edge | Source | Notes |
+|------|--------|-------|
+| Attacker → GW_EXTERNAL | uplink (auto) | entry-gateway from `is_entry` scope |
+| GW_EXTERNAL ⇄ VPN-GW | same_subnet | DMZ neighbours |
+| VPN-GW ⇄ SDOTSON / DC / DC-2 / EXCHANGE / … | same_subnet | VPN-GW multi-homed in Internal |
+| DC → SDOTSON | domain_member | from P4 |
+| VPN-GW → SDOTSON | c2_session | from observed HostActivity |
+
+---
+
+### Smart Build — Auto-role inference
+
+Smart Build now infers and writes `host.role` for hosts where the operator left it empty or `unknown`. Operator-set roles are never overwritten.
+
+Priority order in `_auto_assign_host_role`:
+1. `is_attacker` → `attacker`
+2. Tag hints: `dc`, `router`/`firewall`/`gateway`, `database`/`db`/`mssql`, `mail`/`exchange`, `web`/`webapp`/`iis`
+3. Port signatures: 88+389 → DC, 1433/3306/5432/1521/27017 → database, 25/465/587/993/995 → mail
+4. Hostname prefixes: `DC*` → DC; `EXCHANGE*`/`MAIL*`/`MX*` → mail; `MSSQL*`/`SQL*` → database; `SHPOINT*`/`WEB*`/`WWW*`/`IIS*` → web; `VPN*`/`GW*`/`FW*`/`ROUTER*`/`PROXY*` → router
+5. Weak port signals: 80/443/8080/8443 → web; 445 + domain → workstation; SSH-only → server
+6. Domain-joined fallback → workstation
+
+Backend:
+- New `_auto_assign_host_role(host)` helper in `topology.py`
+- `SmartBuildRequest.auto_assign_roles: bool = True` (default on)
+- `_run_smart_build` runs the loop right after loading `all_hosts`; sets `host.role` in DB before any downstream logic (DC detection, tier classification, service-graph) consumes it
+- Result contains `roles_assigned: int`
+
+Tested on Bootcamp project (p105ca8e7): 31 of 33 unknown hosts received a meaningful role — DC/DC-2 → domain_controller, MSSQL → database, EXCHANGE → mail, SHPOINT → web, all SMB-only domain workstations (SDOTSON, BACKUP, …) → workstation. Existing `network_device` roles on GW_EXTERNAL / VPN-GW preserved.
+
+---
+
+### Smart Build — SB6 Service-graph edges (opt-in)
+
+Two heuristic rules for client→service dependency edges:
+
+1. **Web → DB** — host with role `web` (or open 80/443/8080/8443) draws a `service_dep` edge to every host with role `database` (or open 1433/3306/5432/1521) in the same `/24`
+2. **LDAP-client → DC** — every domain-joined non-DC host draws a `service_dep` edge to a DC of the same domain. Redundant when `include_domain_edges=true` (P4 already draws the reverse `domain_member` edge — dedup blocks it), but useful when domain edges are disabled
+
+Backend:
+- `SmartBuildRequest.include_service_graph: bool = False` (default OFF — inference, not observation)
+- New block in `_run_smart_build` between P4 and P5
+- Edge fields: `type=service_dep`, `source=service_inference`, `confidence=0.5`, `state=inferred`, `verified=false`, `style=dashed`
+
+Frontend:
+- `NetworkView.jsx` edge style for `service_dep`: grey thin dashed (`#6a7180`, `2 4` dasharray), no animation — deliberately quieter than access/lateral so the map stays readable
+
+Tested on synthetic project `p3e291272` (SB6-test): web→db edge correctly produced, LDAP edges blocked by P4 dedup as expected.
+
+---
+
+### Smart Build — SB4 Edge MITRE / noise / kill-chain tagging
+
+Action-class edges now carry three metadata fields in `extra_json`:
+- `mitre_techniques` — MITRE ATT&CK IDs (e.g. `["T1078"]`)
+- `noise_level` — `low` / `med` / `high` (OPSEC noise)
+- `kill_chain_stage` — `lateral_movement` / `execution` / `command_and_control` / etc.
+
+Classification by source:
+| Source | MITRE | Noise | Stage |
+|--------|-------|-------|-------|
+| `cred_validation` | T1078 | med | lateral_movement |
+| `bulk_exec` | T1059 | high | execution |
+| `host_activity` (c2) | T1071 | low | command_and_control |
+| `host_activity` (lateral) | T1021 | med | lateral_movement |
+| `host_activity` (postex) | T1059 | high | execution |
+| `host_activity` (other) | T1059 | med | execution |
+| `pivot_observation` | T1090 | low | command_and_control |
+
+Inference sources (`auto` subnet/domain_member, `scope_via`, `internet_facing`, `bloodhound`) are NOT tagged — they describe topology, not actions.
+
+Backend:
+- New `_edge_action_tags(source, edge_type, activity_type)` helper in `topology.py`
+- Three `_add_edge` call sites (P1 cred_validation, P2 bulk_exec, P3 host_activity) merge the result into `edge_data`
+- One-time backfill loop after `manual_edges = [...]` enriches pre-SB4 host_activity / pivot edges that survived the auto filter
+
+Frontend:
+- `NetworkView.jsx` side panel: three new chips next to confidence for any edge carrying these fields — purple MITRE list, colour-coded noise (green/amber/red), blue kill-chain stage. Tooltip on hover.
+
+---
+
+### Smart Build — SB3 Tier-0/1/2 host classification
+
+Smart Build now classifies every host into one of three AD tiers and surfaces it both as a node tag and a coloured chip on the network map.
+
+- **Tier 0** — domain controllers, DA/EA-equivalent hosts (role=`domain_controller`, tags `dc` / `da` / `ea` / `bh:dc` / `bh:da-member`)
+- **Tier 1** — admin-power servers: targets of admin-class edges (`smb_admin`, `admin_to`, `local_admin`, `dcsync`, ACL writes `generic_all`/`write_dacl`/`generic_write`/`write_owner`/`ext_rights`, `allowed_to_delegate`); hosts with `HostActivity.technique` starting with `T1003` (LSASS / SAM / NTDS credential dumping); hosts tagged `bh:admin`
+- **Tier 2** — workstations / everything else
+
+Backend changes:
+- `SmartBuildRequest.include_tier_zones: bool = True` (default on)
+- After all edges are built, `_run_smart_build` iterates over `all_hosts` and writes `node.extra_json.tier` (0 / 1 / 2) plus a `tier:N` tag (replacing any prior `tier:*` tag — idempotent across rebuilds)
+- Result now contains `tier_counts: {tier_0, tier_1, tier_2}`
+
+Frontend changes (`NetworkView.jsx`):
+- T0 / T1 coloured chips in the top-right corner of each node (red `#e8574a` / amber `#f09a3a`)
+- T2 nodes are intentionally silent — chip is only drawn for T0/T1 to keep the map readable
+
+---
+
+### Fix — Smart Build position stability
+
+Repeating Smart Build no longer scatters the network map.
+
+- New `SmartBuildRequest.preserve_positions: bool = True` (default true)
+- When true, any node that already has `x`/`y` keeps its position through
+  rebuild — covers both prior auto-positioned and manually positioned nodes
+- Three blocks that previously moved nodes on every build now respect the flag:
+  1. The `compute_layout` apply loop in `_run_smart_build`
+  2. Transit/region overlay (`_place_between_regions`, `_place_on_region_edge`)
+  3. Attacker uplink relative to entry-region anchor
+- `manually_positioned=True` nodes remain protected via `keep_manual_positions`
+- To force a full re-layout, either call `POST /topology/rebuild-layout`
+  or pass `preserve_positions: false` to Smart Build
+
+---
+
+### Smart Build — SB2 BloodHound edges expansion
+
+BloodHound importer (`import_bloodhound.py`) gained three new edge types and three node-tag enrichments. Smart Build preserves them through its `manual_edges` filter (any edge with `source != "auto"`), so they survive rebuild without further pipeline changes.
+
+#### New edge types
+- `can_rdp` — `CanRDP` principals (computers in the top-level CanRDP key), `confidence=0.8`, `state="inferred"`
+- `allowed_to_delegate` — constrained-delegation principals → target computer, `confidence=0.85`, `state="inferred"`
+- `trust` — domain-trust edges between DCs of different domains, parsed from `*_domains.json` `Trusts[].TrustType` / `TrustDirection`, `confidence=0.95`, `verified=true`; label encodes type (`ParentChild` / `CrossLink` / `Forest` / `External`) and direction (`Inbound` / `Outbound` / `Bidirectional`)
+
+#### Node-tag enrichment (step 6.5)
+- `bh:dc` — domain controllers (host.role=domain_controller or `dc` in tags)
+- `bh:admin` — hosts that are source of any `smb_admin` or ACL edge (admin power principals)
+- `bh:da-member` — hosts whose SID is a member of DA-equivalent groups
+
+Tags are written to `host.tags` and propagate to `node.tags` on the next Smart Build / Auto-Build (which copies host tags into node tags).
+
+#### Stats fields added
+`can_rdp_edges`, `allowed_to_delegate_edges`, `trust_edges`, `bh_dc_tagged`, `bh_admin_tagged`, `bh_da_member_tagged`.
+
+#### Internals
+- `add_edge` helper now returns `bool` for dedup-aware counting
+- New `_add_host_tag` helper for idempotent tag insertion
+
+---
+
+### Smart Build — L1 stable edge IDs
+
+- New `stable_edge_id(from_nid, to_nid, source, kind)` helper in `core/utils.py` — SHA1-derived deterministic edge id (format `edg<12hex>`)
+- `_run_smart_build._add_edge` and the legacy `topology/apply` + `topology/auto-build` edge writers switched from random `new_id("edg")` to `stable_edge_id`
+- `kind` priority: first `access_role` if present, otherwise `type` — same `(from, to, source)` pair can carry several access edges (ssh / winrm / local_admin) as separate stable ids
+- Pivot observation edges in `pivots.py` are now keyed by `pivot_observation_id` so the same observation always yields the same edge id across re-syncs
+- Manual edges created from UI (`network_map.py`, `bulk_actions.py`) still use random ids — they are inserted once and never regenerated
+
+Effect: UI state (selection, hover, manual node position annotations) keyed by edge id survives Smart Build / Auto-Build / Pivot Sync rebuilds.
+
+---
+
+## v0.2.2 — 2026-05-14
+
+### Smart Build — Access graph deepening
+
+#### Multi-hop session routing (P11)
+- Sessions in pivot-only networks now render as the real chain `attacker → entry-gw → pivot → target` instead of a star from the attacker
+- For each `HostActivity` (exec/postex/lateral/c2, status=done) ordered by `ts ASC`, the edge source is resolved in priority order:
+  1. Earliest existing session in the same scope becomes the local pivot for subsequent ones
+  2. `scope.via_host_id` (explicit pivot)
+  3. Auto-junction host (router/VPN-GW) in the entry scope, discovered by role/tag/keyword
+  4. Direct from attacker (fallback)
+- Applies to all activity types, not only c2
+- Routing reason is recorded in `edge.reason` ("via earlier session on …", "via scope.via_host …", "via auto-detected junction", "direct from attacker")
+
+#### Pivot ↔ Scope automation
+- Creating a `PivotObservation` (UI Add Pivot, PATCH update, or SSH collector) with a non-empty `route_cidr` auto-creates or refreshes a `Scope` with `value=<CIDR>`, `via_host_id=<pivot_host_id>`, `description="auto: via pivot <hid>"`
+- Idempotent: an existing scope with the same CIDR only gets `via_host_id` set when it was previously empty (manually configured scopes are preserved)
+- On pivot deletion: if the deleted pivot was the last one for the `(CIDR, host)` pair and the scope description still starts with `auto: via pivot`, the scope is removed automatically
+
+#### Pivot-only scope regions and traffic isolation
+- `infer_links_smart` gained an `isolated_subnets` parameter — inter-subnet LAN gateway↔gateway edges are skipped for any scope with `via_host_id` (connectivity is only through the pivot, never through the scope's own local gateway)
+- Pivot-only scope regions get an orange fill (`#f09a3a` / `#f09a3a18`), `zone_type=scope_pivot`, and label `<desc> (via <pivot-hostname>)`
+- Existing regions are refreshed in place when a scope is reclassified (user geometry is preserved; color/zone_type/via_host_id sync to current state)
+- Hosts inside pivot regions inherit `node.zone_type=scope_pivot` and render the orange zone badge in the UI
+
+#### L2/L3 — dedup and multi-homed hosts
+- L2: P3 host_activity skips an edge when P1 cred_validation already drew one for the same `(attacker, target, access_role)` tuple (avoids double ssh edges)
+- L3: `infer_links_smart` buckets each host into every subnet derived from `host.ips[]` — multi-homed gateways now appear in all of their subnets
+
+#### L4/L5 observability and L6 dry-run
+- L4: the smart-build API result returns `edges_by_source: {<source>: count}` — a breakdown across cred_validation / bulk_exec / host_activity / auto / scope_via / internet_facing
+- L5: `meta_json.last_smart_build` (ISO timestamp) and `meta_json.last_smart_build_breakdown` are persisted on the network; the UI shows a toast with the breakdown after each build
+- L6: `SmartBuildRequest.dry_run=True` runs the full pipeline and rolls back without commit/broadcast — useful for previewing the diff
+
+#### P12 — Confidence decay
+- Exponential confidence decay for bulk_exec edges (using `Job.finished_at`) and host_activity edges (using `HostActivity.ts`) with τ=14d (configurable via `confidence_decay_days`)
+- Edges with `c < 0.4` are tagged `state="stale"` and rendered in grey dotted style so stale credential proofs no longer mislead operators
+
+#### P13 — Internet-facing edges
+- A virtual `vn-internet` node is auto-created whenever the project has hosts tagged `public / exposed / internet / internet-facing / edge / dmz-public`, or with non-RFC1918 IP addresses
+- Edges of type `internet_facing` from that node to each public-facing host, rendered orange-red dashed
+- Controlled by `SmartBuildRequest.include_internet_facing` (default true)
+
+### Hosts — status validation fix
+- The B6-scale WIP added a Pydantic validator for `Host.status` restricted to `{unknown, up, down, pwned, unreachable, attacker, access, compromised}`, but the frontend (`NODE_STATUS` in `constants.js`) emits `{unknown, alive, scanned, access, pwned, owned}` — creating a host or changing status from the UI returned 422 for any value outside the three-way intersection
+- `_HOST_STATUSES` is expanded to the union of both sets plus back-compat aliases — all six dropdown statuses are now accepted by both `HostCreate` and `HostUpdate`
+
+### B6 — Network data split (Alembic 002–005)
+- Network data (nodes/edges/regions) moved out of JSON columns into dedicated tables `network_nodes`, `network_edges`, `network_regions` — removes the ≈1 MB serialized-JSON ceiling and the rewrite-the-whole-blob-per-change overhead
+- New `backend/app/core/network_data.py` helpers (`get_nodes / get_edges / get_regions / replace_nodes / replace_edges / replace_regions`) — single read/write boundary for all routers
+- Alembic migrations:
+  - **002** creates the three tables, indexes, and back-fills them from the existing `regions_json/nodes_json/edges_json`
+  - **003** adds FK / CASCADE constraints
+  - **004** fixes `network_nodes.ports` / `services` column types (`ARRAY` instead of `JSONB`)
+  - **005** converts `network_edges.confidence` from `INTEGER` to `DOUBLE PRECISION` (fixes the `int(0.9) → 0` rounding that made every inferred edge land at confidence 0) and adds `network_regions.extra_json`
+- All routers (`hosts`, `creds`, `networks`, `network_map`, `topology`, `pivots`, `attack_paths`, `attack_graph`, `bulk_actions`, `attacker_exec`, `c2`, `findings`, `loots`, `notes`, `objectives`, `templates`, `project_templates`, `webhooks`, `system_modules`, `import_bloodhound`, `import_export`, `scans`, `search`) migrated to the helpers
+
+### B0-1 — Alembic schema management
+- Database schema management moved from ad-hoc `CREATE TABLE` / `ALTER TABLE` blocks in `main.py` to Alembic
+- Base revision `001_full_schema.py` — snapshot of the current production schema for fresh installs
+- Backend startup now runs `alembic upgrade head` automatically
+- `alembic` and dependencies added to the backend Dockerfile
+
+### P3 — FTS Search rewrite
+- GIN functional indexes on `hosts / creds / notes / findings / kb_articles / custom_snippets`
+- Search uses `websearch_to_tsquery` + `ts_rank_cd` for a single ranking across object types
+- Snippets via `ts_headline` with `<b>` HTML markers for highlight
+- Pagination through an `offset` query parameter plus a "Load More" button in the frontend
+- `kb` and `snippet` object types added to the global search
+- `SnippetText` renders highlighted HTML safely through `dangerouslySetInnerHTML`
+
+### SSH askpass — regression fix
+- `ssh_exec.py`: when `sshpass` / askpass-helper was used the password was read from the wrong slot of the new credential object, causing auth failures after the credential schema migration
+
+---
+
+## v0.2.0 — 2026-05-13
+
+### SSH Pivot — исправление зависания агента при скане через SOCKS-прокси
+
+**Проблема:** при запуске сканирования через pivot-хост с SOCKS4/5-прокси gunicorn-воркер зависал намертво — процесс SSH оставался живым после таймаута и держал pipe открытым, блокируя `communicate()`.
+
+**Причина:** `setsid -w` оборачивал SSH-процесс, делая его внуком (не прямым ребёнком). `proc.kill()` убивал setsid, но SSH оставался сиротой с открытыми pipe'ами.
+
+**Исправления (`backend/app/core/ssh_exec.py`):**
+- Убран `setsid -w` — SSH теперь прямой дочерний процесс
+- Добавлен `start_new_session=True` во все три точки запуска (`run_ssh_command`, `run_ssh_command_cancellable`, `run_ssh_command_streaming`) — даёт тот же изоляционный эффект, но с правильной иерархией процессов
+- `proc.kill()` теперь гарантированно закрывает pipe'ы и разблокирует `communicate()`
+
+**Таймаут proxychains (`backend/app/core/exec_context.py`):**
+- В конфиг proxychains добавлены `tcp_connect_time_out 5000` и `tcp_read_time_out 15000`
+- При недоступном SOCKS-прокси команда теперь завершается за ~5 с вместо вечного ожидания
+
+---
+
+### Scope — точка входа в инфраструктуру (`is_entry`)
+
+**Новое поле `is_entry` на Scope** (Boolean, default false):
+- Отмечает scope, через который проходит входящий трафик атакующего (VPN-шлюз, DMZ и т.п.)
+- Только один scope на проект может иметь `is_entry=true` — при установке флага у другого scope старый сбрасывается автоматически (как в `create`, так и в `update`)
+- В UI отображается бейдж `· entry` в списке scope'ов; чекбокс в форме создания/редактирования
+
+**Backend:**
+- `ALTER TABLE scopes ADD COLUMN is_entry BOOLEAN NOT NULL DEFAULT FALSE` — добавлено в `main.py`
+- `models.py`, `schemas.py` — поле добавлено в `Scope`, `ScopeCreate`, `ScopeUpdate`
+- `routers/scopes.py` — авто-сброс предыдущего `is_entry` при POST и PATCH
+
+---
+
+### Topology Smart Build — исправления и улучшения
+
+#### Исправление crash в транзитном блоке
+- `float(region.get("x", 0))` заменено на `float(region.get("x") or 0)` во всех вспомогательных функциях (`_region_center`, `_place_between_regions`, `_place_on_region_edge`) — `dict.get(key, default)` возвращает `None` (не default) при `key: null` в JSON
+- Транзитный блок обёрнут в `try/except Exception` — ошибки позиционирования не ломают build целиком
+
+#### Статусы нод больше не сбрасываются после Smart Build (двойная защита)
+
+**Backend (`topology.py`):**
+- Добавлена иерархия приоритетов `_STATUS_RANK` (unknown < alive < up < scanned < access < owned/pwned < attacker)
+- При синхронизации `Host.status → node.status` статус ноды обновляется только если хост-статус ≥ текущего статуса ноды — исключает откат "scanned" → "unknown"
+
+**Frontend (`applySyncEvent.js`):**
+- При получении `layout_applied` / `topology_rebuilt` фронтенд сравнивает текущий статус ноды с входящим и берёт лучший — по `node.id` и `node.host_id`
+- `layout_reset` по-прежнему полностью заменяет состояние (намеренный полный сброс)
+
+#### Направление трафика соответствует логике атаки
+
+**Раньше:** uplink-ребро вело `Attacker → transit-хост` (VPN-GW), минуя entry-gateway.
+
+**Теперь:** uplink ведёт к **entry scope gateway** (`gateway_ip` scope с `is_entry=true`). Полная цепочка видна на карте:
+```
+Attacker → GW_EXTERNAL (entry)  →  VPN-GW (pivot)  →  Internal hosts
+```
+Если entry-gateway не настроен — fallback на transit-хост (прежнее поведение).
+
+---
+
+### SSH Proxy — многоуровневая поддержка прокси для attacker-цели
+
+**Новая система маршрутизации SSH-команд** (`backend/app/core/`):
+
+- `exec_context.py` — экспортирует переменные окружения `ROOTNOTES_EXEC_*` (jump-host, proxy) перед выполнением команды; оборачивает команду в proxychains при SOCKS4/5
+- `route_selection.py` — алгоритм выбора маршрута: direct → jump → proxy; учитывает доступность из attacker-цели
+- `socks_proxy.py` — Python SOCKS5-клиент для `ProxyCommand` в OpenSSH (без внешних зависимостей)
+
+**Поддерживаемые прокси для attacker SSH-target:**
+| Тип | Описание |
+|-----|----------|
+| `jump` | SSH Jump Host (ProxyJump / ProxyCommand) |
+| `socks5` | SOCKS5 через `socks_proxy.py` ProxyCommand |
+| `socks4` | SOCKS4 через proxychains |
+
+**SystemModulesView:** в UI attacker-targets добавлены поля proxy-конфигурации с валидацией.
+
+---
+
+### C2 — уточнение семантики статусов хостов
+
+- При синхронизации C2-агентов (CS/Sliver/MSF/Adaptix) статус хоста выставляется строго по иерархии: если хост уже `owned/pwned`, агент C2 не понижает статус до `access`
+- Корректная обработка `last_seen` и `is_active` для разных коннекторов
+- Исправлен тайпо endpoint в Cobalt Strike коннекторе: `/api/v1/beacon` → `/api/v1/beacons`
+
+---
+
+## 2026-05-09 — Smart topology build + Full-text job output search + Attacker SSH improvements
+
+### Smart topology build (`POST /topology/smart-build`)
+
+Новый endpoint вместо flat subnet-mesh строит многослойный граф:
+
+**Источники данных (в порядке приоритета):**
+1. `CredHostNote.access[]` — подтверждённые access-рёбра (ssh/winrm/smb_admin/local_admin) с `verified=true, confidence=1.0, source=cred_validation`
+2. Jobs `bulk_exec done` с `access_role` в result_json — `source=bulk_exec, verified=true`
+3. `HostActivity` с типом `exec/postex/lateral` — `source=host_activity, confidence=0.9`
+4. `host.domain` + DC-детектирование (порты 88+389, тег dc, роль domain_controller) → `domain_member` рёбра `source=auto, confidence=0.8`
+5. Subnet hub-and-spoke inference — `same_subnet/lan, source=auto, confidence=0.7-0.9`
+
+**Регионы:** из Scope CIDR-записей — автоматический bounding box по нодам в подсети
+
+**Для каждого ребра:** `type, label, source, reason, state (observed/inferred), verified, confidence, is_manual`
+
+**Стили рёбер:**
+- Access (ssh/winrm/local_admin): зелёный solid/dashed (верифицировано / нет)
+- Lateral/pivot: жёлтый анимированный
+- domain_member: фиолетовый пунктир
+- same_subnet/lan: тёмно-серый пунктир
+
+**Ноды:** обогащены `domain`, `tags`, `role` из host metadata; роль инфицируется из порт-сигнатур (domain_controller, web_server, database, jump_host, router)
+
+**Правила:** manual/observed рёбра сохраняются всегда; auto-рёбра перестраиваются при каждом вызове
+
+Кнопка **Smart Build** (зелёная) в тулбаре Network Map рядом с Auto-layout.
+
+---
+
+## 2026-05-09 — Full-text job output search + Attacker SSH improvements + Cred Matrix
+
+### Full-text search по job output
+- Новый query-param `output_search` в `GET /api/projects/{pid}/jobs` — SQL `ilike` по полям `output` и `error_output`
+- В JobsView добавлено поле **"Search in output…"** с дебаунсом 400ms и кнопкой очистки
+- При активном output_search: строки с совпадением авто-разворачиваются, бейдж показывает количество найденных job'ов
+- В развёрнутом output: совпадающие строки выделяются желтым (`<mark>`), несовпадающие затемнены (opacity 0.3), счётчик совпадающих строк сверху
+
+---
+
+## 2026-05-09 — Attacker SSH improvements + Cred Matrix
+
+### Credential × Host Access Matrix
+- Новый endpoint `GET /api/projects/{pid}/cred-matrix` — возвращает `{creds, hosts, matrix}` по данным `CredHostNote`
+- `CredMatrix.jsx` — heatmap-компонент: sticky-заголовки, вертикальный текст для хостов, tooltip с access-ролями и заметками
+- Фильтры: Все / Успешные / Проверенные; поиск по username/domain/service; stat-бейджи
+- Переключатель **⊞ Matrix** в хедере вкладки Credentials
+
+### Transport Fallback для Attacker SSH
+- `ssh_exec.py`: добавлен `is_transport_failure(result)` — детектирует недоступность хоста (exit_code 255 + stderr-паттерны)
+- `bulk_actions.py`: `_resolve_exec_ssh_configs()` возвращает список кандидатов; `bulk_exec` и `validate_cred` перебирают их при transport-ошибке
+- `attacker_exec.py`: `_exec_ssh_candidates` + fallback-цикл; HTTP 502 если все таргеты недоступны
+- Auth-ошибки и ошибки команд не вызывают fallback — только network-недоступность
+
+### Attack Path Graph — исправление направлений стрелок
+- Row-wrap рёбра теперь маршрутизируются через низ/верх нод (не через правый край)
+- Два отдельных маркера: `#arrow-h` (→, для рёбер в строке) и `#arrow-v` (↓, для межстрочных переходов)
+- Квадратичные безье (`Q`) для скруглённых углов пути
+
+---
+
+## 2026-05-08 — Fixes
+
+### Notifications
+- Исправлена DNS-проблема в backend-контейнере: добавлены `dns: [8.8.8.8, 1.1.1.1]` в docker-compose.yml
+- Добавлены события `job_done` и `job_failed` в UI настроек уведомлений
+- Новый endpoint `GET /api/notifications/telegram/chat-id` — auto-detect chat_id через Telegram `getUpdates`
+- Кнопка **Detect** в UI Telegram-секции с выпадающим списком найденных чатов
+
+### C2 — Cobalt Strike
+- Исправлен тайпо `/api/v1/beacon` → `/api/v1/beacons` в `_cs_live_agents`
+
+### Sliver Builder
+- Конфиг builder перенесён из `/tmp/rootnotes.cfg` в `/etc/sliver-builder.cfg` (персистентный)
+- `sliver-builder.service` обновлён — больше не падает в crash-loop после перезагрузки
+- Implant generation: Windows x64 EXE через `generate --mtls <ATTACKER_IP> --os windows --arch amd64`
+
+---
+
+## 2026-05-07 — Session Summary
+
+### UI / Frontend
+
+#### Sidebar (AppChrome)
+- Collapsed sidebar: иконки теперь с отступами `12px 14px`, gap 10 — те же пропорции что в развёрнутом режиме
+- Все иконки уникальны (новые: `jobs`, `graph`, `book` для Domains, KB, Jobs)
+- Удалена вкладка **Attack Graph** (перекрывала Network Map, граф не строился)
+
+#### Overview (Dashboard)
+- Новый экран `/overview` — вкладка первая в сайдбаре
+- 5 stat-карточек: Hosts / Findings / Creds / Objectives / Notes (кликабельные, переход на нужную вкладку)
+- Findings by severity — горизонтальные бары
+- Hosts by status — dots с количеством
+- Последние 8 событий Timeline с `timeAgo`
+- Прогресс чеклиста по фазам
+
+#### Report (HTML Export)
+- Секция Findings с полными деталями (severity badge, CVE, description, recommendation)
+- Кнопка **Export HTML** — генерирует standalone HTML-файл на клиенте (без запросов к серверу)
+
+#### Import — Scanner Files
+- В ImportModal добавлена вкладка **Scanners** с загрузкой Nessus (`.nessus`) и Burp Suite (`.xml`) файлов
+- Использует `api.importNessus(pid, file)` и `api.importBurp(pid, file)`
+
+#### Attack Path
+- Переключатель List | Graph в хедере вкладки
+- SVG-граф шагов с нодами 160×80px, цветами по типу (`initial_access`, `lateral`, `escalation`, `objective`), стрелками, нумерацией шагов
+
+#### Toast Notifications
+- Глобальная система toast (`Toast.jsx`): `toast()`, `toastError()`, `toastSuccess()`, `toastWarn()`
+- Анимация `fadeInUp`, фиксированный bottom-center
+- Заменяет все `alert()` / `confirm()` вызовы
+
+#### Common Styles
+- `frontend/src/styles/common.js` — цвета `C` и объекты стилей `S` (input, select, textarea, card, badge)
+- `frontend/src/hooks/useEntityList.js` — generic хук для списков с loading/error состоянием
+
+#### Notifications Settings (Admin)
+- Добавлены события **Job completed** и **Job failed** в список событий
+- Кнопка **Detect** для автоопределения Telegram chat_id через `getUpdates` API
+- Выпадающий список найденных чатов — клик сразу вставляет ID
+
+---
+
+### Backend
+
+#### DB Indexes (`main.py`)
+Добавлено 17 индексов для ускорения запросов:
+```
+idx_hosts_pid, idx_hosts_ip, idx_creds_pid, idx_notes_pid, idx_notes_ts,
+idx_findings_pid, idx_loots_pid, idx_host_activities_pid, idx_host_activities_host_id,
+idx_cred_host_notes_cred_id, idx_cred_host_notes_host_id, idx_attack_steps_path_id,
+idx_timeline_events_pid, idx_timeline_events_ts, idx_checklist_items_pid,
+idx_scopes_pid, idx_objectives_pid
+```
+
+#### Search (`routers/search.py`)
+- Переписан на SQL `ilike` с `OR`-условиями вместо загрузки всех записей в память
+- `query.limit(limit).all()` вместо `.all()` → `[:limit]`
+
+#### Job Notifications (`core/job_tracker.py`)
+- `finish_job()` теперь отправляет уведомление при `status in ("done", "failed")`
+- Событие: `job_done` / `job_failed`, заголовок: `"Job done: <title>"`, тело: target или project ID + error excerpt
+
+#### C2 Integrations (`routers/c2.py`)
+| Коннектор | URL | Аутентификация |
+|-----------|-----|----------------|
+| **Cobalt Strike** | `http(s)://<host>/api/v1/beacons` | Bearer token |
+| **Sliver** | `http://<host>/v1/sessions` + `/v1/beacons` | Bearer token |
+| **Metasploit (MSFRPC)** | `http://<host>:55553/api/1.0/` | login → temp token |
+| **Adaptix** | WS/REST API | token + password |
+
+- Исправлен тайпо: `/api/v1/beacon` → `/api/v1/beacons` в `_cs_live_agents`
+- Metasploit: `_msf_sync` подключается через MSFRPC HTTP API (msfrpcd)
+
+#### Notifications (`routers/notifications.py`, `core/notifications.py`)
+- `GET /api/notifications/telegram/chat-id` — вызывает `getUpdates` бота и возвращает список чатов с названиями
+- Поддерживаемые каналы: Telegram, Slack webhook, Custom webhook (POST JSON)
+- Конфиг в `GlobalSetting` key `"notifications"`, загружается при каждом вызове (без перезапуска)
+
+#### Docker (docker-compose.yml)
+- Backend-контейнер получил DNS-серверы `8.8.8.8` / `1.1.1.1` для доступа к внешним API (Telegram и др.)
+
+---
+
+### Инфраструктура (attacker host)
+
+#### Sliver C2 v1.7.3
+| Компонент | Описание |
+|-----------|----------|
+| `sliver.service` | Teamserver, gRPC multiplayer port 31337 |
+| `sliver-proxy.service` | FastAPI REST-прокси (`/opt/sliver-proxy/`) |
+| `sliver-builder.service` | External builder для генерации implant'ов |
+
+**Sliver REST Proxy**:
+- Endpoint: `http://<ATTACKER_IP>:<PORT>/`
+- Bearer token: `<REDACTED>`
+- `GET /health`, `GET /v1/sessions`, `GET /v1/beacons`
+
+**Статус интеграции**: ✅ подключение работает, сессии возвращаются (пусто — нет активных агентов)
+
+#### Cobalt Strike 4.9.1 (Docker)
+| Компонент | Значение |
+|-----------|----------|
+| Image | `cobalt-strike:4.9` |
+| Teamserver port | `50050/tcp` |
+| Password | `<REDACTED>` |
+
+**REST Mock API**:
+- Эмулирует `/api/v1/beacons` и `/api/v1/credentials`
+- Используется для тестирования RootNotes CS-интеграции
+
+**Причина мока**: CS teamserver использует бинарный Aggressor-протокол (не HTTP REST). Для продакшн-интеграции нужен один из вариантов:
+1. CS REST API Plugin (official, платный)
+2. Aggressor Script с HTTP сервером
+3. Python-клиент, реализующий Sleep/Aggressor binary protocol
+
+**Статус интеграции**: ✅ test + sync работают через мок (`hosts_created: 2, creds_created: 4`)
+
+#### Metasploit (Attacker Host / Kali)
+- MSFRPC запускается: `msfrpcd -P <password> -S -f -a 0.0.0.0 -p 55553`
+- RootNotes коннектор: `type: "metasploit"`, url `http://<kali>:55553`
+
+---
+
+### Известные проблемы / TODO
+
+| # | Проблема | Статус |
+|---|----------|--------|
+| 1 | Sliver implant generation возвращает NOT_FOUND | Возможна несовместимость sliver-py 0.0.19 с Sliver v1.7.3 API |
+| 2 | CS бинарный протокол не реализован | Нужен CS client JAR или REST API плагин |
+| 3 | `deepcopy` not defined в topology auto-build | Нужен `from copy import deepcopy` в соответствующем файле |

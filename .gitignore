@@ -42,3 +42,24 @@ logs/
 # Misc
 *.zip
 *.tar.gz
+
+# Test & coverage artifacts
+.coverage
+coverage.xml
+.pytest_cache/
+htmlcov/
+frontend/coverage/
+.vitest/
+*.db
+*.sqlite
+*.sqlite3
+
+# Analysis artifacts
+.scannerwork/
+.sonar/
+
+# Internal module docs (not for public repo)
+docs/modules/
+
+# TLS certificates (generated locally, never commit)
+nginx/certs/

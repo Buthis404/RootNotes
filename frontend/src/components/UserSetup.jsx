@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import PropTypes from 'prop-types';
 import Icon from './Icon.jsx';
 
 export default function UserSetup({ accent, onSave }) {
@@ -45,3 +46,8 @@ export default function UserSetup({ accent, onSave }) {
     </div>
   );
 }
+
+UserSetup.propTypes = {
+  accent: PropTypes.string,
+  onSave: PropTypes.func,
+};

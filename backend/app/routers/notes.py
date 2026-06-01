@@ -1,0 +1,250 @@
+import logging
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from typing import Annotated
+from sqlalchemy.orm import Session
+
+from .. import models, schemas
+from ..core.access import check_object_access, check_pid_access, get_user_member_pids
+from ..core.config import UPLOAD_ROOT
+from ..core.crypto import decrypt_str, encrypt_str, note_content_is_confidential
+from ..core.deps import get_current_user, is_admin
+from ..core.events import bcast, log_event
+from ..core.permissions import PERM_NOTES_UPDATE
+from ..core.secure_delete import secure_delete_file
+from ..core.utils import ensure_under_upload_root, new_id, safe_upload_name, ts_now
+from ..database import get_db
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    tags=["notes"],
+    responses={
+        404: {"description": "Not found"},
+        413: {"description": "Payload too large"},
+    },
+)
+
+_MSG_NOTE_NOT_FOUND = "Note not found"
+
+
+def _note_out(note: models.Note) -> dict:
+    data = schemas.Note.model_validate(note).model_dump()
+    if note_content_is_confidential(data.get("tags") or []):
+        data["content"] = decrypt_str(data.get("content") or "")
+    return data
+
+
+@router.get("/api/notes", response_model=list[schemas.Note])
+def list_notes(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+    pid: str | None = None,
+):
+    if pid:
+        check_pid_access(db, pid, user, "notes.read")
+        notes = db.query(models.Note).filter(models.Note.pid == pid).all()
+        confidential_count = sum(
+            1 for note in notes if note_content_is_confidential(note.tags or [])
+        )
+        # Serialize before audit commit — same expire-trigger as in
+        # feature/perf-creds-serial. Each model_validate would otherwise
+        # re-fetch every field of every note from the DB.
+        out = [_note_out(note) for note in notes]
+        if confidential_count:
+            log_event(
+                db,
+                pid,
+                getattr(user, "username", None),
+                "audit",
+                "read_confidential_notes",
+                f"Confidential notes viewed ({confidential_count})",
+                {"count": confidential_count},
+            )
+            db.commit()
+        return out
+    if is_admin(user):
+        return [_note_out(note) for note in db.query(models.Note).all()]
+    member_pids = get_user_member_pids(db, user)
+    return [
+        _note_out(note)
+        for note in db.query(models.Note).filter(models.Note.pid.in_(member_pids)).all()
+    ]
+
+
+@router.post("/api/notes", response_model=schemas.Note, status_code=201)
+def create_note(
+    body: schemas.NoteCreate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    check_pid_access(db, body.pid, user, "notes.create")
+    payload = body.model_dump()
+    if note_content_is_confidential(payload.get("tags") or []) and payload.get("content"):
+        payload["content"] = encrypt_str(payload["content"])
+    note = models.Note(id=new_id("n"), **payload)
+    db.add(note)
+    log_event(
+        db,
+        note.pid,
+        getattr(request.state, "username", None),
+        "note",
+        "create",
+        f"Note created: «{note.title}»",
+        {"id": note.id},
+    )
+    db.commit()
+    db.refresh(note)
+    payload = _note_out(note)
+    bcast(note.pid, "note", "create", payload)
+    return payload
+
+
+@router.patch("/api/notes/{nid}", response_model=schemas.Note, responses={404: {"description": "Not found"}, 409: {"description": "Conflict"}})
+def update_note(
+    nid: str,
+    body: schemas.NoteUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    note = db.query(models.Note).filter(models.Note.id == nid).first()
+    if not note:
+        raise HTTPException(404, _MSG_NOTE_NOT_FOUND)
+    check_object_access(db, note.pid, user, PERM_NOTES_UPDATE)
+    if body.client_version is not None and body.client_version != note.version:
+        raise HTTPException(status_code=409, detail=schemas.Note.model_validate(note).model_dump())
+    old_title = note.title
+    patch = body.model_dump(exclude_none=True, exclude={"client_version"})
+    next_tags = patch.get("tags", note.tags or [])
+    next_content = patch.get("content", note.content or "")
+    if "content" in patch or "tags" in patch:
+        if note_content_is_confidential(next_tags) and next_content:
+            patch["content"] = encrypt_str(decrypt_str(next_content))
+        else:
+            patch["content"] = decrypt_str(next_content)
+    for k, v in patch.items():
+        setattr(note, k, v)
+    note.version += 1
+    if body.title is not None and body.title != old_title:
+        log_event(
+            db,
+            note.pid,
+            getattr(request.state, "username", None),
+            "note",
+            "update",
+            f"Note renamed: «{old_title}» → «{note.title}»",
+            {"id": note.id},
+        )
+    db.commit()
+    db.refresh(note)
+    payload = _note_out(note)
+    bcast(note.pid, "note", "update", payload)
+    return payload
+
+
+@router.delete("/api/notes/{nid}", status_code=204, responses={404: {"description": "Not found"}})
+def delete_note(
+    nid: str,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    note = db.query(models.Note).filter(models.Note.id == nid).first()
+    if not note:
+        raise HTTPException(404, _MSG_NOTE_NOT_FOUND)
+    check_object_access(db, note.pid, user, "notes.delete")
+    pid = note.pid
+    log_event(
+        db,
+        pid,
+        getattr(request.state, "username", None),
+        "note",
+        "delete",
+        f"Note deleted: «{note.title}»",
+    )
+    db.delete(note)
+    db.commit()
+    bcast(pid, "note", "delete", {"id": nid})
+
+
+@router.get("/api/notes/{nid}/attachments", response_model=list[schemas.NoteAttachment], responses={404: {"description": "Not found"}})
+def list_note_attachments(
+    nid: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    note = db.query(models.Note).filter(models.Note.id == nid).first()
+    if not note:
+        raise HTTPException(404, _MSG_NOTE_NOT_FOUND)
+    check_object_access(db, note.pid, user, "notes.read")
+    return db.query(models.NoteAttachment).filter(models.NoteAttachment.note_id == nid).all()
+
+
+@router.post("/api/notes/{nid}/attachments", response_model=schemas.NoteAttachment, status_code=201, responses={404: {"description": "Not found"}, 413: {"description": "Payload too large"}})
+async def upload_note_attachment(
+    nid: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+    file: Annotated[UploadFile, File()],
+):
+    note = db.query(models.Note).filter(models.Note.id == nid).first()
+    if not note:
+        raise HTTPException(404, _MSG_NOTE_NOT_FOUND)
+    check_object_access(db, note.pid, user, PERM_NOTES_UPDATE)
+    safe_name = safe_upload_name(file.filename or "attachment.bin")
+    att_id = new_id("att")
+    ext = Path(safe_name).suffix
+    note_dir = UPLOAD_ROOT / note.pid / nid
+    note_dir.mkdir(parents=True, exist_ok=True)
+    disk_name = f"{att_id}{ext}"
+    disk_path = ensure_under_upload_root(note_dir / disk_name)
+    MAX_UPLOAD = 50 * 1024 * 1024  # 50 MB
+    content = await file.read()
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, "File exceeds 50 MB limit")
+    disk_path.write_bytes(content)
+    attachment = models.NoteAttachment(
+        id=att_id,
+        note_id=nid,
+        pid=note.pid,
+        filename=safe_name,
+        content_type=file.content_type or "application/octet-stream",
+        file_size=len(content),
+        storage_path=str(disk_path),
+        public_url=f"/api/uploads/{note.pid}/{nid}/{disk_name}",
+        ts=ts_now(),
+    )
+    db.add(attachment)
+    db.commit()
+    db.refresh(attachment)
+    bcast(
+        note.pid,
+        "note_attachment",
+        "create",
+        schemas.NoteAttachment.model_validate(attachment).model_dump(),
+    )
+    return attachment
+
+
+@router.delete("/attachments/{aid}", status_code=204, responses={404: {"description": "Not found"}})
+def delete_attachment(
+    aid: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    attachment = db.query(models.NoteAttachment).filter(models.NoteAttachment.id == aid).first()
+    if not attachment:
+        raise HTTPException(404, "Attachment not found")
+    check_object_access(db, attachment.pid, user, PERM_NOTES_UPDATE)
+    pid = attachment.pid
+    note_id = attachment.note_id
+    try:
+        secure_delete_file(ensure_under_upload_root(Path(attachment.storage_path)))
+    except Exception as e:
+        logger.warning("Failed to delete attachment file %s: %s", attachment.storage_path, e)
+    db.delete(attachment)
+    db.commit()
+    bcast(pid, "note_attachment", "delete", {"id": aid, "note_id": note_id})

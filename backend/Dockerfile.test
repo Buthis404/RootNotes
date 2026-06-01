@@ -1,0 +1,31 @@
+FROM python:3.12-slim
+
+# Native libraries required by WeasyPrint (PDF report generation tests)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
+    libcairo2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN useradd --create-home --shell /usr/sbin/nologin rootnotes
+
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+COPY app/ ./app/
+COPY tests/ ./tests/
+COPY pytest.ini ./
+
+# Runtime data dir for uploads / audit log — must be writable by the test user
+# (several routers persist files under /data, e.g. loot uploads, audit log).
+RUN mkdir -p /data/uploads && chown -R rootnotes:rootnotes /app /data
+
+USER rootnotes
+
+ENV APP_ENV=test
+
+CMD ["python", "-m", "pytest", "-v", "--tb=short"]

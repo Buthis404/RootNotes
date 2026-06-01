@@ -1,30 +1,31 @@
 import { useState, useRef } from 'react';
+import PropTypes from 'prop-types';
 import JSZip from 'jszip';
 import Icon from './Icon.jsx';
 import { api } from '../api.js';
+import { inferHostRole } from '../utils/hostMeta.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const shortDomain = (s) => (s || '').toLowerCase();
 const hostnameOnly = (fqdn) => fqdn ? fqdn.split('.')[0].toUpperCase() : '';
 const tsToDate = (ts) => {
-  if (!ts || ts <= 0) return '';
+  if (!ts || ts <= 0) { return ''; }
   try { return new Date(ts * 1000).toISOString().slice(0, 10); } catch { return ''; }
 };
 
 function detectBHType(obj, filename) {
   const t = obj?.meta?.type;
-  if (t) return t.toLowerCase();
-  const f = filename.toLowerCase().replace(/.*\//, ''); // strip path from zip entries
-  if (f.includes('computer')) return 'computers';
-  if (f.includes('user'))     return 'users';
-  if (f.includes('group'))    return 'groups';
-  if (f.includes('domain'))   return 'domains';
-  if (f.includes('gpo'))      return 'gpos';
-  if (f.includes('ou'))       return 'ous';
-  // BloodHound CE — first item has Kind field
+  if (t) { return t.toLowerCase(); }
+  const f = filename.toLowerCase().split('/').pop() || '';
+  if (f.includes('computer')) { return 'computers'; }
+  if (f.includes('user')) { return 'users'; }
+  if (f.includes('group')) { return 'groups'; }
+  if (f.includes('domain')) { return 'domains'; }
+  if (f.includes('gpo')) { return 'gpos'; }
+  if (f.includes('ou')) { return 'ous'; }
   const kind = (obj?.data?.[0]?.Kind || obj?.data?.[0]?.kind || '').toLowerCase();
-  if (kind) return kind + 's';
+  if (kind) { return kind + 's'; }
   return 'unknown';
 }
 
@@ -52,7 +53,254 @@ function resolveToUserSids(entries, groupMap, depth = 0) {
   return result;
 }
 
+// ── Parser helpers ────────────────────────────────────────────────────────────
+
+function collectEntries(item, key) {
+  const variants = [key, key.toLowerCase(), key.toUpperCase()];
+  for (const v of variants) {
+    const block = item[v];
+    if (!block) continue;
+    const results = block.Results || block.results || [];
+    return results.map(r => ({
+      sid:  r.ObjectIdentifier || r.objectidentifier || r.MemberSID || r.membersid || '',
+      type: r.ObjectType       || r.objecttype       || 'User',
+    })).filter(r => r.sid);
+  }
+  return [];
+}
+
+function extractDcsyncEntries(item) {
+  const userRights = item.UserRights || item.userrights || [];
+  const dcsyncEntries = [];
+  for (const right of userRights) {
+    const rightName = right.RightName || right.rightname || '';
+    if (rightName === 'DCSync' || rightName === 'GetChangesAll' || rightName === 'GetChanges') {
+      (right.Results || right.results || []).forEach(r => {
+        dcsyncEntries.push({
+          sid:  r.ObjectIdentifier || r.objectidentifier || '',
+          type: r.ObjectType || r.objecttype || 'User',
+        });
+      });
+    }
+  }
+  return dcsyncEntries;
+}
+
+function extractSessionSids(item) {
+  const sessionUserSids = [];
+  const sessBlock = item.Sessions || item.sessions || {};
+  for (const s of sessBlock.Results || sessBlock.results || []) {
+    const usid = s.UserSID || s.usersid || s.UserObjectIdentifier || '';
+    if (usid) { sessionUserSids.push(usid); }
+  }
+  const privSessBlock = item.PrivilegedSessions || item.privilegedsessions || {};
+  for (const s of privSessBlock.Results || privSessBlock.results || []) {
+    const usid = s.UserSID || s.usersid || '';
+    if (usid && !sessionUserSids.includes(usid)) { sessionUserSids.push(usid); }
+  }
+  return sessionUserSids;
+}
+
+function extractDelegTargets(item) {
+  const delegTargets = [];
+  for (const d of item.AllowedToDelegate || item.allowedtodelegate || []) {
+    const ref = d.ObjectIdentifier || d.objectidentifier || d.Value || d.value || '';
+    const dtype = (d.ObjectType || d.objecttype || '').toLowerCase();
+    if (ref) { delegTargets.push({ ref, type: dtype || 'computer' }); }
+  }
+  return delegTargets;
+}
+
+function parseComputerItem(item) {
+  const sid = item.ObjectIdentifier || item.objectidentifier || '';
+  if (!sid) return null;
+  const p = item.Properties || item.properties || {};
+  const fqdn     = p.name || p.Name || '';
+  const hostname = hostnameOnly(fqdn);
+  const domain   = shortDomain(p.domain || p.Domain || '');
+  const ip       = p.ipaddress || p.IPv4Address || p.ipv4address || '';
+  const dnsName  = p.dnsname || p.DNSName || '';
+  const osParts  = [
+    p.operatingsystem || p.OperatingSystem || '',
+    p.operatingsystemservicepack || p.OperatingSystemServicePack || '',
+  ].filter(Boolean);
+  const os             = osParts.join(' ').trim();
+  const enabled        = p.enabled !== false;
+  const haslaps        = !!(p.haslaps || p.HasLAPS);
+  const unconstrainedDeleg = !!(p.unconstraineddelegation || p.UnconstrainedDelegation);
+  const constrainedDeleg   = !!(p.trustedtoauth || p.TrustedToAuth || p.AllowedToDelegate);
+  const description    = p.description || p.Description || '';
+  const isHighValue    = !!(p.highvalue || p.HighValue);
+  const lastLogon      = tsToDate(p.lastlogon || p.LastLogon || p.lastlogontimestamp);
+  const pwdLastSet     = tsToDate(p.pwdlastset || p.PwdLastSet);
+  const spns           = p.serviceprincipalnames || p.ServicePrincipalNames || [];
+  const localAdmins    = collectEntries(item, 'LocalAdmins');
+  const rdpUsers       = collectEntries(item, 'RemoteDesktopUsers');
+  const psRemote       = collectEntries(item, 'PSRemoteUsers');
+  const dcomUsers      = collectEntries(item, 'DcomUsers');
+  const dcsyncEntries  = extractDcsyncEntries(item);
+  const sessionUserSids = extractSessionSids(item);
+  const delegTargets   = extractDelegTargets(item);
+  return {
+    sid, fqdn, hostname, domain, ip, dnsName, os, enabled,
+    haslaps, unconstrainedDeleg, constrainedDeleg, isHighValue,
+    description, lastLogon, pwdLastSet, spns,
+    localAdmins, rdpUsers, psRemote, dcomUsers,
+    dcsyncEntries, sessionUserSids, delegTargets,
+  };
+}
+
+function parseUserItem(item) {
+  const sid = item.ObjectIdentifier || item.objectidentifier || '';
+  if (!sid) return null;
+  const p = item.Properties || item.properties || {};
+  const name   = p.name || p.Name || '';
+  const sam    = p.samaccountname || p.SamAccountName || name.split('@')[0] || '';
+  const domain = shortDomain(p.domain || p.Domain || '');
+  const enabled          = p.enabled !== false;
+  const adminCount       = !!(p.admincount || p.AdminCount);
+  const hasspn           = !!(p.hasspn || p.HasSPN);
+  const dontreqpreauth   = !!(p.dontreqpreauth || p.DontReqPreAuth);
+  const pwdneverexpires  = !!(p.pwdneverexpires || p.PwdNeverExpires);
+  const passwordnotreqd  = !!(p.passwordnotreqd || p.PasswordNotReqd);
+  const sensitive        = !!(p.sensitive || p.Sensitive);
+  const unconstrainedDeleg = !!(p.unconstraineddelegation || p.UnconstrainedDelegation);
+  const description  = p.description  || p.Description  || '';
+  const displayname  = p.displayname  || p.DisplayName  || '';
+  const email        = p.email        || p.Email        || '';
+  const title        = p.title        || p.Title        || '';
+  const lastLogon    = tsToDate(p.lastlogon || p.LastLogon || p.lastlogontimestamp);
+  const pwdLastSet   = tsToDate(p.pwdlastset || p.PwdLastSet);
+  const spns         = p.serviceprincipalnames || p.ServicePrincipalNames || [];
+  const memberOfSids = (item.MemberOf || item.memberof || []).map(m =>
+    m.ObjectIdentifier || m.objectidentifier || ''
+  ).filter(Boolean);
+  const delegTargets = (item.AllowedToDelegate || item.allowedtodelegate || []).map(m =>
+    m.ObjectIdentifier || m.objectidentifier || m.Value || m.value || ''
+  ).filter(Boolean);
+  return {
+    sid, name, sam, domain, enabled, adminCount,
+    hasspn: hasspn || spns.length > 0,
+    dontreqpreauth, pwdneverexpires, passwordnotreqd, sensitive,
+    unconstrainedDeleg,
+    description, displayname, email, title,
+    lastLogon, pwdLastSet, spns, memberOfSids, delegTargets,
+    isDA: false, isEA: false, isSchemaAdmin: false,
+    groupNames: [],
+  };
+}
+
+function parseGroupItem(item) {
+  const sid = item.ObjectIdentifier || item.objectidentifier || '';
+  if (!sid) return null;
+  const p = item.Properties || item.properties || {};
+  const name = p.name || p.Name || '';
+  const members = (item.Members || item.members || []).map(m => ({
+    sid:  m.ObjectIdentifier || m.objectidentifier || '',
+    type: m.ObjectType       || m.objecttype       || 'User',
+  })).filter(m => m.sid);
+  return { sid, name, members };
+}
+
+function parseDomainItem(item) {
+  const p = item.Properties || item.properties || {};
+  const trusts = (item.Trusts || item.trusts || []).map(t => ({
+    target:    shortDomain(t.TargetDomainName || t.targetdomainname || ''),
+    direction: t.TrustDirection || t.trustdirection || '',
+    kind:      t.TrustType || t.trusttype || '',
+  }));
+  return {
+    name: shortDomain(p.name || p.Name || p.domain || ''),
+    sid:  item.ObjectIdentifier || '',
+    functional: p.functionallevel || p.FunctionalLevel || '',
+    trusts,
+  };
+}
+
+function applyGroupFlags(u, isDA, isEA, isSA) {
+  if (isDA) { u.isDA = true; }
+  if (isEA) { u.isEA = true; }
+  if (isSA) { u.isSchemaAdmin = true; }
+}
+
+function applyGroupRolesToMembers(grp, userMap, isDA, isEA, isSA) {
+  for (const m of grp.members) {
+    const u = userMap[m.sid];
+    if (!u) { continue; }
+    applyGroupFlags(u, isDA, isEA, isSA);
+    if (!u.groupNames.includes(grp.name)) { u.groupNames.push(grp.name); }
+  }
+}
+
+function applyGroupRolesToMemberOf(grp, userMap, isDA, isEA, isSA) {
+  for (const u of Object.values(userMap)) {
+    if (!u.memberOfSids.includes(grp.sid)) { continue; }
+    if (!u.groupNames.includes(grp.name)) { u.groupNames.push(grp.name); }
+    applyGroupFlags(u, isDA, isEA, isSA);
+  }
+}
+
+function applyGroupRolesToUsers(groupMap, userMap) {
+  for (const grp of Object.values(groupMap)) {
+    const upper = grp.name.toUpperCase();
+    const isDA  = upper.startsWith('DOMAIN ADMINS@')     || upper === 'DOMAIN ADMINS';
+    const isEA  = upper.startsWith('ENTERPRISE ADMINS@') || upper === 'ENTERPRISE ADMINS';
+    const isSA  = upper.startsWith('SCHEMA ADMINS@')     || upper === 'SCHEMA ADMINS';
+    applyGroupRolesToMembers(grp, userMap, isDA, isEA, isSA);
+    applyGroupRolesToMemberOf(grp, userMap, isDA, isEA, isSA);
+  }
+}
+
+function buildSessionPreview(computers) {
+  const preview = {};
+  for (const c of computers) {
+    for (const usid of c.sessionUserSids) {
+      preview[usid] = (preview[usid] || 0) + 1;
+    }
+  }
+  return preview;
+}
+
+function computeMapEdgeCount(computers) {
+  const userSessionCompsPreview = buildSessionPreview(computers);
+  let mapEdgeCount = 0;
+  for (const c of computers) {
+    for (const sid of c.laUserSids)     if (userSessionCompsPreview[sid]) mapEdgeCount++;
+    for (const sid of c.dcsyncUserSids) if (userSessionCompsPreview[sid]) mapEdgeCount++;
+    mapEdgeCount += c.delegTargets?.length || 0;
+  }
+  return mapEdgeCount;
+}
+
 // ── Parser ────────────────────────────────────────────────────────────────────
+
+function _processComputers(items, computerMap) {
+  for (const item of items) {
+    const entry = parseComputerItem(item);
+    if (entry) { computerMap[entry.sid] = entry; }
+  }
+}
+
+function _processUsers(items, userMap) {
+  for (const item of items) {
+    const entry = parseUserItem(item);
+    if (entry) { userMap[entry.sid] = entry; }
+  }
+}
+
+function _processGroups(items, groupMap) {
+  for (const item of items) {
+    const entry = parseGroupItem(item);
+    if (entry) { groupMap[entry.sid] = entry; }
+  }
+}
+
+function processFileItems(type, items, computerMap, userMap, groupMap, domainList) {
+  if (type === 'computers') { _processComputers(items, computerMap); }
+  else if (type === 'users') { _processUsers(items, userMap); }
+  else if (type === 'groups') { _processGroups(items, groupMap); }
+  else if (type === 'domains') { for (const item of items) domainList.push(parseDomainItem(item)); }
+}
 
 function parseBloodHoundFiles(files) {
   const computerMap = {};
@@ -60,259 +308,27 @@ function parseBloodHoundFiles(files) {
   const groupMap    = {};
   const domainList  = [];
 
-  const collectEntries = (item, key) => {
-    const variants = [key, key.toLowerCase(), key.toUpperCase()];
-    for (const v of variants) {
-      const block = item[v];
-      if (!block) continue;
-      const results = block.Results || block.results || [];
-      return results.map(r => ({
-        sid:  r.ObjectIdentifier || r.objectidentifier || r.MemberSID || r.membersid || '',
-        type: r.ObjectType       || r.objecttype       || 'User',
-      })).filter(r => r.sid);
-    }
-    return [];
-  };
-
-  // ── Pass 1: build raw maps ─────────────────────────────────────────────────
   for (const { type, obj } of files) {
-    const items = obj.data || [];
-
-    if (type === 'computers') {
-      for (const item of items) {
-        const sid = item.ObjectIdentifier || item.objectidentifier || '';
-        if (!sid) continue;
-        const p = item.Properties || item.properties || {};
-
-        const fqdn     = p.name || p.Name || '';
-        const hostname = hostnameOnly(fqdn);
-        const domain   = shortDomain(p.domain || p.Domain || '');
-        const ip       = p.ipaddress || p.IPv4Address || p.ipv4address || '';
-        const dnsName  = p.dnsname || p.DNSName || '';
-
-        // OS info — combine all available fields
-        const osParts = [
-          p.operatingsystem || p.OperatingSystem || '',
-          p.operatingsystemservicepack || p.OperatingSystemServicePack || '',
-        ].filter(Boolean);
-        const os = osParts.join(' ').trim();
-
-        // Flags
-        const enabled              = p.enabled !== false;
-        const haslaps              = !!(p.haslaps || p.HasLAPS);
-        const unconstrainedDeleg   = !!(p.unconstraineddelegation || p.UnconstrainedDelegation);
-        const constrainedDeleg     = !!(p.trustedtoauth || p.TrustedToAuth || p.AllowedToDelegate);
-        const description          = p.description || p.Description || '';
-        const isHighValue          = !!(p.highvalue || p.HighValue);
-        const lastLogon            = tsToDate(p.lastlogon || p.LastLogon || p.lastlogontimestamp);
-        const pwdLastSet           = tsToDate(p.pwdlastset || p.PwdLastSet);
-
-        // SPNs
-        const spns = p.serviceprincipalnames || p.ServicePrincipalNames || [];
-
-        // Access rights collections
-        const localAdmins   = collectEntries(item, 'LocalAdmins');
-        const rdpUsers      = collectEntries(item, 'RemoteDesktopUsers');
-        const psRemote      = collectEntries(item, 'PSRemoteUsers');
-        const dcomUsers     = collectEntries(item, 'DcomUsers');
-
-        // UserRights — DCSync and other critical rights
-        const userRights = item.UserRights || item.userrights || [];
-        const dcsyncEntries = [];
-        for (const right of userRights) {
-          const rightName = right.RightName || right.rightname || '';
-          if (rightName === 'DCSync' || rightName === 'GetChangesAll' || rightName === 'GetChanges') {
-            (right.Results || right.results || []).forEach(r => {
-              dcsyncEntries.push({
-                sid:  r.ObjectIdentifier || r.objectidentifier || '',
-                type: r.ObjectType || r.objecttype || 'User',
-              });
-            });
-          }
-        }
-
-        // Sessions (active user → computer)
-        const sessionUserSids = [];
-        const sessBlock = item.Sessions || item.sessions || {};
-        for (const s of sessBlock.Results || sessBlock.results || []) {
-          const usid = s.UserSID || s.usersid || s.UserObjectIdentifier || '';
-          if (usid) sessionUserSids.push(usid);
-        }
-        // PrivilegedSessions
-        const privSessBlock = item.PrivilegedSessions || item.privilegedsessions || {};
-        for (const s of privSessBlock.Results || privSessBlock.results || []) {
-          const usid = s.UserSID || s.usersid || '';
-          if (usid && !sessionUserSids.includes(usid)) sessionUserSids.push(usid);
-        }
-
-        // Constrained delegation targets — can be SID refs or SPN strings
-        const delegTargets = [];
-        for (const d of item.AllowedToDelegate || item.allowedtodelegate || []) {
-          const ref = d.ObjectIdentifier || d.objectidentifier || d.Value || d.value || '';
-          const dtype = (d.ObjectType || d.objecttype || '').toLowerCase();
-          if (ref) delegTargets.push({ ref, type: dtype || 'computer' });
-        }
-
-        computerMap[sid] = {
-          sid, fqdn, hostname, domain, ip, dnsName, os, enabled,
-          haslaps, unconstrainedDeleg, constrainedDeleg, isHighValue,
-          description, lastLogon, pwdLastSet, spns,
-          localAdmins, rdpUsers, psRemote, dcomUsers,
-          dcsyncEntries, sessionUserSids, delegTargets,
-        };
-      }
-    }
-
-    if (type === 'users') {
-      for (const item of items) {
-        const sid = item.ObjectIdentifier || item.objectidentifier || '';
-        if (!sid) continue;
-        const p = item.Properties || item.properties || {};
-
-        const name   = p.name || p.Name || '';
-        const sam    = p.samaccountname || p.SamAccountName || name.split('@')[0] || '';
-        const domain = shortDomain(p.domain || p.Domain || '');
-
-        // Flags
-        const enabled           = p.enabled !== false;
-        const adminCount        = !!(p.admincount || p.AdminCount);
-        const hasspn            = !!(p.hasspn || p.HasSPN);
-        const dontreqpreauth    = !!(p.dontreqpreauth || p.DontReqPreAuth);
-        const pwdneverexpires   = !!(p.pwdneverexpires || p.PwdNeverExpires);
-        const passwordnotreqd   = !!(p.passwordnotreqd || p.PasswordNotReqd);
-        const sensitive         = !!(p.sensitive || p.Sensitive);
-        const unconstrainedDeleg= !!(p.unconstraineddelegation || p.UnconstrainedDelegation);
-
-        // Info fields
-        const description  = p.description  || p.Description  || '';
-        const displayname  = p.displayname  || p.DisplayName  || '';
-        const email        = p.email        || p.Email        || '';
-        const title        = p.title        || p.Title        || '';
-        const lastLogon    = tsToDate(p.lastlogon || p.LastLogon || p.lastlogontimestamp);
-        const pwdLastSet   = tsToDate(p.pwdlastset || p.PwdLastSet);
-
-        // SPNs (Kerberoastable if non-empty)
-        const spns = p.serviceprincipalnames || p.ServicePrincipalNames || [];
-
-        // Group memberships (will be filled in pass 2 from groups.json)
-        const memberOfSids = (item.MemberOf || item.memberof || []).map(m =>
-          m.ObjectIdentifier || m.objectidentifier || ''
-        ).filter(Boolean);
-
-        // AllowedToDelegate targets
-        const delegTargets = (item.AllowedToDelegate || item.allowedtodelegate || []).map(m =>
-          m.ObjectIdentifier || m.objectidentifier || m.Value || m.value || ''
-        ).filter(Boolean);
-
-        userMap[sid] = {
-          sid, name, sam, domain, enabled, adminCount,
-          hasspn: hasspn || spns.length > 0,
-          dontreqpreauth, pwdneverexpires, passwordnotreqd, sensitive,
-          unconstrainedDeleg,
-          description, displayname, email, title,
-          lastLogon, pwdLastSet, spns, memberOfSids, delegTargets,
-          isDA: false, isEA: false, isSchemaAdmin: false,
-          groupNames: [],
-        };
-      }
-    }
-
-    if (type === 'groups') {
-      for (const item of items) {
-        const sid = item.ObjectIdentifier || item.objectidentifier || '';
-        if (!sid) continue;
-        const p = item.Properties || item.properties || {};
-        const name = p.name || p.Name || '';
-        const members = (item.Members || item.members || []).map(m => ({
-          sid:  m.ObjectIdentifier || m.objectidentifier || '',
-          type: m.ObjectType       || m.objecttype       || 'User',
-        })).filter(m => m.sid);
-        groupMap[sid] = { sid, name, members };
-      }
-    }
-
-    if (type === 'domains') {
-      for (const item of items) {
-        const p = item.Properties || item.properties || {};
-        const trusts = (item.Trusts || item.trusts || []).map(t => ({
-          target: shortDomain(t.TargetDomainName || t.targetdomainname || ''),
-          direction: t.TrustDirection || t.trustdirection || '',
-          kind: t.TrustType || t.trusttype || '',
-        }));
-        domainList.push({
-          name: shortDomain(p.name || p.Name || p.domain || ''),
-          sid: item.ObjectIdentifier || '',
-          functional: p.functionallevel || p.FunctionalLevel || '',
-          trusts,
-        });
-      }
-    }
+    processFileItems(type, obj.data || [], computerMap, userMap, groupMap, domainList);
   }
 
-  // ── Pass 2: resolve roles from groups ─────────────────────────────────────
-  for (const grp of Object.values(groupMap)) {
-    const upper = grp.name.toUpperCase();
-    const isDA  = /^DOMAIN ADMINS@/.test(upper)  || upper === 'DOMAIN ADMINS';
-    const isEA  = /^ENTERPRISE ADMINS@/.test(upper) || upper === 'ENTERPRISE ADMINS';
-    const isSA  = /^SCHEMA ADMINS@/.test(upper)   || upper === 'SCHEMA ADMINS';
+  applyGroupRolesToUsers(groupMap, userMap);
 
-    for (const m of grp.members) {
-      const u = userMap[m.sid];
-      if (u) {
-        if (isDA) u.isDA = true;
-        if (isEA) u.isEA = true;
-        if (isSA) u.isSchemaAdmin = true;
-        // Track ALL groups
-        if (!u.groupNames.includes(grp.name)) u.groupNames.push(grp.name);
-      }
-    }
-
-    // Also resolve users from memberOf on user objects
-    for (const u of Object.values(userMap)) {
-      if (u.memberOfSids.includes(grp.sid) && !u.groupNames.includes(grp.name)) {
-        u.groupNames.push(grp.name);
-        if (isDA) u.isDA = true;
-        if (isEA) u.isEA = true;
-        if (isSA) u.isSchemaAdmin = true;
-      }
-    }
-  }
-
-  // ── Pass 3: resolve group SIDs → user SIDs in access rights ───────────────
   const computers = Object.values(computerMap).map(c => ({
     ...c,
-    laUserSids:      resolveToUserSids(c.localAdmins,    groupMap),
-    rdpUserSids:     resolveToUserSids(c.rdpUsers,       groupMap),
-    psRemoteUserSids:resolveToUserSids(c.psRemote,       groupMap),
-    dcomUserSids:    resolveToUserSids(c.dcomUsers,      groupMap),
-    dcsyncUserSids:  resolveToUserSids(c.dcsyncEntries,  groupMap),
+    laUserSids:       resolveToUserSids(c.localAdmins,   groupMap),
+    rdpUserSids:      resolveToUserSids(c.rdpUsers,      groupMap),
+    psRemoteUserSids: resolveToUserSids(c.psRemote,      groupMap),
+    dcomUserSids:     resolveToUserSids(c.dcomUsers,     groupMap),
+    dcsyncUserSids:   resolveToUserSids(c.dcsyncEntries, groupMap),
   }));
 
-  const users = Object.values(userMap);
-
-  // SID → user lookup (O(1) instead of O(n) find)
+  const users     = Object.values(userMap);
   const userBySid = userMap;
 
-  // ── Stats ──────────────────────────────────────────────────────────────────
   let relCount = 0;
   for (const c of computers) {
     relCount += c.laUserSids.size + c.rdpUserSids.size + c.psRemoteUserSids.size + c.dcsyncUserSids.size;
-  }
-
-  // Count potential network map edges
-  let mapEdgeCount = 0;
-  // session-based: for each comp, count users with sessions on other comps
-  const userSessionCompsPreview = {};
-  for (const c of computers) {
-    for (const usid of c.sessionUserSids) {
-      if (!userSessionCompsPreview[usid]) userSessionCompsPreview[usid] = 0;
-      userSessionCompsPreview[usid]++;
-    }
-  }
-  for (const c of computers) {
-    for (const sid of c.laUserSids)       if (userSessionCompsPreview[sid]) mapEdgeCount++;
-    for (const sid of c.dcsyncUserSids)   if (userSessionCompsPreview[sid]) mapEdgeCount++;
-    mapEdgeCount += c.delegTargets?.length || 0;
   }
 
   return {
@@ -327,7 +343,7 @@ function parseBloodHoundFiles(files) {
       relationships: relCount,
       lapsHosts:     computers.filter(c => c.haslaps).length,
       unconstrHosts: computers.filter(c => c.unconstrainedDeleg).length,
-      mapEdges:      mapEdgeCount,
+      mapEdges:      computeMapEdgeCount(computers),
     },
   };
 }
@@ -335,57 +351,471 @@ function parseBloodHoundFiles(files) {
 // ── Build host tags from BH data ──────────────────────────────────────────────
 function buildHostTags(c) {
   const tags = ['bloodhound'];
-  if (c.haslaps)             tags.push('laps');
-  if (c.unconstrainedDeleg)  tags.push('unconstrained-delegation');
-  if (c.constrainedDeleg)    tags.push('constrained-delegation');
-  if (c.isHighValue)         tags.push('high-value');
-  if (c.spns?.length)        tags.push('spn');
-  if (c.dcsyncUserSids?.size > 0) tags.push('dc');
+  const role = inferHostRole({
+    os: c.os,
+    ports: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['80'] : [],
+    services: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['http'] : [],
+    domain: c.domain,
+    tags: c.dcsyncUserSids?.size > 0 ? ['dc'] : [],
+  });
+  if (c.haslaps) { tags.push('laps'); }
+  if (c.unconstrainedDeleg) { tags.push('unconstrained-delegation'); }
+  if (c.constrainedDeleg) { tags.push('constrained-delegation'); }
+  if (c.isHighValue) { tags.push('high-value'); }
+  if (c.spns?.length) { tags.push('spn'); }
+  if (c.dcsyncUserSids?.size > 0) { tags.push('dc'); }
+  if (!c.enabled) { tags.push('disabled'); }
+  if (role.id === 'dc') { tags.push('domain-controller'); }
+  if (role.id === 'workstation') { tags.push('workstation'); }
+  if (role.id === 'web') { tags.push('web'); }
+  if (role.id === 'server') { tags.push('server'); }
   return tags;
 }
 
 // Build notes string for host
 function buildHostNotes(c) {
   const lines = [];
-  if (c.description)       lines.push(`[BH] ${c.description}`);
-  if (c.haslaps)           lines.push('[BH] LAPS enabled');
-  if (c.unconstrainedDeleg)lines.push('[BH] Unconstrained delegation!');
-  if (c.constrainedDeleg)  lines.push('[BH] Constrained delegation (TrustedToAuth)');
-  if (c.spns?.length)      lines.push(`[BH] SPNs: ${c.spns.slice(0, 3).join(', ')}${c.spns.length > 3 ? '...' : ''}`);
-  if (c.lastLogon)         lines.push(`[BH] Last logon: ${c.lastLogon}`);
+  const role = inferHostRole({
+    os: c.os,
+    ports: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['80'] : [],
+    services: c.spns?.some(spn => String(spn).toLowerCase().includes('http')) ? ['http'] : [],
+    domain: c.domain,
+    tags: c.dcsyncUserSids?.size > 0 ? ['dc'] : [],
+  });
+  if (c.description) { lines.push(`[BH] ${c.description}`); }
+  lines.push(`[BH] Role: ${role.label}`, `[BH] Status: ${c.enabled ? 'enabled' : 'disabled'}`);
+  if (c.haslaps) { lines.push('[BH] LAPS enabled'); }
+  if (c.unconstrainedDeleg) { lines.push('[BH] Unconstrained delegation!'); }
+  if (c.constrainedDeleg) { lines.push('[BH] Constrained delegation (TrustedToAuth)'); }
+  if (c.isHighValue) { lines.push('[BH] High value asset'); }
+  if (c.spns?.length) { lines.push(`[BH] SPNs: ${c.spns.slice(0, 3).join(', ')}${c.spns.length > 3 ? '...' : ''}`); }
+  if (c.lastLogon) { lines.push(`[BH] Last logon: ${c.lastLogon}`); }
+  if (c.pwdLastSet) { lines.push(`[BH] Pwd last set: ${c.pwdLastSet}`); }
   return lines.join('\n');
 }
 
-// Build notes string for credential
-function buildCredNotes(u) {
-  const lines = [];
-  if (u.domain) lines.push(`Domain: ${u.domain}`);
-  if (u.isDA)           lines.push('⚡ Domain Admin');
-  if (u.isEA)           lines.push('⚡ Enterprise Admin');
-  if (u.isSchemaAdmin)  lines.push('Schema Admin');
-  if (u.adminCount)     lines.push('AdminCount=1');
-  if (u.hasspn)         lines.push('Kerberoastable (has SPN)');
-  if (u.dontreqpreauth) lines.push('AS-REP Roastable');
-  if (u.pwdneverexpires)lines.push('Password never expires');
-  if (u.passwordnotreqd)lines.push('Password not required');
-  if (u.sensitive)      lines.push('Marked as sensitive');
-  if (u.unconstrainedDeleg) lines.push('Unconstrained delegation!');
-  if (u.description)    lines.push(`Description: ${u.description}`);
-  if (u.displayname && u.displayname !== u.sam) lines.push(`Display name: ${u.displayname}`);
-  if (u.email)          lines.push(`Email: ${u.email}`);
-  if (u.title)          lines.push(`Title: ${u.title}`);
-  if (u.lastLogon)      lines.push(`Last logon: ${u.lastLogon}`);
-  if (u.pwdLastSet)     lines.push(`Pwd last set: ${u.pwdLastSet}`);
-  if (u.spns?.length)   lines.push(`SPNs: ${u.spns.slice(0, 2).join(', ')}`);
-  // Top group memberships (excluding default DA/EA already noted)
-  const extraGroups = u.groupNames.filter(g => {
+function credExtraGroups(groupNames) {
+  return groupNames.filter(g => {
     const up = g.toUpperCase();
     return !up.includes('DOMAIN ADMINS') && !up.includes('ENTERPRISE ADMINS') &&
            !up.includes('SCHEMA ADMINS') && !up.includes('DOMAIN USERS') &&
            !up.includes('EVERYONE') && !up.includes('AUTHENTICATED USERS');
   });
-  if (extraGroups.length) lines.push(`Groups: ${extraGroups.slice(0, 4).join(', ')}${extraGroups.length > 4 ? '...' : ''}`);
-  return lines.join('\n');
+}
+
+function buildCredSecurityLines(u) {
+  const lines = [];
+  if (u.isDA) { lines.push('⚡ Domain Admin'); }
+  if (u.isEA) { lines.push('⚡ Enterprise Admin'); }
+  if (u.isSchemaAdmin) { lines.push('Schema Admin'); }
+  if (u.adminCount) { lines.push('AdminCount=1'); }
+  if (u.hasspn) { lines.push('Kerberoastable (has SPN)'); }
+  if (u.dontreqpreauth) { lines.push('AS-REP Roastable'); }
+  if (u.pwdneverexpires) { lines.push('Password never expires'); }
+  if (u.passwordnotreqd) { lines.push('Password not required'); }
+  if (u.sensitive) { lines.push('Marked as sensitive'); }
+  if (u.unconstrainedDeleg) { lines.push('Unconstrained delegation!'); }
+  return lines;
+}
+
+function buildCredMetaLines(u) {
+  const lines = [];
+  if (u.description) { lines.push(`Description: ${u.description}`); }
+  if (u.displayname && u.displayname !== u.sam) { lines.push(`Display name: ${u.displayname}`); }
+  if (u.email) { lines.push(`Email: ${u.email}`); }
+  if (u.title) { lines.push(`Title: ${u.title}`); }
+  if (u.lastLogon) { lines.push(`Last logon: ${u.lastLogon}`); }
+  if (u.pwdLastSet) { lines.push(`Pwd last set: ${u.pwdLastSet}`); }
+  if (u.spns?.length) { lines.push(`SPNs: ${u.spns.slice(0, 2).join(', ')}`); }
+  const extraGroups = credExtraGroups(u.groupNames);
+  if (extraGroups.length) { lines.push(`Groups: ${extraGroups.slice(0, 4).join(', ')}${extraGroups.length > 4 ? '...' : ''}`); }
+  return lines;
+}
+
+function buildCredNotes(u) {
+  const lines = [];
+  const domainLine = u.domain ? `Domain: ${u.domain}` : null;
+  lines.push(
+    domainLine,
+    `Status: ${u.enabled ? 'enabled' : 'disabled'}`,
+    ...buildCredSecurityLines(u),
+    ...buildCredMetaLines(u),
+  );
+  return lines.filter(Boolean).join('\n');
+}
+
+function buildCredTags(u) {
+  const tags = ['bloodhound'];
+  if (!u.enabled) { tags.push('disabled'); }
+  if (u.isDA) { tags.push('domain-admin'); }
+  if (u.isEA) { tags.push('enterprise-admin'); }
+  if (u.isSchemaAdmin) { tags.push('schema-admin'); }
+  if (u.adminCount) { tags.push('admincount'); }
+  if (u.hasspn) { tags.push('kerberoastable'); }
+  if (u.dontreqpreauth) { tags.push('asrep-roastable'); }
+  if (u.pwdneverexpires) { tags.push('password-never-expires'); }
+  if (u.passwordnotreqd) { tags.push('password-not-required'); }
+  if (u.sensitive) { tags.push('sensitive'); }
+  if (u.unconstrainedDeleg) { tags.push('unconstrained-delegation'); }
+  return tags;
+}
+
+// ── File loading helpers ──────────────────────────────────────────────────────
+
+async function parseJsonFileEntry(text, filename) {
+  const obj  = JSON.parse(text);
+  const type = detectBHType(obj, filename);
+  return type === 'unknown' ? null : { type, obj, filename };
+}
+
+async function loadZipEntries(file) {
+  if (file.size > 500 * 1024 * 1024) throw new Error('File too large (max 500 MB)');
+  const zip = await JSZip.loadAsync(file);
+  const out = [];
+  for (const [name, entry] of Object.entries(zip.files)) {
+    if (!name.endsWith('.json') || entry.dir) continue;
+    try {
+      const text = await entry.async('text');
+      const r = await parseJsonFileEntry(text, name);
+      if (r) { out.push(r); }
+    } catch {}
+  }
+  return out;
+}
+
+async function loadBhFiles(rawFiles) {
+  let loaded = [];
+  for (const file of rawFiles) {
+    if (file.name.endsWith('.zip')) {
+      loaded = loaded.concat(await loadZipEntries(file));
+    } else if (file.name.endsWith('.json')) {
+      const text = await file.text();
+      const r = await parseJsonFileEntry(text, file.name);
+      if (r) { loaded.push(r); }
+    }
+  }
+  return loaded;
+}
+
+// ── Import phase helpers ──────────────────────────────────────────────────────
+
+async function runImportPhaseHosts(parsed, pid, importOptions, setProgress) {
+  const hostPayload = parsed.computers.map(c => ({
+    pid,
+    ip: c.ip || c.hostname || 'unknown',
+    hostname: c.hostname,
+    os: c.os || 'Windows',
+    domain: c.domain,
+    status: c.enabled ? 'alive' : 'unknown',
+    ports: [], services: [], ips: c.ip ? [c.ip] : [],
+    tags: buildHostTags(c),
+    notes: buildHostNotes(c),
+  }));
+  setProgress({ phase: 0, cur: 0, total: importOptions.hosts ? hostPayload.length : 1 });
+  if (importOptions.hosts && hostPayload.length) {
+    await api.batchImport(pid, { hosts: hostPayload, creds: [], source: 'bloodhound' });
+    setProgress({ phase: 0, cur: hostPayload.length, total: hostPayload.length });
+  } else {
+    setProgress({ phase: 0, cur: 1, total: 1 });
+  }
+}
+
+function buildDomainCredIndex(creds) {
+  const credKey = (username) => (username || '').toLowerCase().trim();
+  const credByKey = {};
+  for (const c of creds) {
+    if (!c.is_domain) continue;
+    credByKey[credKey(c.username)] = c;
+  }
+  return { credKey, credByKey };
+}
+
+async function upsertOneCred(u, pid, credKey, credByKey, setProgress, total, done) {
+  const sam      = (u.sam || u.name.split('@')[0]).trim();
+  const fullName = u.domain ? `${sam}@${u.domain}` : sam;
+  const key      = credKey(fullName);
+  const altKey   = credKey(sam);
+  const notes    = buildCredNotes(u);
+  const tags     = buildCredTags(u);
+  u._credUsername = fullName;
+  const existing = credByKey[key] || credByKey[altKey];
+  if (existing) {
+    await mergeCred(existing, notes, tags, key, credByKey);
+  } else {
+    try {
+      const created = await api.createCred({
+        pid, username: fullName, secret: '', type: 'password',
+        host: '', service: 'AD', cracked: false, is_domain: true, notes, tags,
+      });
+      credByKey[key] = created;
+    } catch {}
+  }
+  setProgress({ phase: 1, cur: done, total });
+}
+
+function buildCredByUsername(freshCreds) {
+  const credByUsername = {};
+  for (const c of freshCreds) {
+    if (!c.is_domain) continue;
+    const uname = (c.username || '').toLowerCase();
+    credByUsername[uname] = c;
+    const bareSam = uname.split('@')[0];
+    if (!credByUsername[bareSam]) credByUsername[bareSam] = c;
+  }
+  return credByUsername;
+}
+
+async function runImportPhaseCreds(parsed, pid, importOptions, setProgress) {
+  setProgress({ phase: 1, cur: 0, total: importOptions.creds ? parsed.users.length : 1 });
+  const existingCreds = await api.getCreds(pid);
+  const { credKey, credByKey } = buildDomainCredIndex(existingCreds);
+  let credsDone = 0;
+  for (const u of parsed.users) {
+    if (!importOptions.creds) break;
+    credsDone++;
+    await upsertOneCred(u, pid, credKey, credByKey, setProgress, parsed.users.length, credsDone);
+  }
+  if (!importOptions.creds) { setProgress({ phase: 1, cur: 1, total: 1 }); }
+  const freshCreds = await api.getCreds(pid);
+  return buildCredByUsername(freshCreds);
+}
+
+async function mergeCred(existing, notes, tags, key, credByKey) {
+  const existingLines = new Set((existing.notes || '').split('\n').map(l => l.trim()));
+  const newLines = notes.split('\n').filter(l => l.trim() && !existingLines.has(l.trim()));
+  const mergedNotes = newLines.length
+    ? (existing.notes || '').trimEnd() + '\n' + newLines.join('\n')
+    : existing.notes || '';
+  const mergedTags = [...new Set([...(existing.tags || []), ...tags])];
+  if (mergedNotes !== (existing.notes || '')) {
+    const updated = await api.updateCred(existing.id, { notes: mergedNotes.trim(), tags: mergedTags });
+    credByKey[key] = updated;
+  } else if (JSON.stringify(mergedTags) !== JSON.stringify(existing.tags || [])) {
+    const updated = await api.updateCred(existing.id, { tags: mergedTags });
+    credByKey[key] = updated;
+  }
+}
+
+async function runImportPhaseFetchIds(pid, setProgress) {
+  setProgress({ phase: 2, cur: 0, total: 1 });
+  const freshHosts = await api.getHosts(pid);
+  setProgress({ phase: 2, cur: 1, total: 1 });
+  const hostByHostname = {};
+  const hostByIp       = {};
+  for (const h of freshHosts) {
+    if (h.hostname) hostByHostname[h.hostname.toUpperCase()] = h;
+    if (h.ip)       hostByIp[h.ip] = h;
+  }
+  return { hostByHostname, hostByIp };
+}
+
+function buildRelMap(parsed, pid, hostByHostname, hostByIp, credByUsername) {
+  const findCredForUser = (u) => {
+    const sam      = (u.sam || u.name.split('@')[0]).toLowerCase();
+    const fullName = (u._credUsername || (u.domain ? `${sam}@${u.domain}` : sam)).toLowerCase();
+    return credByUsername[fullName] || credByUsername[sam] || null;
+  };
+  const relMap = {};
+  const addRel = (comp, sid, roles) => {
+    const host = hostByHostname[comp.hostname] || hostByIp[comp.ip] || null;
+    if (!host) return;
+    const u = parsed.userBySid[sid];
+    if (!u) return;
+    const cred = findCredForUser(u);
+    if (!cred) return;
+    const key = `${cred.id}::${host.id}`;
+    if (!relMap[key]) relMap[key] = { cred_id: cred.id, host_id: host.id, pid, roles: new Set(), notes: '' };
+    for (const r of roles) relMap[key].roles.add(r);
+  };
+  for (const comp of parsed.computers) {
+    for (const sid of comp.laUserSids)      addRel(comp, sid, ['local_admin']);
+    for (const sid of comp.rdpUserSids)     addRel(comp, sid, ['rdp']);
+    for (const sid of comp.psRemoteUserSids) addRel(comp, sid, ['winrm']);
+    for (const sid of comp.dcsyncUserSids)  addRel(comp, sid, ['domain_admin']);
+    addSessionNotes(comp, parsed.userBySid, findCredForUser, hostByHostname, hostByIp, pid, relMap);
+  }
+  return relMap;
+}
+
+function addSessionNotes(comp, userBySid, findCredForUser, hostByHostname, hostByIp, pid, relMap) {
+  for (const usid of comp.sessionUserSids) {
+    const u = userBySid[usid];
+    if (!u) continue;
+    const host = hostByHostname[comp.hostname] || hostByIp[comp.ip] || null;
+    if (!host) continue;
+    const cred = findCredForUser(u);
+    if (!cred) continue;
+    const key = `${cred.id}::${host.id}`;
+    if (!relMap[key]) relMap[key] = { cred_id: cred.id, host_id: host.id, pid, roles: new Set(), notes: '' };
+    if (!relMap[key].notes.includes('Active session')) {
+      relMap[key].notes = (relMap[key].notes ? relMap[key].notes + '\n' : '') + 'Active session observed (BloodHound)';
+    }
+  }
+}
+
+async function runImportPhaseRelations(parsed, pid, importOptions, setProgress, hostByHostname, hostByIp, credByUsername) {
+  const relMap    = buildRelMap(parsed, pid, hostByHostname, hostByIp, credByUsername);
+  const mergedRels = Object.values(relMap).map(r => ({ ...r, roles: [...r.roles] }));
+  let relsDone = 0;
+  setProgress({ phase: 3, cur: 0, total: importOptions.relationships ? mergedRels.length : 1 });
+  for (const r of mergedRels) {
+    if (!importOptions.relationships) break;
+    try {
+      await upsertRelEntry(r, pid);
+    } catch {}
+    relsDone++;
+    setProgress({ phase: 3, cur: relsDone, total: mergedRels.length });
+  }
+  if (!importOptions.relationships) { setProgress({ phase: 3, cur: 1, total: 1 }); }
+}
+
+async function upsertRelEntry(r, pid) {
+  const existing = await api.getCredHostNotes({ cred_id: r.cred_id, host_id: r.host_id });
+  if (existing?.length) {
+    const cur = existing[0];
+    const mergedAccess = [...new Set([...(cur.access || []), ...r.roles])];
+    const mergedNotes  = r.notes && !cur.notes?.includes(r.notes)
+      ? ((cur.notes || '').trimEnd() + '\n' + r.notes).trim()
+      : cur.notes || '';
+    const changed = mergedAccess.length !== (cur.access || []).length || mergedNotes !== (cur.notes || '');
+    if (changed) { await api.updateCredHostNote(cur.id, { access: mergedAccess, notes: mergedNotes }); }
+  } else {
+    await api.upsertCredHostNote({ cred_id: r.cred_id, host_id: r.host_id, pid, notes: r.notes, access: r.roles });
+  }
+}
+
+function buildBhEdges(parsed) {
+  const compBySid = {};
+  for (const c of parsed.computers) compBySid[c.sid] = c;
+  const userSessionComps = {};
+  for (const comp of parsed.computers) {
+    for (const usid of comp.sessionUserSids) {
+      if (!userSessionComps[usid]) { userSessionComps[usid] = new Set(); }
+      userSessionComps[usid].add(comp.sid);
+    }
+  }
+  const bhEdges = [];
+  const edgeKey = new Set();
+  const addEdge = (fromComp, toComp, label, style) => {
+    if (!fromComp || !toComp || fromComp.sid === toComp.sid) return;
+    const k = `${fromComp.sid}→${toComp.sid}:${label}`;
+    if (edgeKey.has(k)) return;
+    edgeKey.add(k);
+    bhEdges.push({ fromHostname: fromComp.hostname, fromIp: fromComp.ip, toHostname: toComp.hostname, toIp: toComp.ip, label, style });
+  };
+  for (const targetComp of parsed.computers) {
+    addAccessEdges(targetComp, userSessionComps, compBySid, addEdge);
+    addDcsyncEdges(targetComp, userSessionComps, compBySid, parsed.computers, addEdge);
+    addDelegationEdges(targetComp, compBySid, parsed.computers, addEdge);
+  }
+  for (const dom of parsed.domainList) {
+    for (const trust of dom.trusts || []) {
+      bhEdges.push({ fromDomain: dom.name, toDomain: trust.target, label: `trust:${trust.direction || '?'}`, style: 'tunnel' });
+    }
+  }
+  return bhEdges;
+}
+
+function addAccessEdges(targetComp, userSessionComps, compBySid, addEdge) {
+  const accessMap = [
+    { sids: targetComp.laUserSids,      label: 'LA',    style: 'lateral' },
+    { sids: targetComp.rdpUserSids,     label: 'RDP',   style: 'normal'  },
+    { sids: targetComp.psRemoteUserSids, label: 'WinRM', style: 'normal'  },
+  ];
+  for (const { sids, label, style } of accessMap) {
+    for (const userSid of sids) {
+      const srcComps = userSessionComps[userSid] || new Set();
+      for (const srcSid of srcComps) addEdge(compBySid[srcSid], targetComp, label, style);
+    }
+  }
+}
+
+function addDcsyncEdges(targetComp, userSessionComps, compBySid, computers, addEdge) {
+  for (const userSid of targetComp.dcsyncUserSids) {
+    const srcComps = userSessionComps[userSid] || new Set();
+    for (const srcSid of srcComps) addEdge(compBySid[srcSid], targetComp, 'DCSync', 'exploit');
+    for (const srcComp of computers) {
+      if (srcComp.sid !== targetComp.sid && srcComp.laUserSids.has(userSid)) {
+        addEdge(srcComp, targetComp, 'DCSync path', 'exploit');
+      }
+    }
+  }
+}
+
+function addDelegationEdges(targetComp, compBySid, computers, addEdge) {
+  for (const dt of targetComp.delegTargets) {
+    let destComp = null;
+    if (dt.ref.includes('/')) {
+      const spnHost = dt.ref.split('/')[1]?.split(':')[0]?.split('.')[0]?.toUpperCase();
+      if (spnHost) destComp = computers.find(c => c.hostname === spnHost) || null;
+    } else {
+      destComp = compBySid[dt.ref] || null;
+    }
+    if (destComp) { addEdge(targetComp, destComp, 'delegate', 'tunnel'); }
+  }
+}
+
+function buildNodeIndexes(nodes) {
+  const nodeByHostname = {};
+  const nodeByIp       = {};
+  const nodeByLabel    = {};
+  for (const n of nodes) {
+    if (n.label) nodeByLabel[n.label.toUpperCase()] = n.id;
+    if (n.ip)    nodeByIp[n.ip] = n.id;
+    const hn = (n.label || '').split('.')[0].toUpperCase();
+    if (hn) nodeByHostname[hn] = n.id;
+  }
+  return { nodeByHostname, nodeByIp, nodeByLabel };
+}
+
+function resolveEdgeNodeIds(e, nodeByHostname, nodeByIp, nodeByLabel) {
+  if (e.fromDomain !== undefined) {
+    const fromId = nodeByLabel[e.fromDomain?.toUpperCase()] || nodeByHostname[e.fromDomain?.split('.')[0]?.toUpperCase()];
+    const toId   = nodeByLabel[e.toDomain?.toUpperCase()]   || nodeByHostname[e.toDomain?.split('.')[0]?.toUpperCase()];
+    return { fromId, toId };
+  }
+  return {
+    fromId: nodeByHostname[e.fromHostname] || nodeByIp[e.fromIp],
+    toId:   nodeByHostname[e.toHostname]   || nodeByIp[e.toIp],
+  };
+}
+
+async function applyEdgesToNetwork(net, bhEdges) {
+  const nodes   = net.nodes  || [];
+  const edges   = net.edges  || [];
+  const regions = net.regions || [];
+  if (!nodes.length) return false;
+  const { nodeByHostname, nodeByIp, nodeByLabel } = buildNodeIndexes(nodes);
+  const existingKeys = new Set(edges.map(e => `${e.from}→${e.to}:${e.label}`));
+  const newEdges = [];
+  for (const e of bhEdges) {
+    const { fromId, toId } = resolveEdgeNodeIds(e, nodeByHostname, nodeByIp, nodeByLabel);
+    if (!fromId || !toId || fromId === toId) continue;
+    const k = `${fromId}→${toId}:${e.label}`;
+    if (!existingKeys.has(k)) {
+      existingKeys.add(k);
+      newEdges.push({ id: `ebh_${crypto.randomUUID()}`, from: fromId, to: toId, label: e.label, style: e.style });
+    }
+  }
+  if (newEdges.length) {
+    await api.updateNetwork(net.id, { nodes, edges: [...edges, ...newEdges], regions });
+    return true;
+  }
+  return false;
+}
+
+async function runImportPhaseNetworkEdges(parsed, pid, importOptions, setProgress) {
+  setProgress({ phase: 4, cur: 0, total: 1 });
+  try {
+    if (importOptions.networkEdges) {
+      const networks = await api.getNetworks(pid);
+      const bhEdges  = buildBhEdges(parsed);
+      for (const net of networks) {
+        await applyEdgesToNetwork(net, bhEdges);
+      }
+    }
+    setProgress({ phase: 4, cur: 1, total: 1 });
+  } catch {}
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -398,6 +828,80 @@ const PHASES = [
   'Updating network maps',
 ];
 
+function _phaseRowPct(active, done, progress) {
+  if (active && progress.total > 0) return Math.round(progress.cur / progress.total * 100);
+  if (done) return 100;
+  return 0;
+}
+
+function _phaseColors(done, active, accent) {
+  const activeBase = active ? accent : null;
+  const base = done ? '#39d353' : activeBase;
+  const inactiveLabel = active ? '#e0e4ec' : '#404550';
+  const inactiveBar = active ? accent : 'transparent';
+  return {
+    dotBg:     base || '#1a1c22',
+    dotBorder: base || '#2a2d35',
+    label:     done ? '#39d353' : inactiveLabel,
+    bar:       done ? '#39d353' : inactiveBar,
+  };
+}
+
+function PhaseRow({ ph, i, progress, accent }) {
+  const done   = i < progress.phase;
+  const active = i === progress.phase;
+  const pct    = _phaseRowPct(active, done, progress);
+  const colors = _phaseColors(done, active, accent);
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
+        <span style={{ width: 18, height: 18, borderRadius: '50%', background: colors.dotBg, border: `1px solid ${colors.dotBorder}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff', flexShrink: 0, fontFamily: 'JetBrains Mono' }}>
+          {done ? '✓' : i + 1}
+        </span>
+        <span style={{ fontSize: 11, color: colors.label, fontFamily: 'Space Grotesk', flex: 1 }}>{ph}</span>
+        {active && <span style={{ fontSize: 9, color: accent, fontFamily: 'JetBrains Mono' }}>{progress.cur} / {progress.total}</span>}
+        {done && <span style={{ fontSize: 9, color: '#39d35380', fontFamily: 'JetBrains Mono' }}>done</span>}
+      </div>
+      <div style={{ height: 3, background: '#1a1c22', borderRadius: 2, marginLeft: 28 }}>
+        <div style={{ height: '100%', width: pct + '%', background: colors.bar, borderRadius: 2, transition: 'width .15s' }} />
+      </div>
+    </div>
+  );
+}
+PhaseRow.propTypes = { ph: PropTypes.string, i: PropTypes.number, progress: PropTypes.object, accent: PropTypes.string };
+
+function RelationsTable({ parsed, td, mono, badge }) {
+  const rows = [];
+  const addRows = (comp, sids, access, color) => {
+    for (const sid of sids) {
+      const u = parsed.userBySid[sid];
+      if (u) { rows.push({ computer: comp.hostname, user: u.sam || u.name, domain: u.domain, access, color }); }
+    }
+  };
+  for (const c of parsed.computers) {
+    addRows(c, c.laUserSids,      'Local Admin', '#e8574a');
+    addRows(c, c.rdpUserSids,     'RDP',         '#5b8af5');
+    addRows(c, c.psRemoteUserSids, 'WinRM',      '#39d353');
+    addRows(c, c.dcsyncUserSids,  'DCSync',      '#cc2233');
+  }
+  if (!rows.length) {
+    return (
+      <tr><td colSpan={4} style={{ ...td, color: '#404550', textAlign: 'center', padding: 24 }}>
+        No access relationships — load computers.json with LocalAdmins / RemoteDesktopUsers data
+      </td></tr>
+    );
+  }
+  return <>{rows.map((r, i) => (
+    <tr key={`${r.computer}-${r.user}-${r.access}`}>
+      <td style={{ ...td, ...mono, color: '#9098a8' }}>{r.computer}</td>
+      <td style={{ ...td, ...mono, color: '#e0e4ec' }}>{r.user}</td>
+      <td style={td}>{r.domain ? badge('#c07af0', r.domain) : '—'}</td>
+      <td style={td}>{badge(r.color, r.access)}</td>
+    </tr>
+  ))}</>;
+}
+RelationsTable.propTypes = { parsed: PropTypes.object, td: PropTypes.object, mono: PropTypes.object, badge: PropTypes.func };
+
 export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
   const [tab, setTab]           = useState('summary');
   const [parsed, setParsed]     = useState(null);
@@ -405,27 +909,28 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
   const [error, setError]       = useState('');
   const [importing, setImporting] = useState(false);
   const [progress, setProgress]   = useState(null);
+  const [importOptions, setImportOptions] = useState({
+    hosts: true,
+    creds: true,
+    relationships: true,
+    networkEdges: true,
+  });
+  const [serverResult, setServerResult] = useState(null);
+  const [serverImporting, setServerImporting] = useState(false);
   const fileInputRef = useRef();
+  const serverFileRef = useRef();
 
-  // ── File loading ────────────────────────────────────────────────────────────
-  const parseJsonFile = async (text, filename) => {
-    const obj  = JSON.parse(text);
-    const type = detectBHType(obj, filename);
-    return type !== 'unknown' ? { type, obj, filename } : null;
-  };
-
-  const loadZipFile = async (file) => {
-    const zip = await JSZip.loadAsync(file);
-    const out = [];
-    for (const [name, entry] of Object.entries(zip.files)) {
-      if (!name.endsWith('.json') || entry.dir) continue;
-      try {
-        const text = await entry.async('text');
-        const r = await parseJsonFile(text, name);
-        if (r) out.push(r);
-      } catch {}
+  const doServerImport = async (file) => {
+    setServerImporting(true); setError(''); setServerResult(null);
+    try {
+      const result = await api.importBloodHound(pid, file);
+      setServerResult(result);
+      if (onDone) { onDone(); }
+    } catch (e) {
+      setError('Server import error: ' + (e.message || String(e)));
+    } finally {
+      setServerImporting(false);
     }
-    return out;
   };
 
   const handleFiles = async (rawFiles) => {
@@ -433,13 +938,13 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
     let loaded = [];
     for (const file of rawFiles) {
       if (file.name.endsWith('.zip')) {
-        try { loaded = loaded.concat(await loadZipFile(file)); }
+        try { loaded = loaded.concat(await loadZipEntries(file)); }
         catch (e) { setError(`ZIP error: ${file.name} — ${e.message}`); return; }
       } else if (file.name.endsWith('.json')) {
         try {
           const text = await file.text();
-          const r = await parseJsonFile(text, file.name);
-          if (r) loaded.push(r);
+          const r = await parseJsonFileEntry(text, file.name);
+          if (r) { loaded.push(r); }
         } catch { setError(`Parse error: ${file.name}`); return; }
       }
     }
@@ -448,315 +953,18 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
     setTab('summary');
   };
 
-  const onDrop = (e) => {
-    e.preventDefault(); setDragging(false);
-    handleFiles(Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.json') || f.name.endsWith('.zip')));
-  };
 
   // ── Import ──────────────────────────────────────────────────────────────────
   const doImport = async () => {
     if (!parsed) return;
     setImporting(true); setError('');
-
     try {
-      // ── Phase 1: hosts ────────────────────────────────────────────────────
-      setProgress({ phase: 0, cur: 0, total: parsed.computers.length });
-      const hostPayload = parsed.computers.map(c => ({
-        pid,
-        ip:       c.ip || c.hostname || 'unknown',
-        hostname: c.hostname,
-        os:       c.os || 'Windows',
-        domain:   c.domain,
-        status:   c.enabled ? 'alive' : 'unknown',
-        ports: [], services: [], ips: [],
-        tags:  buildHostTags(c),
-        notes: buildHostNotes(c),
-      }));
-      await api.batchImport(pid, { hosts: hostPayload, creds: [] });
-      setProgress({ phase: 0, cur: parsed.computers.length, total: parsed.computers.length });
-
-      // ── Phase 2: credentials ──────────────────────────────────────────────
-      setProgress({ phase: 1, cur: 0, total: parsed.users.length });
-      const existingCreds = await api.getCreds(pid);
-
-      // Build credential key from username (handles both "user" and "user@domain" formats)
-      const credKey = (username) => (username || '').toLowerCase().trim();
-
-      // Index existing domain creds — match by either bare sam or sam@domain
-      const credByKey = {};
-      for (const c of existingCreds) {
-        if (!c.is_domain) continue;
-        const k = credKey(c.username);
-        credByKey[k] = c;
-      }
-
-      let credsDone = 0;
-      for (const u of parsed.users) {
-        const sam    = (u.sam || u.name.split('@')[0]).trim();
-        // Use sam@domain when domain is known to avoid collisions in multi-domain pentests
-        const fullName = u.domain ? `${sam}@${u.domain}` : sam;
-        const key      = credKey(fullName);
-        const altKey   = credKey(sam); // fallback match against bare sam (legacy creds)
-        const notes = buildCredNotes(u);
-
-        // Also keep a parallel index for Phase 4 matching by SID
-        u._credUsername = fullName;
-
-        const existing = credByKey[key] || credByKey[altKey];
-        if (existing) {
-          // Merge notes — only add lines not already present
-          const existingLines = new Set((existing.notes || '').split('\n').map(l => l.trim()));
-          const newLines = notes.split('\n').filter(l => l.trim() && !existingLines.has(l.trim()));
-          const mergedNotes = newLines.length
-            ? (existing.notes || '').trimEnd() + '\n' + newLines.join('\n')
-            : existing.notes || '';
-          if (mergedNotes !== (existing.notes || '')) {
-            const updated = await api.updateCred(existing.id, { notes: mergedNotes.trim() });
-            credByKey[key] = updated;
-          }
-        } else {
-          try {
-            const created = await api.createCred({
-              pid, username: fullName, secret: '', type: 'password',
-              host: '', service: 'AD', cracked: false, is_domain: true, notes,
-            });
-            credByKey[key] = created;
-          } catch {}
-        }
-
-        credsDone++;
-        setProgress({ phase: 1, cur: credsDone, total: parsed.users.length });
-      }
-
-      // ── Phase 3: fetch fresh IDs ──────────────────────────────────────────
-      setProgress({ phase: 2, cur: 0, total: 1 });
-      const [freshHosts, freshCreds] = await Promise.all([api.getHosts(pid), api.getCreds(pid)]);
-      setProgress({ phase: 2, cur: 1, total: 1 });
-
-      const hostByHostname = {};
-      const hostByIp       = {};
-      for (const h of freshHosts) {
-        if (h.hostname) hostByHostname[h.hostname.toUpperCase()] = h;
-        if (h.ip)       hostByIp[h.ip] = h;
-      }
-      // Index fresh creds by full username AND bare sam (to support both formats)
-      const credByUsername = {};
-      for (const c of freshCreds) {
-        if (!c.is_domain) continue;
-        const uname = (c.username || '').toLowerCase();
-        credByUsername[uname] = c;
-        // Also index by bare sam (without @domain part)
-        const bareSam = uname.split('@')[0];
-        if (!credByUsername[bareSam]) credByUsername[bareSam] = c;
-      }
-
-      // ── Phase 4: access relationships ─────────────────────────────────────
-      // Build all (cred_id, host_id) → roles[] map
-      const relMap = {};
-      const findCredForUser = (u) => {
-        const sam      = (u.sam || u.name.split('@')[0]).toLowerCase();
-        const fullName = (u._credUsername || (u.domain ? `${sam}@${u.domain}` : sam)).toLowerCase();
-        return credByUsername[fullName] || credByUsername[sam] || null;
-      };
-      const addRel = (comp, sid, roles) => {
-        const host = hostByHostname[comp.hostname] || hostByIp[comp.ip] || null;
-        if (!host) return;
-        const u = parsed.userBySid[sid];
-        if (!u) return;
-        const cred = findCredForUser(u);
-        if (!cred) return;
-        const key = `${cred.id}::${host.id}`;
-        if (!relMap[key]) relMap[key] = { cred_id: cred.id, host_id: host.id, pid, roles: new Set(), notes: '' };
-        for (const r of roles) relMap[key].roles.add(r);
-      };
-
-      for (const comp of parsed.computers) {
-        for (const sid of comp.laUserSids)       addRel(comp, sid, ['local_admin']);
-        for (const sid of comp.rdpUserSids)       addRel(comp, sid, ['rdp']);
-        for (const sid of comp.psRemoteUserSids)  addRel(comp, sid, ['winrm']);
-        // DCSync → treat as domain_admin level
-        for (const sid of comp.dcsyncUserSids)    addRel(comp, sid, ['domain_admin']);
-        // Active sessions → note but no role toggle (sessions are dynamic)
-        for (const usid of comp.sessionUserSids) {
-          const u = parsed.userBySid[usid];
-          if (!u) continue;
-          const host = hostByHostname[comp.hostname] || hostByIp[comp.ip] || null;
-          if (!host) continue;
-          const cred = findCredForUser(u);
-          if (!cred) continue;
-          const key = `${cred.id}::${host.id}`;
-          if (!relMap[key]) relMap[key] = { cred_id: cred.id, host_id: host.id, pid, roles: new Set(), notes: '' };
-          if (!relMap[key].notes.includes('Active session')) {
-            relMap[key].notes = (relMap[key].notes ? relMap[key].notes + '\n' : '') + 'Active session observed (BloodHound)';
-          }
-        }
-      }
-
-      const mergedRels = Object.values(relMap).map(r => ({ ...r, roles: [...r.roles] }));
-      let relsDone = 0;
-      setProgress({ phase: 3, cur: 0, total: mergedRels.length });
-
-      for (const r of mergedRels) {
-        try {
-          const existing = await api.getCredHostNotes({ cred_id: r.cred_id, host_id: r.host_id });
-          if (existing?.length) {
-            const cur = existing[0];
-            const mergedAccess = [...new Set([...(cur.access || []), ...r.roles])];
-            const mergedNotes  = r.notes && !cur.notes?.includes(r.notes)
-              ? ((cur.notes || '').trimEnd() + '\n' + r.notes).trim()
-              : cur.notes || '';
-            const changed = mergedAccess.length !== (cur.access || []).length ||
-              mergedNotes !== (cur.notes || '');
-            if (changed) await api.updateCredHostNote(cur.id, { access: mergedAccess, notes: mergedNotes });
-          } else {
-            await api.upsertCredHostNote({ cred_id: r.cred_id, host_id: r.host_id, pid, notes: r.notes, access: r.roles });
-          }
-        } catch {}
-        relsDone++;
-        setProgress({ phase: 3, cur: relsDone, total: mergedRels.length });
-      }
-
-      // ── Phase 5: network map edges ────────────────────────────────────────
-      setProgress({ phase: 4, cur: 0, total: 1 });
-      try {
-        const networks = await api.getNetworks(pid);
-
-        // Build SID → computer lookup
-        const compBySid = {};
-        for (const c of parsed.computers) compBySid[c.sid] = c;
-
-        // Build userSid → [computerSid] from sessions (where that user has active session)
-        const userSessionComps = {}; // userSid → Set<computerSid>
-        for (const comp of parsed.computers) {
-          for (const usid of comp.sessionUserSids) {
-            if (!userSessionComps[usid]) userSessionComps[usid] = new Set();
-            userSessionComps[usid].add(comp.sid);
-          }
-        }
-
-        // Edge type definitions: { fromSid, toSid, label, style }
-        // style: 'lateral' | 'exploit' | 'tunnel' | 'normal'
-        const bhEdges = []; // { fromHostname, fromIp, toHostname, toIp, label, style }
-
-        const edgeKey = new Set();
-        const addEdge = (fromComp, toComp, label, style) => {
-          if (!fromComp || !toComp || fromComp.sid === toComp.sid) return;
-          const k = `${fromComp.sid}→${toComp.sid}:${label}`;
-          if (edgeKey.has(k)) return;
-          edgeKey.add(k);
-          bhEdges.push({ fromHostname: fromComp.hostname, fromIp: fromComp.ip, toHostname: toComp.hostname, toIp: toComp.ip, label, style });
-        };
-
-        for (const targetComp of parsed.computers) {
-          // Session-based lateral movement: userHasSessionOnSrc → targetComp via LA/RDP/WRM
-          const accessMap = [
-            { sids: targetComp.laUserSids,       label: 'LA',    style: 'lateral' },
-            { sids: targetComp.rdpUserSids,       label: 'RDP',   style: 'normal'  },
-            { sids: targetComp.psRemoteUserSids,  label: 'WinRM', style: 'normal'  },
-          ];
-          for (const { sids, label, style } of accessMap) {
-            for (const userSid of sids) {
-              const srcComps = userSessionComps[userSid] || new Set();
-              for (const srcSid of srcComps) {
-                addEdge(compBySid[srcSid], targetComp, label, style);
-              }
-            }
-          }
-
-          // DCSync: user has DCSync on targetComp (DC), user has session on srcComp
-          for (const userSid of targetComp.dcsyncUserSids) {
-            const srcComps = userSessionComps[userSid] || new Set();
-            for (const srcSid of srcComps) {
-              addEdge(compBySid[srcSid], targetComp, 'DCSync', 'exploit');
-            }
-            // Also: if DA user has local admin on some comp → draw LA-comp → DC
-            for (const srcComp of parsed.computers) {
-              if (srcComp.sid === targetComp.sid) continue;
-              if (srcComp.laUserSids.has(userSid)) {
-                addEdge(srcComp, targetComp, 'DCSync path', 'exploit');
-              }
-            }
-          }
-
-          // Constrained delegation: targetComp can delegate to delegTarget
-          for (const dt of targetComp.delegTargets) {
-            // dt.ref may be SID or SPN string like "HOST/dc01.domain.com"
-            let destComp = null;
-            if (dt.ref.includes('/')) {
-              // SPN — extract hostname
-              const spnHost = dt.ref.split('/')[1]?.split(':')[0]?.split('.')[0]?.toUpperCase();
-              if (spnHost) destComp = parsed.computers.find(c => c.hostname === spnHost) || null;
-            } else {
-              // SID
-              destComp = compBySid[dt.ref] || null;
-            }
-            if (destComp) addEdge(targetComp, destComp, 'delegate', 'tunnel');
-          }
-        }
-
-        // Domain trust edges
-        for (const dom of parsed.domainList) {
-          for (const trust of dom.trusts || []) {
-            // Trust edges are between domains — we'll create them if domain nodes exist on map
-            // Domain nodes are identified by label matching domain name
-            bhEdges.push({ fromDomain: dom.name, toDomain: trust.target, label: `trust:${trust.direction || '?'}`, style: 'tunnel' });
-          }
-        }
-
-        // Now apply edges to each network map
-        let netsUpdated = 0;
-        for (const net of networks) {
-          const nodes  = net.nodes  || [];
-          const edges  = net.edges  || [];
-          const regions = net.regions || [];
-          if (!nodes.length) continue;
-
-          // Build node lookup: hostname → nodeId, ip → nodeId, label → nodeId
-          const nodeByHostname = {};
-          const nodeByIp       = {};
-          const nodeByLabel    = {};
-          for (const n of nodes) {
-            if (n.label) nodeByLabel[n.label.toUpperCase()] = n.id;
-            if (n.ip)    nodeByIp[n.ip] = n.id;
-            // Try to match hostname from label (label may be hostname or FQDN)
-            const hn = (n.label || '').split('.')[0].toUpperCase();
-            if (hn) nodeByHostname[hn] = n.id;
-          }
-
-          const existingKeys = new Set(edges.map(e => `${e.from}→${e.to}:${e.label}`));
-          const newEdges = [];
-
-          for (const e of bhEdges) {
-            if (e.fromDomain !== undefined) {
-              // Domain trust edge
-              const fromId = nodeByLabel[e.fromDomain?.toUpperCase()] || nodeByHostname[e.fromDomain?.split('.')[0]?.toUpperCase()];
-              const toId   = nodeByLabel[e.toDomain?.toUpperCase()]   || nodeByHostname[e.toDomain?.split('.')[0]?.toUpperCase()];
-              if (fromId && toId && fromId !== toId) {
-                const k = `${fromId}→${toId}:${e.label}`;
-                if (!existingKeys.has(k)) { existingKeys.add(k); newEdges.push({ id: 'ebh' + Date.now() + Math.random().toString(36).slice(2, 6), from: fromId, to: toId, label: e.label, style: e.style }); }
-              }
-              continue;
-            }
-            const fromId = nodeByHostname[e.fromHostname] || nodeByIp[e.fromIp];
-            const toId   = nodeByHostname[e.toHostname]   || nodeByIp[e.toIp];
-            if (!fromId || !toId || fromId === toId) continue;
-            const k = `${fromId}→${toId}:${e.label}`;
-            if (!existingKeys.has(k)) {
-              existingKeys.add(k);
-              newEdges.push({ id: 'ebh' + Date.now() + Math.random().toString(36).slice(2, 6), from: fromId, to: toId, label: e.label, style: e.style });
-            }
-          }
-
-          if (newEdges.length) {
-            await api.updateNetwork(net.id, { nodes, edges: [...edges, ...newEdges], regions });
-            netsUpdated++;
-          }
-        }
-
-        setProgress({ phase: 4, cur: 1, total: 1 });
-      } catch {} // network map update is best-effort
-
-      if (onDone) onDone();
+      await runImportPhaseHosts(parsed, pid, importOptions, setProgress);
+      const credByUsername = await runImportPhaseCreds(parsed, pid, importOptions, setProgress);
+      const { hostByHostname, hostByIp } = await runImportPhaseFetchIds(pid, setProgress);
+      await runImportPhaseRelations(parsed, pid, importOptions, setProgress, hostByHostname, hostByIp, credByUsername);
+      await runImportPhaseNetworkEdges(parsed, pid, importOptions, setProgress);
+      if (onDone) { onDone(); }
       onClose();
     } catch (e) {
       setError('Import error: ' + (e.message || String(e)));
@@ -777,8 +985,8 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div style={{ position: 'fixed', inset: 0, background: '#00000099', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-         onClick={e => e.target === e.currentTarget && !importing && onClose()}>
+    <div style={{ position: 'fixed', inset: 0, background: '#00000099', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      {!importing && <button type="button" aria-label="Close BloodHound parser" onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'transparent', border: 'none', cursor: 'default' }} />}
       <div style={{ background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 10, width: 860, maxHeight: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #000000cc' }}>
 
         {/* Header */}
@@ -791,18 +999,65 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
         </div>
 
         {/* Drop zone */}
-        {!parsed && (
-          <div onDrop={onDrop} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
-               style={{ margin: 20, border: `2px dashed ${dragging ? accent : '#2a2d35'}`, borderRadius: 8, padding: '48px 20px', textAlign: 'center', cursor: 'pointer', background: dragging ? accent + '08' : 'transparent' }}
-               onClick={() => fileInputRef.current?.click()}>
-            <div style={{ fontSize: 34, marginBottom: 12 }}>🩸</div>
-            <div style={{ fontSize: 13, color: '#c8cdd6', fontWeight: 700, fontFamily: 'Space Grotesk', marginBottom: 8 }}>Drop SharpHound / BloodHound exports</div>
-            <div style={{ fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono', lineHeight: 2 }}>
-              ZIP archive (SharpHound output) · или отдельные JSON файлы<br/>
-              computers · users · groups · domains
-            </div>
+        {!parsed && !serverResult && (
+          <>
+            <button
+              type="button"
+              onDrop={e => { e.preventDefault(); setDragging(false); const fs = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.json') || f.name.endsWith('.zip')); handleFiles(fs); }}
+              onDragOver={e => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              style={{ margin: '20px 20px 8px', border: `2px dashed ${dragging ? accent : '#2a2d35'}`, borderRadius: 8, padding: '36px 20px', textAlign: 'center', cursor: 'pointer', background: dragging ? accent + '08' : 'transparent', width: 'calc(100% - 40px)' }}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <span style={{ display: 'block', fontSize: 34, marginBottom: 12 }}>🩸</span>
+              <span style={{ display: 'block', fontSize: 13, color: '#c8cdd6', fontWeight: 700, fontFamily: 'Space Grotesk', marginBottom: 8 }}>Drop SharpHound / BloodHound exports</span>
+              <span style={{ display: 'block', fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono', lineHeight: 2 }}>
+                ZIP archive (SharpHound output) · or individual JSON files<br />
+                computers · users · groups · domains
+              </span>
+            </button>
             <input ref={fileInputRef} type="file" accept=".json,.zip" multiple style={{ display: 'none' }}
                    onChange={e => handleFiles(Array.from(e.target.files))} />
+          <div style={{ margin: '0 20px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontSize: 9, color: '#404550', fontFamily: 'JetBrains Mono' }}>— or fast server-side import —</div>
+            <button disabled={serverImporting} onClick={() => serverFileRef.current?.click()}
+              style={{ background: serverImporting ? '#1a1c22' : '#c07af014', border: '1px solid #c07af044', borderRadius: 5, padding: '7px 18px', cursor: serverImporting ? 'default' : 'pointer', color: '#c07af0', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+              {serverImporting ? '⏳ Importing…' : '⚡ Server Import (ZIP / JSON)'}
+            </button>
+            <div style={{ fontSize: 8, color: '#303540', fontFamily: 'JetBrains Mono' }}>DA detection · ACL edges · attack graph edges — all in one request</div>
+            <input ref={serverFileRef} type="file" accept=".json,.zip" style={{ display: 'none' }}
+                   onChange={e => { const f = e.target.files[0]; if (f) doServerImport(f); }} />
+          </div>
+          </>
+        )}
+
+        {/* Server import result */}
+        {serverResult && !serverImporting && (
+          <div style={{ margin: 20 }}>
+            <div style={{ background: '#0d1f0d', border: '1px solid #39d35344', borderRadius: 8, padding: '16px 20px' }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#39d353', fontFamily: 'Space Grotesk', marginBottom: 12 }}>✓ Server Import Complete</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                {[
+                  ['Hosts created', serverResult.hosts_created, '#5b8af5'],
+                  ['Hosts updated', serverResult.hosts_updated, '#9098a8'],
+                  ['Creds created', serverResult.creds_created, '#39d353'],
+                  ['Creds updated', serverResult.creds_updated, '#9098a8'],
+                  ['Access edges', serverResult.edges_added, '#e8574a'],
+                  ['ACL edges', serverResult.acl_edges, '#cc2233'],
+                  ['DA users', serverResult.da_users, '#c07af0'],
+                  ['DA computers', serverResult.da_computers, '#c07af0'],
+                ].map(([label, val, color]) => (
+                  <div key={label} style={{ background: '#12141a', borderRadius: 5, padding: '8px 10px', textAlign: 'center' }}>
+                    <div style={{ fontSize: 18, fontWeight: 700, color, fontFamily: 'JetBrains Mono' }}>{val ?? 0}</div>
+                    <div style={{ fontSize: 8, color: '#505560', fontFamily: 'JetBrains Mono', marginTop: 2 }}>{label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button onClick={() => { setServerResult(null); setError(''); }} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Import again</button>
+              <button onClick={onClose} style={{ background: accent, border: 'none', borderRadius: 5, padding: '6px 20px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>Close</button>
+            </div>
           </div>
         )}
 
@@ -812,26 +1067,9 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
         {/* Progress */}
         {importing && progress && (
           <div style={{ padding: '24px 28px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 18 }}>
-            {PHASES.map((ph, i) => {
-              const done   = i < progress.phase;
-              const active = i === progress.phase;
-              const pct = active && progress.total > 0 ? Math.round(progress.cur / progress.total * 100) : done ? 100 : 0;
-              return (
-                <div key={i}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
-                    <span style={{ width: 18, height: 18, borderRadius: '50%', background: done ? '#39d353' : active ? accent : '#1a1c22', border: `1px solid ${done ? '#39d353' : active ? accent : '#2a2d35'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff', flexShrink: 0, fontFamily: 'JetBrains Mono' }}>
-                      {done ? '✓' : i + 1}
-                    </span>
-                    <span style={{ fontSize: 11, color: done ? '#39d353' : active ? '#e0e4ec' : '#404550', fontFamily: 'Space Grotesk', flex: 1 }}>{ph}</span>
-                    {active && <span style={{ fontSize: 9, color: accent, fontFamily: 'JetBrains Mono' }}>{progress.cur} / {progress.total}</span>}
-                    {done && <span style={{ fontSize: 9, color: '#39d35380', fontFamily: 'JetBrains Mono' }}>done</span>}
-                  </div>
-                  <div style={{ height: 3, background: '#1a1c22', borderRadius: 2, marginLeft: 28 }}>
-                    <div style={{ height: '100%', width: pct + '%', background: done ? '#39d353' : active ? accent : 'transparent', borderRadius: 2, transition: 'width .15s' }} />
-                  </div>
-                </div>
-              );
-            })}
+            {PHASES.map((ph, i) => (
+              <PhaseRow key={ph} ph={ph} i={i} progress={progress} accent={accent} />
+            ))}
           </div>
         )}
 
@@ -854,6 +1092,27 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto' }}>
+
+            {tab === 'summary' && (
+              <div style={{ padding: '14px 16px 0' }}>
+                <div style={{ background: '#12141a', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 10, color: '#9098a8', fontFamily: 'Space Grotesk', fontWeight: 700, marginBottom: 8 }}>Import objects</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {[
+                      ['hosts', `Hosts (${parsed.computers.length})`],
+                      ['creds', `Creds (${parsed.users.length})`],
+                      ['relationships', `Access rels (${parsed.stats.relationships})`],
+                      ['networkEdges', `Network edges (~${parsed.stats.mapEdges})`],
+                    ].map(([key, label]) => (
+                      <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 6, background: importOptions[key] ? accent + '14' : '#0e1016', border: `1px solid ${importOptions[key] ? accent + '44' : '#2a2d35'}`, borderRadius: 4, padding: '5px 8px', cursor: 'pointer', color: importOptions[key] ? '#e0e4ec' : '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>
+                        <input type="checkbox" checked={importOptions[key]} onChange={e => setImportOptions(prev => ({ ...prev, [key]: e.target.checked }))} style={{ accentColor: accent }} />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* ── SUMMARY ── */}
             {tab === 'summary' && (
@@ -878,12 +1137,12 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
                 ))}
                 <div style={{ gridColumn: '1 / -1', background: '#12141a', border: '1px solid #1e2029', borderRadius: 6, padding: '10px 14px', fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono', lineHeight: 1.9 }}>
                   <div style={{ color: '#9098a8', marginBottom: 4, fontWeight: 600, fontSize: 10 }}>Import plan</div>
-                  <div>• Hosts: upsert по IP или hostname. Обновляет OS (более детальная версия), domain, notes, tags (laps / unconstrained / dc)</div>
-                  <div>• Creds: создаёт если нет, дополняет notes (DA/EA, Kerberoastable, ASREPRoast, description, email, groups)</div>
+                  <div>• Hosts: upsert by IP or hostname. Updates OS, domain, notes, tags, BH flags and inferred host role.</div>
+                  <div>• Creds: creates missing AD creds, enriches notes with roles, flags, status, groups and metadata.</div>
                   <div>• Access: LA → local_admin · RDP → rdp · PSRemote → winrm · DCSync → domain_admin</div>
-                  <div>• Sessions: пишет заметку "Active session observed" в cred_host_notes</div>
-                  <div>• Existing roles сохраняются, новые добавляются</div>
-                  <div>• Network maps: рисует рёбра на всех картах сети где есть совпадающие ноды:</div>
+                  <div>• Sessions: writes "Active session observed" note into cred_host_notes</div>
+                  <div>• Existing roles are preserved; new ones are appended</div>
+                  <div>• Network maps: draws edges on every network map containing matching nodes:</div>
                   <div style={{ paddingLeft: 12 }}>session+LA → lateral · session+DCSync → exploit · delegation → tunnel · domain trust → tunnel</div>
                 </div>
               </div>
@@ -907,8 +1166,8 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {parsed.computers.map((c, i) => (
-                    <tr key={i}>
+                  {parsed.computers.map((c) => (
+                    <tr key={c.sid}>
                       <td style={{ ...td, ...mono, color: '#e0e4ec' }}>{c.hostname}</td>
                       <td style={{ ...td, ...mono, color: '#9098a8' }}>{c.ip || <span style={{ color: '#303540' }}>—</span>}</td>
                       <td style={td}>{c.domain ? badge('#c07af0', c.domain) : <span style={{ color: '#303540' }}>—</span>}</td>
@@ -944,8 +1203,8 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {parsed.users.map((u, i) => (
-                    <tr key={i}>
+                  {parsed.users.map((u) => (
+                    <tr key={u.sid}>
                       <td style={{ ...td, ...mono, color: '#e0e4ec' }}>{u.sam || u.name}</td>
                       <td style={td}>{u.domain ? badge('#c07af0', u.domain) : <span style={{ color: '#303540' }}>—</span>}</td>
                       <td style={{ ...td }}>
@@ -983,34 +1242,7 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {(() => {
-                    const rows = [];
-                    const addRows = (comp, sids, access, color) => {
-                      for (const sid of sids) {
-                        const u = parsed.userBySid[sid];
-                        if (u) rows.push({ computer: comp.hostname, user: u.sam || u.name, domain: u.domain, access, color });
-                      }
-                    };
-                    for (const c of parsed.computers) {
-                      addRows(c, c.laUserSids,       'Local Admin', '#e8574a');
-                      addRows(c, c.rdpUserSids,       'RDP',         '#5b8af5');
-                      addRows(c, c.psRemoteUserSids,  'WinRM',       '#39d353');
-                      addRows(c, c.dcsyncUserSids,    'DCSync',      '#cc2233');
-                    }
-                    if (!rows.length) return (
-                      <tr><td colSpan={4} style={{ ...td, color: '#404550', textAlign: 'center', padding: 24 }}>
-                        No access relationships — load computers.json with LocalAdmins / RemoteDesktopUsers data
-                      </td></tr>
-                    );
-                    return rows.map((r, i) => (
-                      <tr key={i}>
-                        <td style={{ ...td, ...mono, color: '#9098a8' }}>{r.computer}</td>
-                        <td style={{ ...td, ...mono, color: '#e0e4ec' }}>{r.user}</td>
-                        <td style={td}>{r.domain ? badge('#c07af0', r.domain) : '—'}</td>
-                        <td style={td}>{badge(r.color, r.access)}</td>
-                      </tr>
-                    ));
-                  })()}
+                  <RelationsTable parsed={parsed} td={td} mono={mono} badge={badge} />
                 </tbody>
               </table>
             )}
@@ -1019,16 +1251,16 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
             {tab === 'domains' && (
               <div style={{ padding: 16 }}>
                 {parsed.domainList.length === 0 && <div style={{ color: '#404550', fontSize: 10, fontFamily: 'JetBrains Mono' }}>No domain data — load domains.json</div>}
-                {parsed.domainList.map((d, i) => (
-                  <div key={i} style={{ background: '#12141a', borderRadius: 5, padding: '10px 14px', marginBottom: 8 }}>
+                {parsed.domainList.map((d) => (
+                  <div key={d.sid || d.name} style={{ background: '#12141a', borderRadius: 5, padding: '10px 14px', marginBottom: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: d.trusts?.length ? 8 : 0 }}>
                       {badge('#c07af0', 'AD')}
                       <span style={{ fontSize: 12, color: '#c07af0', fontFamily: 'JetBrains Mono', fontWeight: 700 }}>{d.name}</span>
                       {d.functional && <span style={{ fontSize: 9, color: '#505560', fontFamily: 'JetBrains Mono' }}>FL: {d.functional}</span>}
                       <span style={{ fontSize: 8, color: '#303540', fontFamily: 'JetBrains Mono' }}>{d.sid}</span>
                     </div>
-                    {d.trusts?.map((t, j) => (
-                      <div key={j} style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono', paddingLeft: 14 }}>
+                    {d.trusts?.map((t) => (
+                      <div key={`${t.target}-${t.direction}`} style={{ fontSize: 9, color: '#606570', fontFamily: 'JetBrains Mono', paddingLeft: 14 }}>
                         Trust → {t.target} ({t.direction} / {t.kind})
                       </div>
                     ))}
@@ -1045,7 +1277,7 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
             </span>
             <button onClick={onClose} style={{ background: 'none', border: '1px solid #2a2d35', borderRadius: 5, padding: '6px 14px', cursor: 'pointer', color: '#606570', fontSize: 10, fontFamily: 'JetBrains Mono' }}>Cancel</button>
             <button onClick={doImport} style={{ background: accent, border: 'none', borderRadius: 5, padding: '6px 20px', cursor: 'pointer', color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
-              Import All
+              Import selected
             </button>
           </div>
         </>}
@@ -1053,3 +1285,4 @@ export default function BloodHoundParser({ accent, pid, onClose, onDone }) {
     </div>
   );
 }
+BloodHoundParser.propTypes = { accent: PropTypes.string, pid: PropTypes.string, onClose: PropTypes.func, onDone: PropTypes.func };

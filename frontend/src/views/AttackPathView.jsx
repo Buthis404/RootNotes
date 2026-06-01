@@ -1,5 +1,133 @@
+import PropTypes from 'prop-types';
 import { useState, useEffect, useRef } from 'react';
 import Icon from '../components/Icon.jsx';
+import { api } from '../api.js';
+
+// Cache KB MITRE articles for the session
+let _kbTechniqueCache = null;
+async function loadKBTechniques() {
+  if (_kbTechniqueCache) return _kbTechniqueCache;
+  try {
+    const articles = await api.getKBArticles({ category: 'MITRE ATT&CK' });
+    _kbTechniqueCache = articles.map(a => {
+      const mid = (a.tags || []).find(t => /^T\d{4}/.test(t)) || '';
+      const name = a.title.includes(' — ') ? a.title.split(' — ')[1] : a.title;
+      const tacticTag = (a.tags || []).find(t => t !== 'mitre' && !/^T\d/.test(t));
+      const tactic = tacticTag
+        ? tacticTag.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        : 'Other';
+      return { id: mid, name, tactic, kb_id: a.id };
+    }).filter(t => t.id);
+    return _kbTechniqueCache;
+  } catch {
+    return [];
+  }
+}
+
+const TACTIC_ORDER_AP = [
+  'Reconnaissance', 'Initial Access', 'Execution', 'Persistence',
+  'Privilege Escalation', 'Defense Evasion', 'Credential Access',
+  'Discovery', 'Lateral Movement', 'Collection',
+  'Command and Control', 'Exfiltration', 'Impact', 'Other',
+];
+
+function TechniqueInput({ value, mitreId, onChange, accent }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(value || '');
+  const [hints, setHints] = useState([]);
+  const ref = useRef(null);
+
+  useEffect(() => { setQuery(value || ''); }, [value]);
+
+  useEffect(() => { loadKBTechniques().then(setHints); }, []);
+
+  useEffect(() => {
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const matches = q.length > 0
+    ? hints.filter(t =>
+        t.name.toLowerCase().includes(q) ||
+        t.id.toLowerCase().includes(q) ||
+        t.tactic.toLowerCase().includes(q)
+      )
+    : hints;
+
+  // Group by tactic
+  const grouped = {};
+  for (const t of matches) {
+    if (!grouped[t.tactic]) grouped[t.tactic] = [];
+    grouped[t.tactic].push(t);
+  }
+  const tacticOrder = TACTIC_ORDER_AP.filter(tc => grouped[tc]);
+
+  const pick = t => {
+    setQuery(t.name);
+    onChange(t.name, t.id);
+    setOpen(false);
+  };
+
+  const kbEmpty = hints.length === 0;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div style={{ position: 'relative' }}>
+        <input
+          value={query}
+          onChange={e => { setQuery(e.target.value); onChange(e.target.value, mitreId); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          placeholder={kbEmpty ? 'Type technique name… (seed MITRE to KB for dropdown)' : 'Search technique…'}
+          style={{ width: '100%', background: '#07080b', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 32px 7px 10px', color: '#d0d4dc', fontSize: 12, outline: 'none', boxSizing: 'border-box' }}
+        />
+        {query && (
+          <button
+            onMouseDown={e => { e.preventDefault(); setQuery(''); onChange('', ''); }}
+            style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#505560', fontSize: 13, lineHeight: 1 }}
+          >×</button>
+        )}
+      </div>
+      {open && (hints.length > 0 || q) && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200,
+          background: '#0e1016', border: '1px solid #2a2d35', borderRadius: 6,
+          boxShadow: '0 12px 32px #00000099', maxHeight: 320, overflow: 'auto', marginTop: 2,
+        }}>
+          {kbEmpty && (
+            <div style={{ padding: '10px 12px', fontSize: 10, color: '#505560', fontFamily: 'JetBrains Mono' }}>
+              Seed MITRE ATT&CK to KB first to enable technique dropdown
+            </div>
+          )}
+          {tacticOrder.map(tactic => (
+            <div key={tactic}>
+              <div style={{ padding: '5px 10px 3px', fontSize: 8, fontWeight: 700, color: '#404550', textTransform: 'uppercase', letterSpacing: '0.1em', background: '#07080b', position: 'sticky', top: 0 }}>
+                {tactic}
+              </div>
+              {grouped[tactic].map(t => (
+                <button
+                  type="button"
+                  key={t.id}
+                  onMouseDown={e => { e.preventDefault(); pick(t); }}
+                  style={{ padding: '5px 10px 5px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: 'none', color: 'inherit', font: 'inherit', textAlign: 'left', width: '100%' }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#ffffff0a'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <span style={{ fontSize: 8, fontFamily: 'JetBrains Mono', color: accent, width: 60, flexShrink: 0 }}>{t.id}</span>
+                  <span style={{ fontSize: 11, color: '#c8cdd6' }}>{t.name}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+          {q && matches.length === 0 && (
+            <div style={{ padding: '10px 12px', fontSize: 10, color: '#505560' }}>No matches for "{query}"</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const NODE_TYPES = {
   external: { label: 'External',  color: '#808590', icon: 'globe'  },
@@ -10,17 +138,33 @@ const NODE_TYPES = {
   goal:     { label: 'Goal',      color: '#39d353', icon: 'target' },
 };
 
-const EMPTY_STEP = { node_type: 'host', label: '', sublabel: '', technique: '', mitre_id: '', notes: '' };
+const EMPTY_STEP = { host_id: null, node_type: 'host', label: '', sublabel: '', technique: '', mitre_id: '', notes: '' };
 
 // ── Step edit modal ───────────────────────────────────────────────────
-function StepModal({ step, isNew, onSave, onClose, accent }) {
+function StepModal({ step, isNew, onSave, onClose, accent, hosts = [] }) {
   const [form, setForm] = useState(step ? { ...step } : { ...EMPTY_STEP });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
   const inp = (k, placeholder, multiline) => {
     const s = { width: '100%', background: '#07080b', border: '1px solid #2a2d35', borderRadius: 5, padding: '7px 10px', color: '#d0d4dc', fontSize: 12, fontFamily: multiline ? 'JetBrains Mono' : 'inherit', outline: 'none', resize: multiline ? 'vertical' : 'none', boxSizing: 'border-box' };
     return multiline
       ? <textarea value={form[k]} onChange={e => set(k, e.target.value)} placeholder={placeholder} rows={3} style={s} />
       : <input value={form[k]} onChange={e => set(k, e.target.value)} placeholder={placeholder} style={s} />;
+  };
+
+  const pickHost = e => {
+    const hostId = e.target.value;
+    if (!hostId) { set('host_id', null); return; }
+    const host = hosts.find(h => h.id === hostId);
+    if (!host) return;
+    set('host_id', hostId);
+    set('label', host.hostname || host.ip || '');
+    set('sublabel', [host.os, host.role].filter(Boolean).join(' · ') || host.ip || '');
+    // Auto-set node type based on host role/hostname
+    const hn = (host.hostname || '').toLowerCase();
+    if (host.role === 'dc' || hn.includes('dc') || hn.includes('domain')) { set('node_type', 'dc'); }
+    else if (host.is_attacker) { set('node_type', 'external'); }
+    else { set('node_type', 'host'); }
   };
 
   return (
@@ -37,6 +181,27 @@ function StepModal({ step, isNew, onSave, onClose, accent }) {
         </div>
 
         <div style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Host picker */}
+          {hosts.length > 0 && (
+            <div>
+              <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>
+                Link to host <span style={{ color: '#353840', textTransform: 'none', letterSpacing: 0 }}>(auto-fills label & sublabel)</span>
+              </div>
+              <select
+                value={form.host_id || ""}
+                onChange={pickHost}
+                style={{ width: '100%', background: '#07080b', border: `1px solid ${form.host_id ? '#2a5a8a' : '#2a2d35'}`, borderRadius: 5, padding: '7px 10px', color: '#d0d4dc', fontSize: 12, fontFamily: 'JetBrains Mono', outline: 'none', cursor: 'pointer' }}
+              >
+                <option value="">— link to host (optional) —</option>
+                {hosts.map(h => (
+                  <option key={h.id} value={h.id}>
+                    {h.hostname || h.ip} {h.ip && h.hostname ? `(${h.ip})` : ''} {h.os ? `· ${h.os}` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Node type */}
           <div>
             <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Node type</div>
@@ -68,7 +233,12 @@ function StepModal({ step, isNew, onSave, onClose, accent }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>Technique (how accessed)</div>
-              {inp('technique', 'e.g. Kerberoasting')}
+              <TechniqueInput
+                value={form.technique}
+                mitreId={form.mitre_id}
+                accent={accent}
+                onChange={(name, id) => setForm(f => ({ ...f, technique: name, mitre_id: id ?? f.mitre_id }))}
+              />
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#505560', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>MITRE ID</div>
@@ -117,10 +287,10 @@ function NodeCard({ step, onEdit, onDelete, onMoveLeft, onMoveRight, canLeft, ca
   const t = NODE_TYPES[step.node_type] || NODE_TYPES.host;
 
   return (
-    <div onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
-      style={{ position: 'relative', width: 140, flexShrink: 0 }}>
-      <div style={{ background: hov ? '#13151c' : '#0e1016', border: `1px solid ${hov ? t.color + '66' : '#1e2029'}`, borderRadius: 10, padding: '12px 10px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, cursor: 'pointer', transition: 'all .15s', height: 110, justifyContent: 'center' }}
-        onClick={() => onEdit(step)}>
+    <button type="button" tabIndex={0} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEdit(step); } }}
+      style={{ position: 'relative', width: 140, flexShrink: 0, background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit' }}>
+      <div style={{ background: hov ? '#13151c' : '#0e1016', border: `1px solid ${hov ? t.color + '66' : '#1e2029'}`, borderRadius: 10, padding: '12px 10px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, cursor: 'pointer', transition: 'all .15s', height: 110, justifyContent: 'center', width: '100%' }}
+        >
         <div style={{ width: 34, height: 34, borderRadius: 8, background: t.color + '18', border: `1px solid ${t.color}44`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Icon name={t.icon} size={16} color={t.color} />
         </div>
@@ -158,7 +328,7 @@ function NodeCard({ step, onEdit, onDelete, onMoveLeft, onMoveRight, canLeft, ca
           </button>
         </div>
       )}
-    </div>
+    </button>
   );
 }
 
@@ -177,24 +347,140 @@ function PathNameEditor({ path, onSave }) {
 
   if (editing) return (
     <input ref={ref} value={val} onChange={e => setVal(e.target.value)}
-      onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }}
+      onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') { commit(); } if (e.key === 'Escape') { setEditing(false); } }}
       autoFocus
       style={{ background: '#07080b', border: '1px solid #2a2d35', borderRadius: 4, padding: '3px 8px', color: '#f0f2f6', fontSize: 14, fontWeight: 700, fontFamily: 'Space Grotesk', outline: 'none', width: 220 }} />
   );
 
   return (
-    <span style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk', cursor: 'text', display: 'flex', alignItems: 'center', gap: 6 }}
+    <button type="button" style={{ fontSize: 14, fontWeight: 700, color: '#f0f2f6', fontFamily: 'Space Grotesk', cursor: 'text', display: 'flex', alignItems: 'center', gap: 6, background: 'transparent', border: 'none', padding: 0 }}
       onClick={() => setEditing(true)} title="Click to rename">
       {path.name}
       <Icon name="edit" size={11} color="#404550" />
-    </span>
+    </button>
+  );
+}
+
+// ── Attack Path Graph ─────────────────────────────────────────────────
+function AttackPathGraph({ steps, accent }) {
+  if (!steps || steps.length === 0) {
+    return <div style={{ padding: 40, textAlign: 'center', color: '#404550', fontSize: 12 }}>No steps to visualize</div>;
+  }
+
+  const COLS = 4;
+  const NODE_W = 160, NODE_H = 80, GAP_X = 60, GAP_Y = 80;
+  const sorted = [...steps].sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
+
+  const positions = sorted.map((_, i) => {
+    const row = Math.floor(i / COLS);
+    const col = i % COLS;
+    return { x: col * (NODE_W + GAP_X) + 20, y: row * (NODE_H + GAP_Y) + 20 };
+  });
+
+  const totalRows = Math.ceil(sorted.length / COLS);
+  const svgW = Math.min(sorted.length, COLS) * (NODE_W + GAP_X) + 40;
+  const svgH = totalRows * (NODE_H + GAP_Y) + 40;
+
+  const R = 8; // corner radius for row-wrap paths
+
+  const edges = sorted.slice(0, -1).map((_, i) => {
+    const from = positions[i];
+    const to = positions[i + 1];
+    const fromRow = Math.floor(i / COLS);
+    const toRow = Math.floor((i + 1) / COLS);
+
+    if (fromRow === toRow) {
+      // Same row: exit right side → enter left side of next node
+      return {
+        d: `M ${from.x + NODE_W} ${from.y + NODE_H / 2} L ${to.x} ${to.y + NODE_H / 2}`,
+        key: i, isWrap: false,
+      };
+    } else {
+      // Row wrap: exit bottom-center of from-node → drop to mid-gap →
+      //           horizontal to above to-node → enter top-center of to-node
+      const fromBX = from.x + NODE_W / 2;
+      const fromBY = from.y + NODE_H;
+      const midY   = from.y + NODE_H + GAP_Y / 2;
+      const toBX   = to.x + NODE_W / 2;
+      const toBY   = to.y;
+      // Rounded corners via quadratic bezier at each bend
+      return {
+        d: [
+          `M ${fromBX} ${fromBY}`,
+          `L ${fromBX} ${midY - R}`,
+          `Q ${fromBX} ${midY} ${fromBX - R} ${midY}`,
+          `L ${toBX + R} ${midY}`,
+          `Q ${toBX} ${midY} ${toBX} ${midY + R}`,
+          `L ${toBX} ${toBY}`,
+        ].join(' '),
+        key: i, isWrap: true,
+      };
+    }
+  });
+
+  return (
+    <div style={{ overflowX: 'auto', overflowY: 'auto', padding: 16 }}>
+      <svg width={svgW} height={svgH} style={{ display: 'block' }}>
+        <defs>
+          <marker id="arrow-h" markerWidth="8" markerHeight="8" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#404550" />
+          </marker>
+          <marker id="arrow-v" markerWidth="8" markerHeight="8" refX="3" refY="8" orient="auto">
+            <path d="M0,0 L6,0 L3,8 z" fill="#404550" />
+          </marker>
+        </defs>
+
+        {edges.map(e => (
+          <path key={e.key} d={e.d} stroke="#2a2d35" strokeWidth="1.5" fill="none"
+            markerEnd={e.isWrap ? "url(#arrow-v)" : "url(#arrow-h)"} />
+        ))}
+
+        {sorted.map((step, i) => {
+          const pos = positions[i];
+          const nt = NODE_TYPES[step.node_type] || NODE_TYPES.host;
+          const color = nt.color;
+          return (
+            <g key={step.id} transform={`translate(${pos.x}, ${pos.y})`}>
+              <rect width={NODE_W} height={NODE_H} rx="8" ry="8"
+                fill="#0e1016" stroke={color} strokeWidth="1.5" />
+              <rect x={NODE_W - 22} y={0} width={22} height={18} rx="0" fill={color + '33'} />
+              <text x={NODE_W - 11} y={13} textAnchor="middle" fill={color} fontSize="10" fontFamily="JetBrains Mono">
+                {i + 1}
+              </text>
+              <text x={NODE_W / 2} y={32} textAnchor="middle" fill="#e0e4ec" fontSize="12" fontWeight="600" fontFamily="Space Grotesk">
+                {(step.label || nt.label).slice(0, 20)}
+              </text>
+              {step.sublabel && (
+                <text x={NODE_W / 2} y={46} textAnchor="middle" fill="#808590" fontSize="10" fontFamily="JetBrains Mono">
+                  {step.sublabel.slice(0, 22)}
+                </text>
+              )}
+              {step.technique && (
+                <text x={NODE_W / 2} y={62} textAnchor="middle" fill={color} fontSize="9" fontFamily="JetBrains Mono">
+                  {step.technique.slice(0, 24)}
+                </text>
+              )}
+              {step.mitre_id && (
+                <g>
+                  <rect x={8} y={NODE_H - 18} width={50} height={13} rx="3" fill={color + '22'} />
+                  <text x={33} y={NODE_H - 8} textAnchor="middle" fill={color} fontSize="9" fontFamily="JetBrains Mono">
+                    {step.mitre_id}
+                  </text>
+                </g>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
   );
 }
 
 // ── Main view ─────────────────────────────────────────────────────────
-export default function AttackPathView({ attackPaths, attackSteps, onCreatePath, onUpdatePath, onDeletePath, onCreateStep, onUpdateStep, onDeleteStep, selectedProject, accent }) {
+export default function AttackPathView({ attackPaths, attackSteps, onCreatePath, onUpdatePath, onDeletePath, onCreateStep, onUpdateStep, onDeleteStep, selectedProject, accent, hosts = [] }) {
   const [activePath, setActivePath] = useState(null);
   const [modal, setModal] = useState(null); // null | { mode:'new'|'edit', step }
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'graph'
   const chainRef = useRef();
 
   const paths = attackPaths.filter(p => p.pid === selectedProject);
@@ -205,7 +491,7 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
   // Auto-select first path when project or paths list changes
   useEffect(() => {
     if (!paths.length) { setActivePath(null); return; }
-    if (!activePath || !paths.find(p => p.id === activePath.id)) {
+    if (!activePath || !paths.some(p => p.id === activePath.id)) {
       setActivePath(paths[0]);
     }
   }, [selectedProject, paths.map(p => p.id).join()]);
@@ -218,11 +504,11 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
   const handleDeletePath = async (id) => {
     if (!confirm('Delete attack path along with all steps?')) return;
     await onDeletePath(id);
-    const remaining = paths.filter(p => p.id !== id);
-    setActivePath(remaining[0] || null);
+    setActivePath(paths.find(p => p.id !== id) || null);
   };
 
   const handleAddStep = async (form) => {
+    if (!activePath) return;
     const maxOrder = steps.length ? Math.max(...steps.map(s => s.step_order)) : -1;
     await onCreateStep({ ...form, path_id: activePath.id, pid: selectedProject, step_order: maxOrder + 1 });
     setModal(null);
@@ -230,6 +516,7 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
   };
 
   const handleEditStep = async (form) => {
+    if (!modal?.step) return;
     await onUpdateStep(modal.step.id, form);
     setModal(null);
   };
@@ -261,6 +548,16 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
         <Icon name="attackpath" size={16} color={accent} />
         <div style={{ fontSize: 11, color: '#404550', fontFamily: 'Space Grotesk', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Attack Path</div>
         <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', gap: 4, background: '#13151c', borderRadius: 6, padding: 2 }}>
+          {['list', 'graph'].map(m => (
+            <button key={m} onClick={() => setViewMode(m)}
+              style={{ padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 10, fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.08em',
+                background: viewMode === m ? accent + '22' : 'transparent',
+                color: viewMode === m ? accent : '#606570' }}>
+              {m}
+            </button>
+          ))}
+        </div>
         <button onClick={handleCreatePath}
           style={{ background: accent + '18', border: `1px solid ${accent}44`, borderRadius: 6, padding: '6px 14px', cursor: 'pointer', color: accent, fontSize: 11, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 }}>
           <Icon name="plus" size={11} color={accent} /> New path
@@ -294,17 +591,7 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
 
       {/* Main chain area */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {!activePath ? (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, color: '#404550' }}>
-            <Icon name="attackpath" size={42} color="#2a2d35" />
-            <div style={{ fontSize: 13, color: '#505560', fontFamily: 'Space Grotesk' }}>No attack paths</div>
-            <div style={{ fontSize: 11, color: '#404550', textAlign: 'center', maxWidth: 320 }}>Create a new path and add steps — from initial access to DA</div>
-            <button onClick={handleCreatePath}
-              style={{ background: accent + '18', border: `1px solid ${accent}44`, borderRadius: 6, padding: '8px 18px', cursor: 'pointer', color: accent, fontSize: 12, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Icon name="plus" size={12} color={accent} /> Create attack path
-            </button>
-          </div>
-        ) : (
+        {activePath ? (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {/* Path name + description */}
             <div style={{ padding: '16px 24px 12px', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
@@ -314,50 +601,57 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
               </span>
             </div>
 
-            {/* Chain */}
-            <div ref={chainRef} style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '20px 24px 24px', display: 'flex', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 0, minHeight: 140 }}>
-                {steps.length === 0 ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 16, color: '#404550' }}>
-                    <div style={{ fontSize: 11, color: '#353840', fontFamily: 'JetBrains Mono' }}>← add first step</div>
-                  </div>
-                ) : (
-                  steps.map((step, i) => (
-                    <div key={step.id} style={{ display: 'flex', alignItems: 'center' }}>
-                      {i > 0 && (
-                        <Connector
-                          technique={step.technique}
-                          mitre_id={step.mitre_id}
-                        />
-                      )}
-                      <NodeCard
-                        step={step}
-                        accent={accent}
-                        canLeft={i > 0}
-                        canRight={i < steps.length - 1}
-                        onEdit={s => setModal({ mode: 'edit', step: s })}
-                        onDelete={async id => { if (confirm('Delete step?')) await onDeleteStep(id); }}
-                        onMoveLeft={handleMoveLeft}
-                        onMoveRight={handleMoveRight}
-                      />
+            {/* Chain / Graph */}
+            {viewMode === 'list' && (
+              <div ref={chainRef} style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', padding: '20px 24px 24px', display: 'flex', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 0, minHeight: 140 }}>
+                  {steps.length === 0 ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 16, color: '#404550' }}>
+                      <div style={{ fontSize: 11, color: '#353840', fontFamily: 'JetBrains Mono' }}>← add first step</div>
                     </div>
-                  ))
-                )}
+                  ) : (
+                    steps.map((step, i) => (
+                      <div key={step.id} style={{ display: 'flex', alignItems: 'center' }}>
+                        {i > 0 && (
+                          <Connector
+                            technique={step.technique}
+                            mitre_id={step.mitre_id}
+                          />
+                        )}
+                        <NodeCard
+                          step={step}
+                          accent={accent}
+                          canLeft={i > 0}
+                          canRight={i < steps.length - 1}
+                          onEdit={s => setModal({ mode: 'edit', step: s })}
+                          onDelete={async id => { if (confirm('Delete step?')) await onDeleteStep(id); }}
+                          onMoveLeft={handleMoveLeft}
+                          onMoveRight={handleMoveRight}
+                        />
+                      </div>
+                    ))
+                  )}
 
-                {/* Add step button */}
-                {steps.length > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <Connector technique="" mitre_id="" />
-                  </div>
-                )}
-                <button onClick={() => setModal({ mode: 'new', step: null })}
-                  style={{ width: 56, height: 56, borderRadius: '50%', background: accent + '14', border: `1.5px dashed ${accent}55`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all .15s' }}
-                  onMouseEnter={e => { e.currentTarget.style.background = accent + '28'; e.currentTarget.style.borderColor = accent; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = accent + '14'; e.currentTarget.style.borderColor = accent + '55'; }}>
-                  <Icon name="plus" size={18} color={accent} />
-                </button>
+                  {/* Add step button */}
+                  {steps.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                      <Connector technique="" mitre_id="" />
+                    </div>
+                  )}
+                  <button onClick={() => setModal({ mode: 'new', step: null })}
+                    style={{ width: 56, height: 56, borderRadius: '50%', background: accent + '14', border: `1.5px dashed ${accent}55`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all .15s' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = accent + '28'; e.currentTarget.style.borderColor = accent; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = accent + '14'; e.currentTarget.style.borderColor = accent + '55'; }}>
+                    <Icon name="plus" size={18} color={accent} />
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
+            {viewMode === 'graph' && (
+              <div style={{ flex: 1, overflow: 'auto' }}>
+                <AttackPathGraph steps={steps} accent={accent} />
+              </div>
+            )}
 
             {/* Legend */}
             <div style={{ padding: '10px 24px', borderTop: '1px solid #13151c', display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
@@ -370,7 +664,17 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
               <div style={{ flex: 1 }} />
               <span style={{ fontSize: 9, color: '#353840', fontFamily: 'JetBrains Mono' }}>← → move steps</span>
             </div>
+          </div>        ) : (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, color: '#404550' }}>
+            <Icon name="attackpath" size={42} color="#2a2d35" />
+            <div style={{ fontSize: 13, color: '#505560', fontFamily: 'Space Grotesk' }}>No attack paths</div>
+            <div style={{ fontSize: 11, color: '#404550', textAlign: 'center', maxWidth: 320 }}>Create a new path and add steps — from initial access to DA</div>
+            <button onClick={handleCreatePath}
+              style={{ background: accent + '18', border: `1px solid ${accent}44`, borderRadius: 6, padding: '8px 18px', cursor: 'pointer', color: accent, fontSize: 12, fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Icon name="plus" size={12} color={accent} /> Create attack path
+            </button>
           </div>
+
         )}
       </div>
 
@@ -381,8 +685,65 @@ export default function AttackPathView({ attackPaths, attackSteps, onCreatePath,
           accent={accent}
           onClose={() => setModal(null)}
           onSave={modal.mode === 'new' ? handleAddStep : handleEditStep}
+          hosts={hosts.filter(h => h.pid === selectedProject)}
         />
       )}
     </div>
   );
 }
+
+TechniqueInput.propTypes = {
+  value: PropTypes.string,
+  mitreId: PropTypes.string,
+  onChange: PropTypes.func,
+  accent: PropTypes.string,
+};
+
+StepModal.propTypes = {
+  step: PropTypes.object,
+  isNew: PropTypes.bool,
+  onSave: PropTypes.func,
+  onClose: PropTypes.func,
+  accent: PropTypes.string,
+  hosts: PropTypes.array,
+};
+
+Connector.propTypes = {
+  technique: PropTypes.string,
+  mitre_id: PropTypes.string,
+};
+
+NodeCard.propTypes = {
+  step: PropTypes.object,
+  onEdit: PropTypes.func,
+  onDelete: PropTypes.func,
+  onMoveLeft: PropTypes.func,
+  onMoveRight: PropTypes.func,
+  canLeft: PropTypes.bool,
+  canRight: PropTypes.bool,
+  accent: PropTypes.string,
+};
+
+PathNameEditor.propTypes = {
+  path: PropTypes.object,
+  onSave: PropTypes.func,
+};
+
+AttackPathGraph.propTypes = {
+  steps: PropTypes.array,
+  accent: PropTypes.string,
+};
+
+AttackPathView.propTypes = {
+  attackPaths: PropTypes.array,
+  attackSteps: PropTypes.array,
+  onCreatePath: PropTypes.func,
+  onUpdatePath: PropTypes.func,
+  onDeletePath: PropTypes.func,
+  onCreateStep: PropTypes.func,
+  onUpdateStep: PropTypes.func,
+  onDeleteStep: PropTypes.func,
+  selectedProject: PropTypes.object,
+  accent: PropTypes.string,
+  hosts: PropTypes.array,
+};
